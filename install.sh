@@ -24,8 +24,9 @@ fi
 
 printf '%s\n' 'Установка Git и сертификатов...'
 export DEBIAN_FRONTEND=noninteractive
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 install -y --no-install-recommends git ca-certificates
+apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 update
+apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 \
+    install -y --no-install-recommends git ca-certificates
 
 printf '%s\n' 'Загрузка KalimeraWG...'
 git clone --depth 1 --branch "$REPOSITORY_BRANCH" "$REPOSITORY_URL" "$INSTALL_DIR"

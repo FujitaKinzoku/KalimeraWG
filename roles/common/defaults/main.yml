@@ -4,6 +4,7 @@ common_packages:
   - curl
   - jq
   - iproute2
+  - ipset
   - iptables
   - ufw
   - software-properties-common
