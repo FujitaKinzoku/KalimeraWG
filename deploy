@@ -7,11 +7,11 @@ controller_venv="${XDG_DATA_HOME:-$HOME/.local/share}/awg-iac/controller-venv"
 install_controller_packages() {
     packages=(python3 python3-venv openssh-client sshpass)
     if [[ "$(id -u)" -eq 0 ]]; then
-        apt-get -o DPkg::Lock::Timeout=600 update
-        apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+        apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 update
+        apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
     elif command -v sudo >/dev/null 2>&1; then
-        sudo apt-get -o DPkg::Lock::Timeout=600 update
-        sudo apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+        sudo apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 update
+        sudo apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
     else
         printf 'Установите пакеты управляющего окружения: %s\n' "${packages[*]}" >&2
         exit 1

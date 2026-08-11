@@ -6,6 +6,64 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Проверка системного DNS до изменения состояния серверов
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        probe_name={{ awg_apt_dns_probe_name | default('archive.ubuntu.com') | quote }}
+        deadline=$((SECONDS + {{ awg_apt_dns_wait_timeout_seconds | default(180) | int }}))
+
+        while ! /usr/bin/getent ahostsv4 "$probe_name" >/dev/null 2>&1; do
+          if (( SECONDS >= deadline )); then
+            printf 'Системный DNS не разрешает %s за допустимое время.\n' "$probe_name" >&2
+            printf '%s\n' 'Проверьте resolvectl status и вышестоящие DNS-серверы провайдера.' >&2
+            printf '%s' 'resolv.conf: ' >&2
+            /usr/bin/readlink -f /etc/resolv.conf >&2 || true
+            /usr/bin/systemctl is-active systemd-resolved.service >&2 || true
+            if command -v resolvectl >/dev/null 2>&1; then
+              /usr/bin/resolvectl status >&2 || true
+            fi
+            exit 68
+          fi
+          /usr/bin/sleep 5
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: awg_prepare_apt | default(true) | bool
+
+    - name: Поиск APT-источников с принудительным доверием
+      ansible.builtin.shell: |
+        /usr/bin/grep -RIlE \
+          'trusted[[:space:]]*=[[:space:]]*yes|^[[:space:]]*Trusted:[[:space:]]*yes' \
+          /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: awg_apt_trusted_sources
+      changed_when: false
+      when: awg_prepare_apt | default(true) | bool
+
+    - name: Предупреждение о принудительно доверенных APT-источниках
+      ansible.builtin.debug:
+        msg: >-
+          Обнаружены APT-источники с trusted=yes: {{ awg_apt_trusted_sources.stdout_lines | join(', ') }}.
+          Установщик не изменяет источники провайдера автоматически; проверьте их происхождение.
+      when:
+        - awg_prepare_apt | default(true) | bool
+        - awg_apt_trusted_sources.stdout_lines | default([]) | length > 0
+
+    - name: Настройка ограниченных повторных попыток APT
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/80-kalimerawg-retries
+        content: |
+          // Управляется KalimeraWG: устойчивость к кратковременным сетевым сбоям.
+          Acquire::Retries "5";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+        owner: root
+        group: root
+        mode: "0644"
+      when: awg_prepare_apt | default(true) | bool
+
     - name: Временная остановка таймеров автоматического обновления
       ansible.builtin.systemd_service:
         name: "{{ item }}"
