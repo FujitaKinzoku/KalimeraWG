@@ -92,33 +92,6 @@ chmod +x deploy
 
 </details>
 
-<details>
-<summary><b>Проверка приватного репозитория через fine-grained PAT</b></summary>
-
-До публичного выпуска однострочный загрузчик без авторизации недоступен. На
-чистом ENTRY сервере создайте fine-grained token с доступом только к
-`FujitaKinzoku/KalimeraWG` и разрешением **Contents: Read-only**, затем выполните:
-
-```bash
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 install -y git
-cd /root
-read -rsp 'GitHub token: ' GH_READ_TOKEN; echo
-export GH_READ_TOKEN
-git -c credential.helper= \
-  -c 'credential.helper=!f() { printf "%s\n" "username=FujitaKinzoku" "password=$GH_READ_TOKEN"; }; f' \
-  clone --branch main --single-branch \
-  https://github.com/FujitaKinzoku/KalimeraWG.git
-unset GH_READ_TOKEN
-cd /root/KalimeraWG
-chmod +x deploy
-./deploy
-```
-
-Токен не записывается в URL `origin`. После клонирования его можно отозвать.
-
-</details>
-
 Установщик на русском языке запросит адреса серверов, текущие и новые
 SSH-порты, начальные пароли, административный публичный SSH-ключ, режим
 RU-трафика, DNS и имя первого VPN-пользователя. Значение в квадратных скобках

@@ -67,10 +67,6 @@ chmod +x deploy
 ./deploy
 ```
 
-While the repository is private, clone it with a fine-grained token limited to
-this repository and **Contents: Read-only**. Do not embed the token in the
-remote URL.
-
 </details>
 
 The Russian-language installer asks for server addresses, current and managed
