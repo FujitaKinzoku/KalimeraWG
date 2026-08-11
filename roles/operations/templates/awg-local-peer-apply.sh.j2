@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || exit 1
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { echo 'Использование: awg-local-peer-apply' >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { echo 'Использование: awg-local-peer-apply' >&2; exit 2; }; echo 'Использование: awg-local-peer-apply'; exit 0 ;;
+    *) echo 'Использование: awg-local-peer-apply' >&2; exit 2 ;;
+esac
+shopt -s nullglob
+psk_file=""
+trap '[[ -z "$psk_file" ]] || rm -f "$psk_file"' EXIT
+
+validate_directory() {
+    local directory="$1" peer_file public_key preshared_key allowed_ip
+    declare -A public_keys=()
+    declare -A allowed_ips=()
+    for peer_file in "$directory"/*.peer; do
+        public_key="$(sed -n '1p' "$peer_file")"
+        preshared_key="$(sed -n '2p' "$peer_file")"
+        allowed_ip="$(sed -n '3p' "$peer_file")"
+        [[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || {
+            echo "Повреждён public key в ${peer_file##*/}." >&2
+            return 1
+        }
+        [[ "$preshared_key" =~ ^[A-Za-z0-9+/]{43}=$ ]] || {
+            echo "Повреждён PSK в ${peer_file##*/}." >&2
+            return 1
+        }
+        python3 - "$allowed_ip" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=True)
+except ValueError as error:
+    raise SystemExit(f"Некорректный AllowedIPs локального peer: {error}")
+if network.version != 4 or network.prefixlen != 32:
+    raise SystemExit("AllowedIPs локального peer должен быть одиночным IPv4 /32")
+PY
+        [[ -z ${public_keys[$public_key]:-} ]] || {
+            echo "Public key повторяется в локальных peer-файлах каталога $directory." >&2
+            return 1
+        }
+        [[ -z ${allowed_ips[$allowed_ip]:-} ]] || {
+            echo "AllowedIPs $allowed_ip повторяется в локальных peer-файлах каталога $directory." >&2
+            return 1
+        }
+        public_keys[$public_key]=1
+        allowed_ips[$allowed_ip]=1
+    done
+}
+
+apply_directory() {
+    local iface="$1" directory="$2" required="$3" peer_file public_key preshared_key allowed_ip
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        [[ "$required" == false ]] && return 0
+        echo "Обязательный интерфейс $iface отсутствует; peers не применены." >&2
+        return 1
+    fi
+for peer_file in "$directory"/*.peer; do
+    public_key="$(sed -n '1p' "$peer_file")"
+    preshared_key="$(sed -n '2p' "$peer_file")"
+    allowed_ip="$(sed -n '3p' "$peer_file")"
+    [[ "$public_key" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+    [[ "$preshared_key" =~ ^[A-Za-z0-9+/]{43}=$ ]]
+    [[ "$allowed_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/32$ ]]
+    psk_file="$(mktemp /run/awg-local-peer-psk.XXXXXX)"
+    chmod 0600 "$psk_file"
+    printf '%s\n' "$preshared_key" >"$psk_file"
+    awg set "$iface" peer "$public_key" \
+        preshared-key "$psk_file" allowed-ips "$allowed_ip"
+    rm -f "$psk_file"
+    psk_file=""
+done
+}
+validate_directory {{ awg_local_peer_dir | quote }}
+{% if entry_legacy_client_available | default(false) | bool %}
+validate_directory {{ awg_legacy_local_peer_dir | quote }}
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+validate_directory {{ awg_mobile_local_peer_dir | quote }}
+{% endif %}
+apply_directory {{ entry_client_interface | quote }} {{ awg_local_peer_dir | quote }} true
+{% if entry_legacy_client_available | default(false) | bool %}
+legacy_required=false
+if systemctl is-enabled --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
+    legacy_required=true
+fi
+apply_directory {{ entry_legacy_client_interface | quote }} {{ awg_legacy_local_peer_dir | quote }} "$legacy_required"
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+mobile_required=false
+if systemctl is-enabled --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+    mobile_required=true
+fi
+apply_directory {{ entry_mobile_client_interface | quote }} {{ awg_mobile_local_peer_dir | quote }} "$mobile_required"
+{% endif %}

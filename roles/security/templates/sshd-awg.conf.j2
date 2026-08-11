@@ -1,0 +1,17 @@
+# Управляется Ansible. Private keys должны находиться за пределами репозитория.
+Port {{ ssh_listen_port }}
+{% if (security_allow_ssh_port_change | bool) and ((ansible_port | default(22) | int) != (ssh_listen_port | int)) %}
+# Временный listener двухэтапного перехода. После проверки обновите ansible_port.
+Port {{ ansible_port | default(22) }}
+{% endif %}
+PasswordAuthentication {{ ssh_password_authentication | ternary('yes', 'no') }}
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin {{ ssh_root_login }}
+PermitEmptyPasswords no
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+GatewayPorts no
+MaxAuthTries 3
+LoginGraceTime 30

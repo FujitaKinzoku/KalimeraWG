@@ -1,0 +1,143 @@
+---
+- name: Подключение PPA-репозитория AmneziaWG
+  ansible.builtin.apt_repository:
+    repo: "{{ amneziawg_ppa }}"
+    state: present
+    update_cache: true
+
+- name: Проверка политики выбора пакетов AmneziaWG
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_package_version_mode in ['pinned', 'candidate']
+      - awg_package_version_mode == 'candidate' or awg_package_versions is defined
+    fail_msg: "Включите автоматический выбор либо укажите проверенные версии пакетов AmneziaWG"
+
+- name: Установка средств сборки для текущего ядра
+  ansible.builtin.apt:
+    name: "{{ amneziawg_build_packages }}"
+    state: present
+    update_cache: false
+    lock_timeout: 600
+
+- name: Проверка ранее закреплённого списка версий AmneziaWG
+  ansible.builtin.stat:
+    path: "{{ amneziawg_package_lock_path }}"
+  register: amneziawg_existing_lock
+  when: awg_package_version_mode == 'candidate'
+
+- name: Чтение ранее закреплённого списка версий AmneziaWG
+  ansible.builtin.slurp:
+    path: "{{ amneziawg_package_lock_path }}"
+  register: amneziawg_existing_lock_content
+  when:
+    - awg_package_version_mode == 'candidate'
+    - amneziawg_existing_lock.stat.exists
+
+- name: Выбор воспроизводимого списка версий AmneziaWG
+  ansible.builtin.set_fact:
+    amneziawg_resolved_packages: >-
+      {{ local_lock if local_lock | length == amneziawg_package_names | length
+         else entry_lock }}
+  vars:
+    local_lock: >-
+      {{ ((amneziawg_existing_lock_content.content | default('') | b64decode).splitlines() |
+          select('match', '^(amneziawg|amneziawg-dkms|amneziawg-tools)=') | list) }}
+    entry_lock: >-
+      {{ (hostvars[groups['entry'][0]].amneziawg_resolved_packages | default([]))
+         if awg_node_role == 'exit' and groups['entry'] | default([]) | length == 1
+         else [] }}
+  when: awg_package_version_mode == 'candidate'
+
+- name: Определение необходимости обращения к PPA AmneziaWG
+  ansible.builtin.set_fact:
+    amneziawg_candidate_lookup_required: >-
+      {{ amneziawg_resolved_packages | default([]) | length == 0 }}
+  when: awg_package_version_mode == 'candidate'
+
+- name: Получение опубликованных в PPA версий пакетов
+  ansible.builtin.command:
+    argv: [/usr/bin/apt-cache, madison, "{{ item }}"]
+  loop: "{{ amneziawg_package_names }}"
+  register: amneziawg_candidate_policy
+  changed_when: false
+  when:
+    - awg_package_version_mode == 'candidate'
+    - amneziawg_candidate_lookup_required | bool
+
+- name: Формирование точного списка версий пакетов для установки
+  ansible.builtin.set_fact:
+    amneziawg_resolved_packages: >-
+      {{ (amneziawg_resolved_packages | default([])) +
+         [item.item ~ '=' ~
+          (((item.stdout_lines |
+             select('search', '\\|') |
+             first).split('|')[1]) | trim)] }}
+  loop: "{{ amneziawg_candidate_policy.results | default([]) }}"
+  when:
+    - awg_package_version_mode == 'candidate'
+    - amneziawg_candidate_lookup_required | bool
+    - item.stdout_lines | select('search', '\\|') | list | length > 0
+
+- name: Проверка доступности всех необходимых пакетов
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - amneziawg_resolved_packages | default([]) | length == amneziawg_package_names | length
+    fail_msg: "Подключённый PPA AmneziaWG не предоставляет все необходимые пакеты"
+  when: awg_package_version_mode == 'candidate'
+
+- name: Выбор проверенных закреплённых версий пакетов
+  ansible.builtin.set_fact:
+    amneziawg_resolved_packages:
+      - "amneziawg={{ awg_package_versions.amneziawg }}"
+      - "amneziawg-dkms={{ awg_package_versions.amneziawg_dkms }}"
+      - "amneziawg-tools={{ awg_package_versions.amneziawg_tools }}"
+  when: awg_package_version_mode == 'pinned'
+
+- name: Установка выбранных версий пакетов AmneziaWG
+  ansible.builtin.apt:
+    name: "{{ amneziawg_resolved_packages }}"
+    state: present
+    allow_downgrade: true
+    update_cache: false
+    lock_timeout: 600
+
+- name: Создание каталога локального списка версий
+  ansible.builtin.file:
+    path: "{{ amneziawg_package_lock_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Запись установленных версий AmneziaWG
+  ansible.builtin.copy:
+    dest: "{{ amneziawg_package_lock_path }}"
+    content: "{{ amneziawg_resolved_packages | sort | join('\n') }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Сборка DKMS-модулей для текущего ядра
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/dkms
+      - autoinstall
+      - -k
+      - "{{ ansible_kernel }}"
+  register: amneziawg_dkms_autoinstall
+  changed_when: amneziawg_dkms_autoinstall.stdout | trim | length > 0
+
+- name: Обновление зависимостей модулей текущего ядра
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/depmod
+      - -a
+      - "{{ ansible_kernel }}"
+  changed_when: false
+
+- name: Проверка доступности модуля ядра AmneziaWG
+  community.general.modprobe:
+    name: amneziawg
+    state: present

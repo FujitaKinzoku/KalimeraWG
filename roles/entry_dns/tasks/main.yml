@@ -1,0 +1,227 @@
+---
+- name: Проверка постоянного локального переопределения DoT
+  ansible.builtin.stat:
+    path: "{{ entry_dns_dot_override_path }}"
+  register: entry_dns_dot_override_file
+
+- name: Загрузка постоянного локального переопределения DoT
+  ansible.builtin.slurp:
+    path: "{{ entry_dns_dot_override_path }}"
+  register: entry_dns_dot_override_content
+  when: entry_dns_dot_override_file.stat.exists
+
+- name: Разбор постоянного локального переопределения DoT
+  ansible.builtin.set_fact:
+    entry_dns_runtime_dot_override: >-
+      {{ (entry_dns_dot_override_content.content | b64decode | from_json)
+         if entry_dns_dot_override_file.stat.exists else {} }}
+
+- name: Проверка структуры локального переопределения DoT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_dns_runtime_dot_override is mapping
+      - >-
+        entry_dns_runtime_dot_override | length == 0 or
+        (entry_dns_runtime_dot_override.upstreams | default([]) is sequence and
+         entry_dns_runtime_dot_override.upstreams | default([]) | length >= 1)
+    fail_msg: "Локальное переопределение DoT повреждено"
+
+- name: Проверка upstream-серверов локального переопределения DoT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - item is mapping
+      - item.address | default('') | ansible.utils.ipv4
+      - item.tls_name | default('') is match('^[A-Za-z0-9.-]+$')
+    fail_msg: "Локальное переопределение DoT содержит некорректный upstream"
+  loop: "{{ entry_dns_runtime_dot_override.upstreams | default([]) }}"
+
+- name: Выбор эффективных upstream-серверов DoT
+  ansible.builtin.set_fact:
+    entry_dns_effective_dot_upstreams: >-
+      {{ entry_dns_runtime_dot_override.upstreams
+         if entry_dns_runtime_dot_override | length > 0
+         else entry_dot_upstreams }}
+
+- name: "Загрузка: DNS ENTRY сервера — этап 1"
+  ansible.builtin.set_fact:
+    entry_force_ru_domains: "{{ lookup('ansible.builtin.file', entry_ru_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
+    entry_force_exit_domains: "{{ lookup('ansible.builtin.file', entry_se_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
+    entry_direct_domains: "{{ lookup('ansible.builtin.file', entry_entry_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
+  when: entry_domain_files_enabled | bool
+
+- name: "Проверка: DNS ENTRY сервера — этап 2"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_client_listen_address | length > 0
+      - entry_dns_default_port | int == 5353
+      - entry_dns_ru_port | int == 5354
+      - entry_dns_effective_dot_upstreams | length >= 1
+    fail_msg: "Для DNS ENTRY требуются проверенные listeners, upstream-серверы и доменные политики"
+
+- name: "Установка: DNS ENTRY сервера — этап 3"
+  ansible.builtin.apt:
+    name:
+      - dnsmasq
+      - unbound
+      - unbound-anchor
+    state: present
+    lock_timeout: 600
+
+- name: "Отключение: DNS ENTRY сервера — этап 4"
+  ansible.builtin.systemd_service:
+    name: unbound-resolvconf.service
+    enabled: false
+    state: stopped
+    masked: true
+
+- name: "Очистка: DNS ENTRY сервера — этап 5"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, unbound-resolvconf.service]
+  changed_when: false
+  failed_when: false
+
+- name: "Создание: DNS ENTRY сервера — этап 6"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ entry_dns_candidate_root }}"
+    - "{{ entry_dns_candidate_root }}/dnsmasq.d"
+    - "{{ entry_dns_candidate_root }}/unbound"
+  changed_when: false
+
+- name: "Создание: DNS ENTRY сервера — этап 7"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ entry_dnsmasq_config_dir }}"
+    - "{{ entry_unbound_config_dir }}"
+    - /etc/systemd/system/dnsmasq.service.d
+
+- name: "Формирование: DNS ENTRY сервера — этап 8"
+  ansible.builtin.template:
+    src: dnsmasq.conf.j2
+    dest: "{{ entry_dns_candidate_root }}/dnsmasq.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  changed_when: false
+
+- name: "Формирование: DNS ENTRY сервера — этап 9"
+  ansible.builtin.template:
+    src: "{{ item.template }}"
+    dest: "{{ entry_dns_candidate_root }}/dnsmasq.d/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ entry_dnsmasq_managed_files }}"
+  changed_when: false
+
+- name: "Формирование: DNS ENTRY сервера — этап 10"
+  ansible.builtin.template:
+    src: 90-awg-dot.conf.j2
+    dest: "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  changed_when: false
+
+- name: "Проверка: DNS ENTRY сервера — этап 11"
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/dnsmasq
+      - --test
+      - "--conf-file={{ entry_dns_candidate_root }}/dnsmasq.conf"
+  changed_when: false
+
+- name: "Проверка: DNS ENTRY сервера — этап 12"
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/unbound-checkconf
+      - "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+  changed_when: false
+
+- name: "Установка: DNS ENTRY сервера — этап 13"
+  ansible.builtin.include_tasks: manage_file.yml
+  loop: "{{ entry_dnsmasq_managed_files }}"
+  loop_control:
+    loop_var: entry_dns_file
+    label: "{{ entry_dns_file.name }}"
+  vars:
+    entry_dns_source_path: "{{ entry_dns_candidate_root }}/dnsmasq.d/{{ entry_dns_file.name }}"
+    entry_dns_destination_path: "{{ entry_dnsmasq_config_dir }}/{{ entry_dns_file.name }}"
+    entry_dns_backup_dir: "{{ entry_dns_backup_root }}/dnsmasq"
+    entry_dns_service_to_restart: dnsmasq.service
+
+- name: "Установка: DNS ENTRY сервера — этап 14"
+  ansible.builtin.include_tasks: manage_file.yml
+  vars:
+    entry_dns_file:
+      name: 90-awg-dot.conf
+    entry_dns_source_path: "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+    entry_dns_destination_path: "{{ entry_unbound_config_dir }}/90-awg-dot.conf"
+    entry_dns_backup_dir: "{{ entry_dns_backup_root }}/unbound"
+    entry_dns_service_to_restart: unbound.service
+
+- name: "Установка: DNS ENTRY сервера — этап 15"
+  ansible.builtin.template:
+    src: dnsmasq-dependencies.conf.j2
+    dest: /etc/systemd/system/dnsmasq.service.d/50-awg-managed.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Перезагрузить модули systemd для DNS
+    - Перезапустить dnsmasq
+
+- name: "Удаление: DNS ENTRY сервера — этап 16"
+  ansible.builtin.file:
+    path: "{{ entry_dns_candidate_root }}"
+    state: absent
+  changed_when: false
+
+- name: "Проверка: DNS ENTRY сервера — этап 17"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ss
+      - -H
+      - -ltn
+      - "sport = :{{ entry_dns_default_port }}"
+  register: entry_dns_unbound_listener
+  changed_when: false
+
+- name: "Планирование: DNS ENTRY сервера — этап 18"
+  ansible.builtin.command: /usr/bin/true
+  changed_when: true
+  when: entry_dns_unbound_listener.stdout | trim | length == 0
+  notify: Перезапустить Unbound
+
+- name: "Применение: DNS ENTRY сервера — этап 19"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Проверка: DNS ENTRY сервера — этап 20"
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ entry_dns_default_port }}"
+    state: started
+    timeout: 15
+
+- name: "Включение: DNS ENTRY сервера — этап 21"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - unbound.service
+    - dnsmasq.service

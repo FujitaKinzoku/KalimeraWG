@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+command -v jq >/dev/null; command -v sing-box >/dev/null
+
+readonly config=/etc/sing-box/config.json
+readonly override={{ sing_box_runtime_override_path | quote }}
+readonly routing={{ entry_routing_script_path | quote }}
+readonly proxy_if={{ entry_ru_proxy_interface | quote }}
+readonly disabled_flag={{ entry_ru_proxy_disabled_flag | quote }}
+readonly manual_disabled_flag={{ entry_ru_proxy_manual_disabled_flag | quote }}
+readonly capability={{ entry_ru_proxy_capability_path | quote }}
+readonly udp_state={{ entry_ru_proxy_udp_mode_path | quote }}
+readonly watchdog_timer={{ entry_ru_proxy_watch_timer_name | quote }}
+readonly watchdog_service={{ entry_ru_proxy_watch_service_name | quote }}
+readonly watchdog_state={{ entry_ru_proxy_watch_state_dir | quote }}
+[[ -f "$config" ]] || { echo 'Прокси не был настроен во время deploy.' >&2; exit 1; }
+
+if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
+    [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
+    echo 'Использование: ru-proxy-set [reset]'
+    exit 0
+fi
+if [[ "${1:-}" == reset ]]; then
+    [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
+    rm -f "$override"
+    echo 'Локальное переопределение удалено. Выполните deploy --resume для возврата к inventory.'
+    exit 0
+fi
+[[ $# -eq 0 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
+
+read -e -r -p 'Адрес SOCKS5: ' host
+read -e -r -p 'Порт SOCKS5: ' port
+read -e -r -p 'Имя пользователя SOCKS5 (пусто, если не требуется): ' username
+read -r -s -p 'Пароль SOCKS5 (ввод скрыт): ' password; echo
+[[ "$host" =~ ^[A-Za-z0-9.-]+$ && "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]] || { echo 'Некорректный endpoint' >&2; exit 2; }
+if { [[ -n "$username" ]] && [[ -z "$password" ]]; } || { [[ -z "$username" ]] && [[ -n "$password" ]]; }; then
+    echo 'Имя пользователя и пароль должны быть одновременно заданы либо оставлены пустыми' >&2
+    exit 2
+fi
+
+install -d -m 0700 /root/config-backups/entry/sing-box
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+config_backup="/root/config-backups/entry/sing-box/config.json.$timestamp"
+override_backup="/root/config-backups/entry/sing-box/ru-proxy-override.json.$timestamp"
+udp_backup="/root/config-backups/entry/sing-box/proxy-udp.mode.$timestamp"
+cp -a "$config" "$config_backup"
+[[ ! -e "$override" ]] || cp -a "$override" "$override_backup"
+[[ ! -e "$udp_state" ]] || cp -a "$udp_state" "$udp_backup"
+
+tmp=$(mktemp /run/sing-box.XXXXXX)
+override_tmp=$(mktemp /run/ru-proxy-override.XXXXXX)
+mode_tmp=$(mktemp /run/ru-proxy-mode.XXXXXX)
+user_file=$(mktemp /run/sing-box-user.XXXXXX)
+password_file=$(mktemp /run/sing-box-password.XXXXXX)
+committed=false
+watchdog_paused=false
+watchdog_was_active=false
+disabled_was_present=false
+manual_disabled_was_present=false
+[[ ! -e "$disabled_flag" ]] || disabled_was_present=true
+[[ ! -e "$manual_disabled_flag" ]] || manual_disabled_was_present=true
+
+restore_runtime_flags() {
+    if [[ "$disabled_was_present" == true ]]; then
+        install -d -m 0755 "$(dirname "$disabled_flag")"
+        install -m 0644 /dev/null "$disabled_flag"
+    else
+        rm -f "$disabled_flag"
+    fi
+    if [[ "$manual_disabled_was_present" == true ]]; then
+        install -d -m 0755 "$(dirname "$manual_disabled_flag")"
+        install -m 0644 /dev/null "$manual_disabled_flag"
+    else
+        rm -f "$manual_disabled_flag"
+    fi
+}
+
+resume_watchdog() {
+    if [[ "$watchdog_paused" == true && "$watchdog_was_active" == true ]]; then
+        systemctl start "$watchdog_timer" >/dev/null 2>&1 || true
+    fi
+}
+
+cleanup() {
+    rc=$?
+    if (( rc != 0 )) && [[ "$committed" == true ]]; then
+        install -m 0600 "$config_backup" "$config" || true
+        if [[ -f "$override_backup" ]]; then install -m 0600 "$override_backup" "$override" || true; else rm -f "$override"; fi
+        if [[ -f "$udp_backup" ]]; then install -m 0644 "$udp_backup" "$udp_state" || true; else rm -f "$udp_state"; fi
+        restore_runtime_flags || true
+        systemctl restart sing-box.service >/dev/null 2>&1 || true
+        "$routing" apply >/dev/null 2>&1 || true
+        {{ awg_dns_policy_path | quote }} >/dev/null 2>&1 || true
+        echo 'Неудачное изменение прокси автоматически отменено.' >&2
+    fi
+    resume_watchdog
+    rm -f "$tmp" "$override_tmp" "$mode_tmp" "$user_file" "$password_file"
+    return "$rc"
+}
+trap cleanup EXIT
+chmod 0600 "$override_tmp" "$mode_tmp" "$user_file" "$password_file"
+printf '%s' "$username" >"$user_file"; printf '%s' "$password" >"$password_file"
+
+if [[ -n "$username" ]]; then
+    jq --arg h "$host" --argjson p "$port" --rawfile u "$user_file" --rawfile pw "$password_file" \
+      '(.outbounds[]|select(.tag=="ru-socks")) |= (.server=$h|.server_port=$p|.username=$u|.password=$pw)' "$config" >"$tmp"
+    jq -n --arg h "$host" --argjson p "$port" --rawfile u "$user_file" --rawfile pw "$password_file" \
+      '{server:$h,server_port:$p,username:$u,password:$pw}' >"$override_tmp"
+else
+    jq --arg h "$host" --argjson p "$port" \
+      '(.outbounds[]|select(.tag=="ru-socks")) |= (.server=$h|.server_port=$p|del(.username,.password))' "$config" >"$tmp"
+    jq -n --arg h "$host" --argjson p "$port" \
+      '{server:$h,server_port:$p,username:"",password:""}' >"$override_tmp"
+fi
+
+sing-box check --config "$tmp" >/dev/null
+# Ошибка подключения или авторизации запрещает изменение. Только явный ответ
+# SOCKS5 «UDP не поддерживается» безопасно выбирает direct для RU UDP.
+"$capability" --config "$tmp" --state "$mode_tmp" --update-state \
+  --tcp-probe-url {{ entry_ru_proxy_probe_url | quote }} \
+  --expected-ip {{ entry_ru_proxy_expected_ip | default('') | quote }}
+
+install -d -m 0700 "$(dirname "$override")"
+committed=true
+install -m 0600 "$tmp" "$config"
+install -m 0600 "$override_tmp" "$override"
+install -d -m 0755 "$(dirname "$udp_state")"
+install -m 0644 "$mode_tmp" "$udp_state"
+
+if systemctl is-active --quiet sing-box.service; then
+    if systemctl is-active --quiet "$watchdog_timer"; then
+        watchdog_was_active=true
+    fi
+    systemctl stop "$watchdog_timer" "$watchdog_service" >/dev/null 2>&1 || true
+    watchdog_paused=true
+    systemctl restart sing-box.service
+    for _ in {1..30}; do
+        ip link show "$proxy_if" >/dev/null 2>&1 && break
+        sleep 1
+    done
+    ip link show "$proxy_if" >/dev/null 2>&1 || {
+        echo "TUN-интерфейс $proxy_if не появился после перезапуска sing-box." >&2
+        exit 1
+    }
+    install -d -m 0755 "$watchdog_state"
+    printf '0\n' >"$watchdog_state/success.count"
+    printf '0\n' >"$watchdog_state/failure.count"
+    rm -f "$disabled_flag" "$manual_disabled_flag"
+    "$routing" apply
+    {{ awg_dns_policy_path | quote }}
+    ip -4 route show table {{ entry_ru_table }} default | grep -Fq "dev $proxy_if" || {
+        echo 'Маршрут RU-прокси в таблице 200 не восстановлен.' >&2
+        exit 1
+    }
+    echo 'Прокси проверен, перезапущен, а маршрутизация восстановлена.'
+else
+    echo 'Параметры прокси проверены и сохранены; прокси остаётся выключенным.'
+fi
+committed=false

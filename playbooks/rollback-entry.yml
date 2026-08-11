@@ -1,0 +1,177 @@
+---
+- name: Откат одного компонента ENTRY из разрешённой резервной копии
+  hosts: entry
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    entry_rollback_components:
+      awg0:
+        prefix: /root/config-backups/entry/awg/awg0/
+        destination: /etc/amnezia/amneziawg/awg0.conf
+        validator: awg
+        service: awg-quick@awg0.service
+        secret: true
+      awg1:
+        prefix: /root/config-backups/entry/awg/awg1/
+        destination: /etc/amnezia/amneziawg/awg1.conf
+        validator: awg
+        service: awg-quick@awg1.service
+        secret: true
+      awg3:
+        prefix: /root/config-backups/entry/awg3/
+        destination: /etc/amnezia/amneziawg-v3/awg3.conf
+        validator: awg3
+        service: awg3-transit.service
+        secret: true
+      sing_box:
+        prefix: /root/config-backups/entry/sing-box/
+        destination: /etc/sing-box/config.json
+        validator: sing-box
+        service: sing-box.service
+        secret: true
+      dnsmasq:
+        prefix: /root/config-backups/entry/dns/dnsmasq/
+        destination: "/etc/dnsmasq.d/{{ rollback_dnsmasq_target | default('INVALID') }}"
+        validator: dnsmasq
+        service: dnsmasq.service
+        secret: false
+      unbound:
+        prefix: /root/config-backups/entry/dns/unbound/
+        destination: /etc/unbound/unbound.conf.d/90-awg-dot.conf
+        validator: unbound
+        service: unbound.service
+        secret: false
+
+  pre_tasks:
+    - name: Проверка явно поддерживаемого компонента rollback ENTRY
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_component is defined
+          - rollback_component in entry_rollback_components
+          - rollback_file is defined
+        fail_msg: >-
+          Задайте rollback_component как awg0, awg1, awg3, sing_box, dnsmasq
+          или unbound и укажите один явный rollback_file.
+
+    - name: Выбор проверенной политики rollback ENTRY
+      ansible.builtin.set_fact:
+        entry_rollback: "{{ entry_rollback_components[rollback_component] }}"
+
+    - name: Проверка явно заданного управляемого файла dnsmasq
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_dnsmasq_target is defined
+          - rollback_dnsmasq_target in entry_dnsmasq_managed_names
+        fail_msg: "Задайте rollback_dnsmasq_target как имя одного управляемого файла dnsmasq"
+      vars:
+        entry_dnsmasq_managed_names:
+          - 50-awg-base.conf
+          - 60-domain-policy.conf
+          - 61-ru-split-dns.conf
+          - 62-force-entry.conf
+      when: rollback_component == 'dnsmasq'
+
+    - name: Проверка разрешённой границы backup ENTRY
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_file.startswith(entry_rollback.prefix)
+          - "'..' not in rollback_file"
+          - rollback_file | basename | length > 0
+        fail_msg: "rollback_file находится вне разрешённого каталога backup компонента"
+
+    - name: Проверка источника rollback ENTRY
+      ansible.builtin.stat:
+        path: "{{ rollback_file }}"
+      register: entry_rollback_source
+      no_log: "{{ entry_rollback.secret }}"
+
+    - name: Проверка обычного rollback-файла ENTRY с владельцем root
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - entry_rollback_source.stat.exists
+          - entry_rollback_source.stat.isreg
+          - entry_rollback_source.stat.pw_name == 'root'
+        fail_msg: "Разрешённый rollback-файл ENTRY отсутствует либо имеет неожиданного владельца"
+      no_log: "{{ entry_rollback.secret }}"
+
+  tasks:
+    - name: Проверка AWG-кандидата rollback
+      ansible.builtin.command:
+        argv: [/usr/bin/awg-quick, strip, "{{ rollback_file }}"]
+      changed_when: false
+      no_log: true
+      when: entry_rollback.validator == 'awg'
+
+    - name: Проверка кандидата AWG 3+ перед rollback
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg3-validate-config, "{{ rollback_file }}"]
+      changed_when: false
+      no_log: true
+      when: entry_rollback.validator == 'awg3'
+
+    - name: Проверка кандидата rollback sing-box
+      ansible.builtin.command:
+        argv: [/usr/bin/sing-box, check, --config, "{{ rollback_file }}"]
+      changed_when: false
+      no_log: true
+      when: entry_rollback.validator == 'sing-box'
+
+    - name: Проверка кандидата rollback dnsmasq
+      ansible.builtin.command:
+        argv: [/usr/sbin/dnsmasq, --test, "--conf-file={{ rollback_file }}"]
+      changed_when: false
+      when: entry_rollback.validator == 'dnsmasq'
+
+    - name: Проверка кандидата rollback Unbound
+      ansible.builtin.command:
+        argv: [/usr/sbin/unbound-checkconf, "{{ rollback_file }}"]
+      changed_when: false
+      when: entry_rollback.validator == 'unbound'
+
+    - name: Проверка действующего компонента ENTRY
+      ansible.builtin.stat:
+        path: "{{ entry_rollback.destination }}"
+      register: entry_rollback_current
+      no_log: "{{ entry_rollback.secret }}"
+
+    - name: Сохранение действующего компонента ENTRY перед rollback
+      ansible.builtin.copy:
+        src: "{{ entry_rollback.destination }}"
+        dest: >-
+          {{ entry_rollback.prefix }}pre-rollback-{{ entry_rollback.destination | basename }}.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: entry_rollback_current.stat.exists
+      no_log: "{{ entry_rollback.secret }}"
+
+    - name: Восстановление проверенного компонента ENTRY
+      ansible.builtin.copy:
+        src: "{{ rollback_file }}"
+        dest: "{{ entry_rollback.destination }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ entry_rollback.secret | ternary('0600', '0644') }}"
+      no_log: "{{ entry_rollback.secret }}"
+
+    - name: Перезапуск восстановленного компонента ENTRY
+      ansible.builtin.systemd_service:
+        name: "{{ entry_rollback.service }}"
+        state: restarted
+
+    - name: Повторное применение маршрутизации ENTRY после rollback сетевого компонента
+      ansible.builtin.systemd_service:
+        name: awg-entry-routing.service
+        state: restarted
+      when: rollback_component in ['awg0', 'awg1', 'awg3', 'sing_box']
+
+    - name: Проверка состояния ENTRY после rollback
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-health, --strict]
+      changed_when: false

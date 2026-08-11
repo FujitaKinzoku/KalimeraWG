@@ -1,0 +1,11 @@
+---
+common_packages:
+  - ca-certificates
+  - curl
+  - jq
+  - iproute2
+  - iptables
+  - ufw
+  - software-properties-common
+awg_backup_root: /root/config-backups
+awg_enable_fail2ban: true

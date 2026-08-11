@@ -1,0 +1,169 @@
+---
+- name: "Проверка прежней конфигурации межсерверного AWG 2"
+  ansible.builtin.stat:
+    path: "{{ entry_awg_config_dir }}/{{ entry_legacy_exit_interface }}.conf"
+  register: entry_legacy_transit_config
+  no_log: true
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Остановка прежнего межсерверного AWG 2"
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ entry_legacy_exit_interface }}.service"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Создание каталога резервной копии прежнего межсерверного AWG 2"
+  ansible.builtin.file:
+    path: "{{ entry_awg_backup_root }}/{{ entry_legacy_exit_interface }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - awg3_transit_enabled | default(false) | bool
+    - entry_legacy_transit_config.stat.exists
+
+- name: "Резервное копирование прежнего межсерверного AWG 2"
+  ansible.builtin.copy:
+    src: "{{ entry_awg_config_dir }}/{{ entry_legacy_exit_interface }}.conf"
+    dest: >-
+      {{ entry_awg_backup_root }}/{{ entry_legacy_exit_interface }}/{{ entry_legacy_exit_interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - awg3_transit_enabled | default(false) | bool
+    - entry_legacy_transit_config.stat.exists
+
+- name: "Удаление прежней активной конфигурации межсерверного AWG 2"
+  ansible.builtin.file:
+    path: "{{ entry_awg_config_dir }}/{{ entry_legacy_exit_interface }}.conf"
+    state: absent
+  no_log: true
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Проверка: ENTRY сервер — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - vault_awg_entry_private_key is defined
+      - vault_awg_entry_exit_private_key is defined
+      - vault_awg_entry_exit_peer_public_key is defined
+      - vault_awg_entry_exit_psk is defined
+      - vault_entry_client_peers is defined
+      - not (entry_legacy_client_available | bool) or vault_awg_entry_legacy_private_key is defined
+      - not (entry_legacy_client_available | bool) or vault_entry_legacy_client_peers is defined
+      - not (entry_legacy_client_available | bool) or entry_legacy_awg_obfuscation is defined
+      - not (entry_mobile_client_available | bool) or vault_awg_entry_mobile_private_key is defined
+      - not (entry_mobile_client_available | bool) or vault_entry_mobile_client_peers is defined
+      - not (entry_mobile_client_available | bool) or entry_mobile_awg_obfuscation is defined
+      - >-
+        (vault_entry_client_peers | length) +
+        (vault_entry_legacy_client_peers | default([]) | length) +
+        (vault_entry_mobile_client_peers | default([]) | length) > 0
+      - entry_exit_endpoint | length > 0
+    fail_msg: "Требуются зашифрованные ключи AWG, пиры, PSK ENTRY и endpoint EXIT"
+  when: entry_manage_awg_configs | bool
+  no_log: true
+
+- name: "Создание: ENTRY сервер — этап 2"
+  ansible.builtin.file:
+    path: "{{ entry_awg_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: entry_manage_awg_configs | bool
+
+- name: "Создание защищённого каталога временных конфигураций ENTRY сервера"
+  ansible.builtin.file:
+    path: "{{ entry_awg_candidate_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: entry_manage_awg_configs | bool
+
+- name: "Определение состояния мобильного AWG перед обновлением конфигурации"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, is-active, --quiet, "awg-quick@{{ entry_mobile_client_interface }}.service"]
+  register: entry_mobile_service_before
+  changed_when: false
+  failed_when: false
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_mobile_client_available | bool
+
+- name: "Установка управляемого доступа UDP/8443 для мобильного AWG"
+  ansible.builtin.template:
+    src: awg-mobile-firewall.sh.j2
+    dest: "{{ entry_mobile_firewall_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_mobile_client_available | bool
+
+- name: "Безопасное применение: ENTRY сервер — этап 3"
+  ansible.builtin.include_tasks: manage_config.yml
+  loop:
+    - interface: "{{ entry_client_interface }}"
+      template: awg0.conf.j2
+      enabled: true
+    - interface: "{{ entry_legacy_client_interface }}"
+      template: awg-old.conf.j2
+      enabled: "{{ entry_legacy_client_available | bool }}"
+    - interface: "{{ entry_mobile_client_interface }}"
+      template: awg-mobile.conf.j2
+      enabled: "{{ entry_mobile_client_available | bool }}"
+    - interface: "{{ entry_exit_interface }}"
+      template: awg1.conf.j2
+      enabled: "{{ not (awg3_transit_enabled | default(false) | bool) }}"
+  loop_control:
+    loop_var: entry_awg_config_item
+    label: "{{ entry_awg_config_item.interface }}"
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_awg_config_item.enabled | bool
+
+- name: "Включение: ENTRY сервер — этап 4"
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ item }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: >-
+    {{ [entry_client_interface] +
+       ([entry_legacy_client_interface] if entry_legacy_client_enabled | bool else []) +
+       ([entry_mobile_client_interface] if
+          (entry_mobile_client_available | bool and
+           (entry_mobile_client_enabled | bool or
+            entry_mobile_service_before.rc | default(3) == 0)) else []) +
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
+  when:
+    - entry_manage_awg_configs | bool
+
+- name: "Определение состояния мобильного AWG после применения UFW"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, is-active, --quiet, "awg-quick@{{ entry_mobile_client_interface }}.service"]
+  register: entry_mobile_service_active
+  changed_when: false
+  failed_when: false
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_mobile_client_available | bool
+
+- name: "Согласование доступа UDP/8443 мобильного AWG с состоянием интерфейса"
+  ansible.builtin.command:
+    argv:
+      - "{{ entry_mobile_firewall_path }}"
+      - "{{ 'apply' if entry_mobile_service_active.rc == 0 else 'remove' }}"
+  changed_when: false
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_mobile_client_available | bool

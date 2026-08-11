@@ -1,0 +1,32 @@
+[Interface]
+PrivateKey = {{ vault_awg_entry_mobile_private_key }}
+Address = {{ entry_mobile_client_address }}
+ListenPort = {{ entry_mobile_client_listen_port }}
+MTU = {{ entry_mobile_client_mtu }}
+Table = off
+Jc = {{ entry_mobile_awg_obfuscation.jc }}
+Jmin = {{ entry_mobile_awg_obfuscation.jmin }}
+Jmax = {{ entry_mobile_awg_obfuscation.jmax }}
+S1 = {{ entry_mobile_awg_obfuscation.s1 }}
+S2 = {{ entry_mobile_awg_obfuscation.s2 }}
+S3 = {{ entry_mobile_awg_obfuscation.s3 }}
+S4 = {{ entry_mobile_awg_obfuscation.s4 }}
+H1 = {{ entry_mobile_awg_obfuscation.h1 }}
+H2 = {{ entry_mobile_awg_obfuscation.h2 }}
+H3 = {{ entry_mobile_awg_obfuscation.h3 }}
+H4 = {{ entry_mobile_awg_obfuscation.h4 }}
+I1 = {{ entry_mobile_awg_obfuscation.i1 }}
+PostUp = {{ entry_mobile_firewall_path }} apply
+PreDown = {{ entry_mobile_firewall_path }} remove
+
+{% for peer in vault_entry_mobile_client_peers | default([]) %}
+[Peer]
+#_Name = {{ peer.name }}
+#_Profile = mobile
+PublicKey = {{ peer.public_key }}
+{% if peer.preshared_key | default('') | length > 0 %}
+PresharedKey = {{ peer.preshared_key }}
+{% endif %}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+
+{% endfor %}

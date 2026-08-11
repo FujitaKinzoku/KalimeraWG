@@ -1,0 +1,131 @@
+---
+- name: Гарантированное восстановление временного состояния после установки
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: false
+  tasks:
+    - name: Запрет ответов ICMP echo после прерванного измерения MTU
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sysctl
+          - -w
+          - net.ipv4.icmp_echo_ignore_all=1
+      changed_when: false
+      failed_when: false
+
+    - name: Определение внешнего интерфейса для аварийной очистки ICMP
+      ansible.builtin.shell: |
+        ip -4 route show default |
+          awk 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+      args:
+        executable: /bin/bash
+      register: awg_cleanup_detected_wan
+      changed_when: false
+      failed_when: false
+
+    - name: Выбор внешнего интерфейса для аварийной очистки ICMP
+      ansible.builtin.set_fact:
+        awg_cleanup_wan_interface: >-
+          {{ configured_wan if configured_wan != 'auto'
+             else (awg_cleanup_detected_wan.stdout | trim) }}
+      vars:
+        configured_wan: >-
+          {{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}
+
+    - name: Удаление временного разрешения ICMP после прерванной установки
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - -w
+          - "10"
+          - -D
+          - INPUT
+          - -i
+          - "{{ awg_cleanup_wan_interface }}"
+          - -s
+          - "{{ security_interserver_peer_ipv4 }}/32"
+          - -p
+          - icmp
+          - --icmp-type
+          - echo-request
+          - -m
+          - comment
+          - --comment
+          - awg-mtu-peer-temporary
+          - -j
+          - ACCEPT
+      changed_when: false
+      failed_when: false
+
+    - name: Удаление временного запрета ICMP после прерванной установки
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - -w
+          - "10"
+          - -D
+          - INPUT
+          - -i
+          - "{{ awg_cleanup_wan_interface }}"
+          - -p
+          - icmp
+          - --icmp-type
+          - echo-request
+          - -m
+          - comment
+          - --comment
+          - awg-mtu-other-temporary
+          - -j
+          - DROP
+      changed_when: false
+      failed_when: false
+
+    - name: Получение списка установленных служб
+      ansible.builtin.service_facts:
+
+    - name: Возврат таймеров автоматического обновления Ubuntu
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      failed_when: false
+
+    - name: Проверка незавершённой транзакции UFW
+      ansible.builtin.stat:
+        path: /run/awg-ufw-rebuild-in-progress
+      register: awg_cleanup_ufw_transaction
+
+    - name: Возврат UFW после прерванной пересборки
+      when: awg_cleanup_ufw_transaction.stat.exists
+      block:
+        - name: Восстановление последних рабочих файлов UFW
+          ansible.builtin.copy:
+            src: "/run/awg-ufw-recovery-{{ item }}"
+            dest: "/etc/ufw/{{ item }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0600"
+          loop: [user.rules, user6.rules]
+
+        - name: Включение восстановленной политики UFW
+          community.general.ufw:
+            state: enabled
+
+        - name: Удаление временных файлов восстановления UFW
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /run/awg-ufw-rebuild-in-progress
+            - /run/awg-ufw-recovery-user.rules
+            - /run/awg-ufw-recovery-user6.rules
+
+    - name: Сброс только временных состояний ошибок установки
+      ansible.builtin.command:
+        argv: [/usr/bin/systemctl, reset-failed]
+      changed_when: false
+      failed_when: false

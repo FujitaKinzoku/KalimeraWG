@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() { echo 'Использование: kalimera-help'; }
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+if [[ ! -x /usr/local/sbin/kalimera-status ]]; then
+    echo 'Сводка KalimeraWG не установлена. Повторно выполните deploy --resume.' >&2
+    exit 1
+fi
+
+exec /usr/local/sbin/kalimera-status --with-commands

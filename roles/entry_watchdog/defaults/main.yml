@@ -1,0 +1,7 @@
+---
+entry_ru_proxy_watch_script_path: /usr/local/sbin/awg-ru-proxy-watch
+entry_ru_proxy_watch_service_name: awg-ru-proxy-watch.service
+entry_ru_proxy_watch_timer_name: awg-ru-proxy-watch.timer
+entry_ru_proxy_watch_state_dir: /run/awg-ru-proxy-watch
+entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
+awg_dns_policy_path: /usr/local/sbin/awg-dns-policy

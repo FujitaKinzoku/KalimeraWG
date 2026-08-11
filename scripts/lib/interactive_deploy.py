@@ -1,0 +1,2200 @@
+#!/usr/bin/env python3
+"""Интерактивный production-оркестратор ENTRY и EXIT без раскрытия секретов."""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import base64
+import binascii
+import getpass
+import ipaddress
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import textwrap
+import urllib.request
+from pathlib import Path
+
+import yaml
+from ansible.parsing.vault import VaultLib, VaultSecret
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def telegram_credentials_valid(token: str, chat_id: str) -> bool:
+    """Проверить структуру токена BotFather и числового Telegram chat ID."""
+    return bool(
+        re.fullmatch(r"[0-9]{6,20}:[A-Za-z0-9_-]{20,}", token)
+        and re.fullmatch(r"-?[1-9][0-9]{0,19}", chat_id)
+    )
+
+
+def telegram_api_result(token: str, method: str) -> object | None:
+    """Вызвать безопасный метод Bot API, не включая токен в сообщения ошибок."""
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/{method}",
+        headers={"User-Agent": "KalimeraWG-Installer/1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.load(response)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None
+    return payload.get("result")
+
+
+def telegram_latest_chat_from_updates(updates: object) -> tuple[str, str] | None:
+    """Извлечь последний доступный chat ID и безопасную подпись из updates."""
+    if not isinstance(updates, list):
+        return None
+    for update in reversed(updates):
+        if not isinstance(update, dict):
+            continue
+        candidates = [
+            update.get("message"),
+            update.get("edited_message"),
+            update.get("channel_post"),
+            update.get("my_chat_member"),
+            update.get("chat_member"),
+        ]
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            candidates.append(callback.get("message"))
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            chat = candidate.get("chat")
+            if not isinstance(chat, dict) or not isinstance(chat.get("id"), int):
+                continue
+            label = str(
+                chat.get("title")
+                or chat.get("username")
+                or chat.get("first_name")
+                or chat.get("type")
+                or "Telegram chat"
+            )
+            return str(chat["id"]), label
+    return None
+
+
+def configure_line_editing() -> None:
+    """Включить предсказуемое редактирование ввода в SSH, WSL и терминале."""
+    try:
+        import readline
+    except ImportError:
+        return
+
+    # Терминалы передают Backspace как Ctrl-H либо DEL. Обрабатываем оба
+    # варианта, чтобы пользователь мог исправить ввод и не видел символ ``^H``.
+    readline.parse_and_bind('"\\C-h": backward-delete-char')
+    readline.parse_and_bind('"\\C-?": backward-delete-char')
+
+
+_ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[1;31m",
+    "green": "\033[1;32m",
+    "yellow": "\033[1;33m",
+    "blue": "\033[1;34m",
+    "magenta": "\033[1;35m",
+    "cyan": "\033[1;36m",
+    "white": "\033[1;37m",
+}
+
+
+def color_output_enabled() -> bool:
+    """Использовать цвет только в настоящем совместимом терминале."""
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "dumb") != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def styled(value: object, tone: str) -> str:
+    text = str(value)
+    if not color_output_enabled():
+        return text
+    return f"{_ANSI[tone]}{text}{_ANSI['reset']}"
+
+
+def ui_width() -> int:
+    columns = shutil.get_terminal_size((88, 24)).columns
+    return max(44, min(96, columns - 2))
+
+
+def ui_panel(title: str, lines: list[str], tone: str = "blue") -> None:
+    """Показать компактную панель с переносом длинных строк."""
+    width = ui_width()
+    inner = width - 2
+    title_text = f" {title} "
+    top_fill = max(0, inner - len(title_text))
+    print(styled(f"┌{title_text}{'─' * top_fill}┐", tone))
+    for raw_line in lines or [""]:
+        wrapped = textwrap.wrap(
+            str(raw_line),
+            width=max(10, inner - 2),
+            replace_whitespace=False,
+            drop_whitespace=False,
+        ) or [""]
+        for line in wrapped:
+            print(f"{styled('│', tone)} {line:<{inner - 2}} {styled('│', tone)}")
+    print(styled(f"└{'─' * inner}┘", tone))
+
+
+def ui_rows(title: str, rows: list[tuple[str, object]], tone: str = "blue") -> None:
+    """Показать выровненный набор параметров без раскрытия секретов."""
+    if not rows:
+        ui_panel(title, ["Нет данных"], tone)
+        return
+    label_width = min(28, max(len(label) for label, _ in rows))
+    available = max(12, ui_width() - label_width - 7)
+    lines: list[str] = []
+    for label, value in rows:
+        chunks = textwrap.wrap(
+            str(value), width=available, replace_whitespace=False
+        ) or [""]
+        lines.append(f"{label:<{label_width}} │ {chunks[0]}")
+        lines.extend(f"{'':<{label_width}} │ {chunk}" for chunk in chunks[1:])
+    ui_panel(title, lines, tone)
+
+
+def ui_section(number: int, title: str, description: str = "") -> None:
+    print()
+    heading = f"[{number}/6] {title}"
+    print(styled(f"┌── {heading} {'─' * max(0, ui_width() - len(heading) - 5)}", "cyan"))
+    if description:
+        print(styled(f"└─ {description}", "dim"))
+
+
+def ui_step(title: str, description: str) -> None:
+    print()
+    print(styled(f"[▶] {title}", "cyan"))
+    print(styled(f"    {description}", "dim"))
+
+
+def ui_success(message: str) -> None:
+    ui_panel("ГОТОВО", [f"✓ {message}"], "green")
+
+
+def show_installer_banner() -> None:
+    ui_panel(
+        "KALIMERAWG · ИНТЕРАКТИВНАЯ УСТАНОВКА",
+        [
+            "ENTRY сервер  →  AWG 3+  →  EXIT сервер",
+            "Управляемый DNS · маршрутизация RU · SOAX/SOCKS5 · защита SSH",
+            "Значение в [квадратных скобках] принимается клавишей Enter.",
+            "Секреты вводятся без отображения и сохраняются в Ansible Vault.",
+        ],
+        "magenta",
+    )
+
+
+def migrate_production_inventory(production: Path) -> bool:
+    """Безопасно обновить известные устаревшие несекретные параметры inventory."""
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    if not entry_path.is_file():
+        return False
+    entry_vars = load_yaml(entry_path)
+    exit_vars = load_yaml(exit_path) if exit_path.is_file() else {}
+    changed = False
+    if (
+        entry_vars.get("entry_ru_tun_stack") == "mixed"
+        and entry_vars.get("entry_ru_endpoint_independent_nat") is False
+    ):
+        entry_vars["entry_ru_tun_stack"] = "gvisor"
+        entry_vars["entry_ru_endpoint_independent_nat"] = True
+        changed = True
+        print("Production inventory обновлён: RU TUN переведён на стабильный стек gvisor.")
+
+    old_mobile_public_port = entry_vars.pop("entry_mobile_client_public_port", None)
+    old_mobile_internal_port = entry_vars.pop("entry_mobile_client_internal_port", None)
+    if old_mobile_public_port is not None or old_mobile_internal_port is not None:
+        entry_vars["entry_mobile_legacy_public_port"] = int(
+            old_mobile_public_port if old_mobile_public_port is not None else 53
+        )
+        entry_vars["entry_mobile_legacy_internal_port"] = int(
+            old_mobile_internal_port if old_mobile_internal_port is not None else 39746
+        )
+        entry_vars["entry_mobile_client_listen_port"] = 8443
+        changed = True
+        print(
+            "Production inventory обновлён: mobile AWG переведён с внешнего "
+            "UDP/53 и перенаправления на прямой UDP/8443."
+        )
+    elif (
+        entry_vars.get("entry_mobile_client_available", False)
+        and "entry_mobile_client_listen_port" not in entry_vars
+    ):
+        entry_vars["entry_mobile_client_listen_port"] = 8443
+        changed = True
+
+    if entry_vars.get("entry_mobile_i1_mode") == "quic-ios-test":
+        entry_vars["entry_mobile_i1_mode"] = "quic-ios"
+        changed = True
+        print("Production inventory обновлён: проверенный QUIC-профиль iOS закреплён как основной.")
+
+    cps_changed = False
+    for document, profile_names in (
+        (
+            entry_vars,
+            (
+                "entry_awg0_obfuscation",
+                "entry_awg1_obfuscation",
+                "entry_mobile_awg_obfuscation",
+                "awg3_transit_obfuscation",
+            ),
+        ),
+        (exit_vars, ("exit_awg_obfuscation", "awg3_transit_obfuscation")),
+    ):
+        for profile_name in profile_names:
+            profile = document.get(profile_name)
+            if not isinstance(profile, dict):
+                continue
+            for index in range(1, 6):
+                key = f"i{index}"
+                value = profile.get(key)
+                if not isinstance(value, str):
+                    continue
+                normalized = normalize_awg_cps_signature(value)
+                if normalized != value:
+                    profile[key] = normalized
+                    cps_changed = True
+
+    if cps_changed:
+        changed = True
+        print(
+            "Production inventory обновлён: CPS-теги I1–I5 приведены к "
+            "документированному пределу 1000 байт."
+        )
+    if changed:
+        yaml_write(entry_path, entry_vars)
+        if exit_path.is_file():
+            yaml_write(exit_path, exit_vars)
+    return changed
+
+
+def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
+    """Добавить отсутствующий mobile-профиль в существующий production inventory."""
+    entry_path = production / "group_vars" / "entry.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not entry_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
+        fail("Для включения mobile-профиля нужны production inventory и пароль Vault")
+
+    entry_vars = load_yaml(entry_path)
+    known_networks: list[ipaddress.IPv4Network] = []
+    for key in (
+        "entry_client_subnet",
+        "entry_legacy_client_subnet",
+        "awg3_transit_address",
+        "entry_exit_tunnel_address",
+    ):
+        value = entry_vars.get(key)
+        if not isinstance(value, str) or "{{" in value:
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError:
+            continue
+        if isinstance(network, ipaddress.IPv4Network):
+            known_networks.append(network)
+
+    mobile_network: ipaddress.IPv4Network | None = None
+    configured_mobile_network_usable = False
+    configured_mobile_subnet = entry_vars.get("entry_mobile_client_subnet")
+    if isinstance(configured_mobile_subnet, str):
+        try:
+            candidate = ipaddress.ip_network(configured_mobile_subnet, strict=True)
+        except ValueError:
+            candidate = None
+        if (
+            isinstance(candidate, ipaddress.IPv4Network)
+            and candidate.num_addresses >= 2
+            and not any(candidate.overlaps(network) for network in known_networks)
+        ):
+            mobile_network = candidate
+            configured_mobile_network_usable = True
+
+    if mobile_network is None:
+        for candidate in ipaddress.ip_network("10.68.0.0/16").subnets(new_prefix=24):
+            if not any(candidate.overlaps(network) for network in known_networks):
+                mobile_network = candidate
+                break
+    if mobile_network is None:
+        fail("Не удалось автоматически выбрать отдельную IPv4-подсеть mobile AWG")
+
+    mobile_hosts = mobile_network.hosts()
+    try:
+        mobile_server_address = next(mobile_hosts)
+        next(mobile_hosts)
+    except StopIteration:
+        fail("Подсеть mobile AWG должна содержать адреса сервера и клиента")
+
+    entry_changed = not bool(entry_vars.get("entry_mobile_client_available", False))
+    mobile_defaults: dict[str, object] = {
+        "entry_mobile_client_available": True,
+        "entry_mobile_client_enabled": False,
+        "entry_mobile_client_interface": "awg-mobile",
+        "entry_mobile_client_address": (
+            f"{mobile_server_address}/{mobile_network.prefixlen}"
+        ),
+        "entry_mobile_client_listen_address": str(mobile_server_address),
+        "entry_mobile_client_subnet": str(mobile_network),
+        "entry_mobile_client_listen_port": 8443,
+        "entry_mobile_legacy_public_port": 53,
+        "entry_mobile_legacy_internal_port": 39746,
+        "entry_mobile_client_mtu": 1380,
+        "entry_mobile_i1_mode": "quic-ios",
+    }
+    mobile_network_keys = {
+        "entry_mobile_client_address",
+        "entry_mobile_client_listen_address",
+        "entry_mobile_client_subnet",
+    }
+    for key, value in mobile_defaults.items():
+        if (
+            key == "entry_mobile_client_available"
+            or key not in entry_vars
+            or (not configured_mobile_network_usable and key in mobile_network_keys)
+        ):
+            if entry_vars.get(key) != value:
+                entry_vars[key] = value
+                entry_changed = True
+    if not isinstance(entry_vars.get("entry_mobile_awg_obfuscation"), dict):
+        entry_vars["entry_mobile_awg_obfuscation"] = awg_mobile_quic_obfuscation()
+        entry_changed = True
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    if not vault_secret:
+        fail("Файл пароля Ansible Vault пуст")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(vault_document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+
+    vault_changed = False
+    if not vault_document.get("vault_awg_entry_mobile_private_key"):
+        vault_document["vault_awg_entry_mobile_private_key"] = awg_private_key()
+        vault_changed = True
+    if not isinstance(vault_document.get("vault_entry_mobile_client_peers"), list):
+        vault_document["vault_entry_mobile_client_peers"] = []
+        vault_changed = True
+
+    if vault_changed:
+        encrypted = vault_lib.encrypt(
+            yaml.safe_dump(vault_document, sort_keys=False).encode()
+        )
+        temporary = vault_path.with_name(
+            f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            secure_write(temporary, encrypted)
+            os.replace(temporary, vault_path)
+            vault_path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if entry_changed:
+        yaml_write(entry_path, entry_vars)
+
+    if entry_changed or vault_changed:
+        print(
+            "Production inventory обновлён: добавлен отдельный mobile AWG "
+            f"{mobile_network} на UDP/8443; интерфейс пока выключен."
+        )
+    return entry_changed or vault_changed
+
+
+def prompt(label: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default is not None else ""
+    marker = styled("◆", "cyan")
+    value = input(f"{marker} {label}{styled(suffix, 'dim')}: ").strip()
+    return value or (default or "")
+
+
+def prompt_bool(label: str, default: bool = True) -> bool:
+    marker = "Y/n" if default else "y/N"
+    while True:
+        value = input(
+            f"{styled('◆', 'cyan')} {label}{styled(f' [{marker}]', 'dim')}: "
+        ).strip().lower()
+        if not value:
+            return default
+        if value in {"y", "yes", "д", "да"}:
+            return True
+        if value in {"n", "no", "н", "нет"}:
+            return False
+
+
+def prompt_port(label: str, default: int) -> int:
+    while True:
+        value = prompt(label, str(default))
+        try:
+            port = int(value)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535:
+            return port
+
+
+def prompt_admin_public_key() -> str:
+    allowed_prefixes = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-")
+    while True:
+        value = input("Административный публичный SSH-ключ (одна строка): ").strip()
+        fields = value.split()
+        if len(fields) < 2 or not fields[0].startswith(allowed_prefixes):
+            print("Введите публичный ключ OpenSSH, например ssh-ed25519 AAAA...")
+            continue
+        try:
+            decoded = base64.b64decode(fields[1], validate=True)
+        except (ValueError, binascii.Error):
+            print("Данные публичного SSH-ключа не являются корректным base64.")
+            continue
+        if len(decoded) < 16:
+            print("Данные публичного SSH-ключа слишком короткие.")
+            continue
+        return value
+
+
+def require_public_endpoint(value: str, label: str) -> None:
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(value, None, socket.AF_INET)}
+    except socket.gaierror as error:
+        fail(f"Не удалось разрешить {label} в IPv4: {error}")
+    if not addresses or not all(ipaddress.ip_address(address).is_global for address in addresses):
+        fail(f"{label} должен разрешаться только в публичные IPv4-адреса")
+
+
+def resolve_single_public_ipv4(value: str, label: str) -> str:
+    """Получить единственный постоянный публичный IPv4 для правила межсерверного UFW."""
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(value, None, socket.AF_INET)}
+    except socket.gaierror as error:
+        fail(f"Не удалось разрешить {label} в IPv4: {error}")
+    if len(addresses) != 1:
+        fail(f"{label} должен разрешаться ровно в один постоянный публичный IPv4-адрес")
+    address = addresses.pop()
+    if not ipaddress.ip_address(address).is_global:
+        fail(f"{label} должен быть публичным IPv4-адресом")
+    return address
+
+
+def detect_local_ssh_port() -> int:
+    sshd = shutil.which("sshd")
+    if not sshd:
+        return 22
+    result = subprocess.run(
+        [sshd, "-T"], text=True, capture_output=True, check=False
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("port "):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                break
+    return 22
+
+
+def require_command(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        fail(f"Отсутствует обязательная команда управляющего окружения: {name}")
+    return path
+
+
+def run(argv: list[str], *, env: dict[str, str] | None = None) -> None:
+    try:
+        subprocess.run(argv, check=True, env=env)
+    except subprocess.CalledProcessError:
+        fail(f"Команда завершилась с ошибкой; секретные данные не показаны: {argv[0]}")
+
+
+def cleanup_deployment(repo: Path, hosts: Path, vault_password: Path) -> None:
+    """Вернуть APT timers и UFW даже после ошибки или Ctrl+C."""
+    ansible_playbook = shutil.which("ansible-playbook")
+    if not ansible_playbook or not hosts.is_file() or not vault_password.is_file():
+        return
+    try:
+        subprocess.run(
+            [
+            ansible_playbook,
+            "-i",
+            str(hosts),
+            str(repo / "playbooks" / "cleanup.yml"),
+            "--vault-password-file",
+            str(vault_password),
+            ],
+            check=False,
+        )
+    except OSError:
+        # Аварийная очистка не должна скрывать исходную ошибку установки.
+        return
+
+
+def awg_private_key() -> str:
+    raw = bytearray(os.urandom(32))
+    raw[0] &= 248
+    raw[31] &= 127
+    raw[31] |= 64
+    return base64.b64encode(bytes(raw)).decode("ascii")
+
+
+def awg_public_key(private_value: str) -> str:
+    private = X25519PrivateKey.from_private_bytes(base64.b64decode(private_value))
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return base64.b64encode(public).decode("ascii")
+
+
+def awg_psk() -> str:
+    return base64.b64encode(os.urandom(32)).decode("ascii")
+
+
+AWG_CLIENT_PROFILES = {
+    "performance": {
+        "jc": (4, 4), "jmin": (64, 64), "jmax": (80, 96),
+    },
+    "balanced": {
+        "jc": (5, 7), "jmin": (64, 96), "jmax": (128, 384),
+    },
+    "masking": {
+        "jc": (8, 10), "jmin": (96, 192), "jmax": (384, 1024),
+    },
+    "mobile": {
+        "jc": (5, 5), "jmin": (10, 10), "jmax": (50, 50),
+    },
+    "old": {
+        "jc": (4, 6), "jmin": (64, 64), "jmax": (80, 96),
+    },
+}
+
+AWG_QUIC_INITIAL_SIZE = 1200
+AWG_CPS_RANDOM_TAG_MAX = 1000
+
+
+def random_between(bounds: tuple[int, int]) -> int:
+    lower, upper = bounds
+    return lower + secrets.randbelow(upper - lower + 1)
+
+
+def awg_random_bytes_tags(size: int) -> str:
+    """Описать случайные байты тегами CPS, каждый не длиннее 1000 байт."""
+    if size < 1:
+        fail("Размер случайного поля CPS должен быть положительным")
+    tags = []
+    remaining = size
+    while remaining:
+        chunk = min(remaining, AWG_CPS_RANDOM_TAG_MAX)
+        tags.append(f"<r {chunk}>")
+        remaining -= chunk
+    return "".join(tags)
+
+
+def normalize_awg_cps_signature(signature: str) -> str:
+    """Разбить устаревшие теги <r N> с N > 1000 без изменения длины пакета."""
+
+    def replace(match: re.Match[str]) -> str:
+        size = int(match.group(1))
+        if size <= AWG_CPS_RANDOM_TAG_MAX:
+            return match.group(0)
+        return awg_random_bytes_tags(size)
+
+    return re.sub(r"<r ([0-9]+)>", replace, signature)
+
+
+def awg_quic_initial_signature() -> str:
+    """Создать индивидуальный QUIC Initial-подобный I1 размером 1200 байт.
+
+    Доступные upstream-теги AWG не умеют вычислять QUIC AEAD, поэтому пакет не
+    выдаётся за полноценное QUIC-соединение. При этом его открытая структура
+    соответствует длинному заголовку QUIC v1: версия, случайные DCID/SCID,
+    token length, корректная QUIC varint-длина и packet number выбранной длины.
+    Случайные поля и заполнение создаются заново при каждой отправке.
+    """
+    packet_number_size = random_between((1, 4))
+    first_byte = 0xC0 | (packet_number_size - 1)
+    dcid_size = random_between((8, 20))
+    scid_size = random_between((8, 20))
+    fixed_size = 10 + dcid_size + scid_size
+    protected_size = AWG_QUIC_INITIAL_SIZE - fixed_size
+    if not 64 <= protected_size < 16384:
+        fail("Не удалось сформировать безопасный размер QUIC-подобной AWG-сигнатуры")
+    encoded_length = 0x4000 | protected_size
+    return (
+        f"<b 0x{first_byte:02x}00000001{dcid_size:02x}>"
+        f"{awg_random_bytes_tags(dcid_size)}"
+        f"<b 0x{scid_size:02x}>"
+        f"{awg_random_bytes_tags(scid_size)}"
+        f"<b 0x00{encoded_length:04x}>"
+        f"{awg_random_bytes_tags(protected_size)}"
+    )
+
+
+def awg_quic_short_signature(size_bounds: tuple[int, int]) -> str:
+    """Создать дополнительный пакет с формой короткого заголовка QUIC."""
+    packet_size = random_between(size_bounds)
+    first_byte = 0x40 | secrets.randbelow(0x20)
+    return f"<b 0x{first_byte:02x}><r {packet_size - 1}>"
+
+
+def awg_message_padding() -> tuple[int, int, int]:
+    """Создать S1-S3 без совпадения размеров служебных сообщений AWG."""
+    s1 = random_between((16, 64))
+    s2 = random_between((16, 64))
+    while s1 + 56 == s2:
+        s2 = random_between((16, 64))
+    s3 = random_between((16, 64))
+    while s2 + 28 == s3:
+        s3 = random_between((16, 64))
+    return s1, s2, s3
+
+
+def awg_server_obfuscation() -> dict[str, object]:
+    """Создать постоянный профиль AWG2 для KeeneticOS 5.1.x."""
+    header_ranges = []
+    for bucket in range(4):
+        bucket_start = 1 + bucket * 500_000_000
+        start = bucket_start + secrets.randbelow(200_000_001)
+        end = start + random_between((50_000_000, 200_000_000))
+        header_ranges.append(f"{start}-{end}")
+    secrets.SystemRandom().shuffle(header_ranges)
+    s1, s2, s3 = awg_message_padding()
+    return {
+        "jc": 6,
+        "jmin": 64,
+        "jmax": 192,
+        "s1": s1,
+        "s2": s2,
+        "s3": s3,
+        # HeaderProtectionKey в AWG 3+ требует S1-S4 не меньше 12.
+        # Единый нижний предел позволяет безопасно использовать профиль и
+        # для клиентского AWG2, и как основу межсерверного AWG3.
+        "s4": random_between((12, 32)),
+        "h1": header_ranges[0],
+        "h2": header_ranges[1],
+        "h3": header_ranges[2],
+        "h4": header_ranges[3],
+        "i1": awg_quic_initial_signature(),
+        "i2": awg_quic_short_signature((96, 192)),
+        "i3": awg_quic_short_signature((64, 160)),
+        "i4": awg_quic_short_signature((48, 128)),
+        "i5": awg_quic_short_signature((32, 96)),
+    }
+
+
+def awg_legacy_server_obfuscation() -> dict[str, object]:
+    """Создать базовый ASC-профиль с одиночными H для KeeneticOS до 5.1."""
+    headers = secrets.SystemRandom().sample(range(5, 2_147_483_648), 4)
+    s1, s2, _ = awg_message_padding()
+    return {
+        "jc": 4,
+        "jmin": 64,
+        "jmax": 96,
+        "s1": s1,
+        "s2": s2,
+        "s3": 0,
+        "s4": 0,
+        "h1": headers[0],
+        "h2": headers[1],
+        "h3": headers[2],
+        "h4": headers[3],
+        "i1": "",
+        "i2": "",
+        "i3": "",
+        "i4": "",
+        "i5": "",
+    }
+
+
+def awg_mobile_dns_obfuscation() -> dict[str, object]:
+    """Профиль, подтверждённый официальным AmneziaWG 2.0.2 для iOS.
+
+    I1 имеет форму DNS-ответа: два случайных байта ID, затем ответ A для
+    icloud.com. I2-I5 намеренно пусты: текущие мобильные клиенты принимают эти
+    поля не одинаково, а сервер и клиент обязаны иметь идентичный профиль.
+    """
+    return {
+        "jc": 5,
+        "jmin": 10,
+        "jmax": 50,
+        "s1": 134,
+        "s2": 79,
+        "s3": 17,
+        "s4": 0,
+        "h1": "1134731367-1758702570",
+        "h2": "1999989254-2027383437",
+        "h3": "2041897377-2054735816",
+        "h4": "2083840314-2084318622",
+        "i1": (
+            "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001"
+            "c00c000100010000105a00044d583737>"
+        ),
+        "i2": "",
+        "i3": "",
+        "i4": "",
+        "i5": "",
+    }
+
+
+def awg_mobile_quic_obfuscation() -> dict[str, object]:
+    """Создать экспериментальный iOS-профиль с QUIC Initial-подобным I1.
+
+    Проверенные iOS-параметры J/S/H сохраняются без изменений. Меняется только
+    I1; I2-I5 остаются пустыми, чтобы испытание проверяло одну переменную.
+    Итоговый пакет занимает ровно 1200 байт и не превышает mobile MTU.
+    """
+    result = awg_mobile_dns_obfuscation()
+    result["i1"] = awg_quic_initial_signature()
+    return result
+
+
+def set_mobile_i1_mode(production: Path, mode: str) -> bool:
+    """Переключить I1 mobile-интерфейса без изменения порта, ключей и пиров."""
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        fail("Не найдены переменные ENTRY сервера production inventory")
+    entry_vars = load_yaml(entry_path)
+    profile = entry_vars.get("entry_mobile_awg_obfuscation")
+    if not isinstance(profile, dict):
+        fail("В production inventory отсутствует профиль mobile AWG")
+
+    if mode == "quic-ios-test":
+        mode = "quic-ios"
+    current_mode_raw = str(entry_vars.get("entry_mobile_i1_mode", "dns-ios"))
+    current_mode = "quic-ios" if current_mode_raw == "quic-ios-test" else current_mode_raw
+    if mode == "quic-ios":
+        # Повторный --resume не должен незаметно менять I1 и ломать уже
+        # выданный конфиг. Новая сигнатура создаётся только при фактическом
+        # переходе в QUIC-режим.
+        if current_mode == mode and isinstance(profile.get("i1"), str):
+            if current_mode_raw != mode:
+                entry_vars["entry_mobile_i1_mode"] = mode
+                yaml_write(entry_path, entry_vars)
+                return True
+            return False
+        new_profile = awg_mobile_quic_obfuscation()
+        message = (
+            "Mobile I1 переключён в подтверждённый QUIC Initial-подобный режим. "
+            "UDP-порт и ключи не изменены."
+        )
+    elif mode == "dns-ios":
+        new_profile = awg_mobile_dns_obfuscation()
+        message = "Mobile I1 возвращён в подтверждённый DNS-подобный режим iOS."
+    else:
+        fail(f"Неизвестный режим mobile I1: {mode}")
+
+    changed = current_mode_raw != mode
+    for key in ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4"):
+        # Для эксперимента J/S/H должны оставаться ровно такими, какими они
+        # уже были согласованы между сервером и существующими клиентами.
+        new_profile[key] = profile[key]
+    for index in range(1, 6):
+        key = f"i{index}"
+        value = new_profile[key]
+        if profile.get(key) != value:
+            profile[key] = value
+            changed = True
+    entry_vars["entry_mobile_i1_mode"] = mode
+    if changed:
+        yaml_write(entry_path, entry_vars)
+        print(message)
+        print(
+            "Создайте новый тестовый конфиг командой "
+            "'vpn-user ИМЯ mobile': ранее выданные mobile-конфиги имеют другой I1."
+        )
+    return changed
+
+
+def awg3_transit_obfuscation() -> dict[str, object]:
+    result = awg_server_obfuscation()
+    result.update({"jc": 8, "jmin": 64, "jmax": 256})
+    return result
+
+
+def awg_client_obfuscation(
+    profile_name: str, server_profile: dict[str, object]
+) -> dict[str, object]:
+    profile = AWG_CLIENT_PROFILES[profile_name]
+    result = {
+        "jc": random_between(profile["jc"]),
+        "jmin": random_between(profile["jmin"]),
+        "jmax": random_between(profile["jmax"]),
+    }
+    for key in (
+        "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4",
+        "i1", "i2", "i3", "i4", "i5",
+    ):
+        result[key] = server_profile[key]
+    return result
+
+
+def secure_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def yaml_write(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def load_yaml(path: Path) -> dict:
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        fail(f"Ожидалась структура YAML mapping: {path}")
+    return value
+
+
+def update_client_config_mtu(
+    config: Path, result: Path, client_mode: str | bool
+) -> None:
+    """Атомарно записать согласованный MTU в готовый клиентский конфиг."""
+    values = load_yaml(result)
+    if client_mode is True or client_mode == "legacy":
+        key = "legacy_client_mtu"
+    elif client_mode == "mobile":
+        key = "mobile_client_mtu"
+    else:
+        key = "client_mtu"
+    mtu = int(values[key])
+    if not 576 <= mtu <= 1420:
+        fail("Получен недопустимый результат автоматического согласования MTU")
+    lines = config.read_text(encoding="utf-8").splitlines()
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.startswith("MTU = "):
+            lines[index] = f"MTU = {mtu}"
+            replaced = True
+            break
+    if not replaced:
+        fail("В клиентской конфигурации не найден параметр MTU")
+    temporary = config.with_name(f".{config.name}.{secrets.token_hex(8)}.tmp")
+    secure_write(temporary, ("\n".join(lines) + "\n").encode())
+    os.replace(temporary, config)
+    config.chmod(0o600)
+
+
+def update_saved_client_configs_mtu(clients_dir: Path, result: Path) -> None:
+    """Согласовать MTU всех локально сохранённых конфигов после resume."""
+    if not clients_dir.is_dir() or not result.is_file():
+        return
+    for config in clients_dir.glob("*.conf"):
+        text = config.read_text(encoding="utf-8")
+        update_client_config_mtu(config, result, "S3 = " not in text)
+
+
+def update_saved_client_configs_cps(clients_dir: Path) -> None:
+    """Атомарно исправить превышающие 1000 байт CPS-теги сохранённых клиентов."""
+    if not clients_dir.is_dir():
+        return
+    for config in clients_dir.glob("*.conf"):
+        lines = config.read_text(encoding="utf-8").splitlines()
+        changed = False
+        for index, line in enumerate(lines):
+            match = re.match(r"^(I[1-5]\s*=\s*)(.*)$", line)
+            if match is None:
+                continue
+            normalized = normalize_awg_cps_signature(match.group(2))
+            if normalized != match.group(2):
+                lines[index] = f"{match.group(1)}{normalized}"
+                changed = True
+        if not changed:
+            continue
+        temporary = config.with_name(f".{config.name}.{secrets.token_hex(8)}.tmp")
+        secure_write(temporary, ("\n".join(lines) + "\n").encode())
+        os.replace(temporary, config)
+        config.chmod(0o600)
+
+
+def pin_resolved_awg_packages(all_vars_path: Path, lock_path: Path) -> None:
+    """Сохранить первый разрешённый набор PPA-пакетов для повторных запусков."""
+    mapping = {
+        "amneziawg": "amneziawg",
+        "amneziawg-dkms": "amneziawg_dkms",
+        "amneziawg-tools": "amneziawg_tools",
+    }
+    resolved: dict[str, str] = {}
+    for line in lock_path.read_text(encoding="utf-8").splitlines():
+        package, separator, version = line.partition("=")
+        if separator and package in mapping and version:
+            resolved[mapping[package]] = version
+    if set(resolved) != set(mapping.values()):
+        fail("Получен неполный список закреплённых версий AmneziaWG")
+    variables = load_yaml(all_vars_path)
+    variables["awg_package_version_mode"] = "pinned"
+    variables["awg_package_versions"] = resolved
+    yaml_write(all_vars_path, variables)
+
+
+def bootstrap_key(
+    host: str,
+    user: str,
+    port: int,
+    password: str,
+    public_key: Path,
+    server_label: str,
+) -> str:
+    candidate = password
+    argv = [
+        require_command("sshpass"),
+        "-e",
+        require_command("ssh-copy-id"),
+        "-i",
+        str(public_key),
+        "-p",
+        str(port),
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        f"{user}@{host}",
+    ]
+    for attempt in range(1, 4):
+        print(f"{server_label}: установка ключа для {user}@{host}:{port} (попытка {attempt}/3)...")
+        environment = os.environ.copy()
+        environment["SSHPASS"] = candidate
+        result = subprocess.run(argv, check=False, env=environment)
+        if result.returncode == 0:
+            print(f"{server_label}: вход по установленному ключу подготовлен.")
+            return candidate
+        if attempt < 3:
+            print(
+                f"{server_label} отклонил подключение. Проверьте текущий SSH-порт, "
+                "пользователя и разрешение входа по паролю."
+            )
+            candidate = getpass.getpass(
+                f"Повторите пароль SSH {server_label} (ввод скрыт): "
+            )
+            if not candidate:
+                fail(f"Пароль SSH {server_label} не может быть пустым")
+    fail(
+        f"Не удалось установить SSH-ключ на {server_label} ({user}@{host}:{port}). "
+        "Проверьте доступ обычной командой ssh и настройку PasswordAuthentication на сервере."
+    )
+
+
+def install_local_key(user: str, public_key: Path) -> None:
+    if os.geteuid() != 0:
+        fail("Локальную установку ENTRY сервера необходимо запускать от root")
+    account = pwd.getpwnam(user)
+    ssh_dir = Path(account.pw_dir) / ".ssh"
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ssh_dir.chmod(0o700)
+    authorized = ssh_dir / "authorized_keys"
+    line = public_key.read_text(encoding="utf-8").strip()
+    existing = authorized.read_text(encoding="utf-8") if authorized.exists() else ""
+    if line not in existing.splitlines():
+        with authorized.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    os.chown(ssh_dir, account.pw_uid, account.pw_gid)
+    os.chown(authorized, account.pw_uid, account.pw_gid)
+    authorized.chmod(0o600)
+
+
+def check_ssh(host: str, user: str, port: int, private_key: Path) -> None:
+    run(
+        [
+            require_command("ssh"),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            str(private_key),
+            "-p",
+            str(port),
+            f"{user}@{host}",
+            "true",
+        ]
+    )
+
+
+def require_operator_ssh_confirmation() -> None:
+    print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
+    print("Проверьте вход по вашему закрытому ключу на ENTRY сервер и EXIT сервер через новые SSH-порты.")
+    if not prompt_bool("Вход по административному ключу проверен на обоих серверах", False):
+        fail("Установка безопасно остановлена: старые SSH-порты сохранены, Fail2Ban не включён")
+
+
+def show_deployment_summary(production: Path) -> None:
+    hosts = load_yaml(production / "hosts.yml")
+    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+    exit_vars = load_yaml(production / "group_vars" / "exit.yml")
+    children = hosts["all"]["children"]
+    entry = children["entry"]["hosts"]["entry-managed"]
+    exit_node = children["exit"]["hosts"]["exit-managed"]
+    entry_public = str(entry_vars.get("entry_public_endpoint", entry["ansible_host"]))
+    exit_public = str(exit_node["ansible_host"])
+    proxy_enabled = bool(entry_vars.get("entry_ru_proxy_enabled", False))
+    dot_items = entry_vars.get("entry_dot_upstreams", [])
+    dot_summary = ", ".join(
+        f"{item['address']} (TLS: {item['tls_name']})" for item in dot_items
+    )
+    doh_summary = (
+        f"{entry_vars.get('entry_dns_doh_server')}"
+        f"{entry_vars.get('entry_dns_doh_path')} "
+        f"(TLS: {entry_vars.get('entry_dns_doh_tls_name')})"
+    )
+    clients_dir = Path.home() / ".local" / "share" / "awg-iac" / "production" / "clients"
+    mtu_file = clients_dir.parent / "mtu.yml"
+    client_files = sorted(clients_dir.glob("*.conf")) if clients_dir.is_dir() else []
+
+    access_rows: list[tuple[str, object]] = [
+        (
+            "SSH ENTRY",
+            f"{entry['ansible_user']}@{entry_public}:{entry['ansible_port']}",
+        ),
+        (
+            "SSH EXIT",
+            f"{exit_node['ansible_user']}@{exit_public}:{exit_node['ansible_port']}",
+        ),
+        (
+            "VPN-клиенты",
+            f"{entry_public}:{entry_vars.get('entry_awg0_listen_port')}/UDP",
+        ),
+    ]
+    if entry_vars.get("entry_legacy_client_available", False):
+        legacy_state = (
+            "включён" if entry_vars.get("entry_legacy_client_enabled", False)
+            else "выключен до создания old-клиента"
+        )
+        access_rows.append(
+            (
+                "Старые клиенты",
+                f"{entry_public}:{entry_vars.get('entry_legacy_client_listen_port')}/UDP; "
+                f"{legacy_state}",
+            )
+        )
+    if entry_vars.get("entry_mobile_client_available", False):
+        mobile_state = (
+            "включён" if entry_vars.get("entry_mobile_client_enabled", False)
+            else "выключен до создания mobile-клиента"
+        )
+        access_rows.append(
+            (
+                "Мобильные клиенты",
+                f"{entry_public}:{entry_vars.get('entry_mobile_client_listen_port')}/UDP; "
+                f"QUIC-профиль; {mobile_state}",
+            )
+        )
+
+    transit_label = (
+        "AWG 3+ userspace"
+        if entry_vars.get("awg3_transit_enabled", False)
+        else "AmneziaWG"
+    )
+    access_rows.append(
+        (
+            "Канал ENTRY–EXIT",
+            f"{entry_vars.get('entry_exit_endpoint')} · {transit_label}",
+        )
+    )
+
+    architecture_rows: list[tuple[str, object]] = [
+        ("Основной маршрут", "VPN-клиент → ENTRY → EXIT → Интернет"),
+    ]
+    if proxy_enabled:
+        architecture_rows.extend(
+            [
+                ("RU-трафик", "VPN-клиент → ENTRY → SOCKS5/TUN → Интернет"),
+                ("RU DNS", f"DoH через прокси: {doh_summary}"),
+            ]
+        )
+    else:
+        architecture_rows.extend(
+            [
+                ("RU-трафик", "VPN-клиент → WAN ENTRY → Интернет"),
+                ("RU DNS", "основной резолвер ENTRY по DoT"),
+            ]
+        )
+    architecture_rows.append(
+        ("Основной DNS", f"Unbound DoT: {dot_summary or 'не настроен'}")
+    )
+
+    security_rows = [
+        (
+            "UFW ENTRY",
+            f"TCP/{entry['ansible_port']} SSH; "
+            f"UDP/{entry_vars.get('entry_awg0_listen_port')} клиенты; "
+            f"UDP/{entry_vars.get('entry_mobile_client_listen_port')} mobile при включении; "
+            f"UDP/{entry_vars.get('security_interserver_listen_port')} только от "
+            f"{entry_vars.get('security_interserver_peer_ipv4')}",
+        ),
+        (
+            "UFW EXIT",
+            f"TCP/{exit_node['ansible_port']} SSH; "
+            f"UDP/{exit_vars.get('security_interserver_listen_port')} только от "
+            f"{exit_vars.get('security_interserver_peer_ipv4')}",
+        ),
+        ("Доступ SSH", "только по административному публичному ключу"),
+        ("Fail2Ban", "включён после подтверждения нового SSH-доступа"),
+    ]
+
+    mtu_rows: list[tuple[str, object]] = []
+    if entry_vars.get("awg3_transit_enabled", False):
+        if mtu_file.is_file():
+            mtu = load_yaml(mtu_file)
+            mtu_rows.extend(
+                [
+                    ("Внешний PMTU", mtu.get("shared_outer_pmtu")),
+                    ("MTU AWG 3+", mtu.get("transit_mtu")),
+                    ("MTU клиентов", mtu.get("client_mtu")),
+                    ("MTU old-клиентов", mtu.get("legacy_client_mtu")),
+                    ("MTU mobile-клиентов", mtu.get("mobile_client_mtu")),
+                ]
+            )
+        else:
+            mtu_rows.append(
+                ("MTU", "будет автоматически измерен в обоих направлениях")
+            )
+
+    file_rows: list[tuple[str, object]] = [
+        ("Inventory", production),
+        (
+            "Пароль Vault",
+            Path.home() / ".config" / "awg-iac" / "production-vault.pass",
+        ),
+    ]
+    if client_files:
+        for path in client_files:
+            file_rows.append(
+                (
+                    f"Клиент {path.stem}",
+                    f"{path} · права {stat.S_IMODE(path.stat().st_mode):04o}",
+                )
+            )
+    else:
+        file_rows.append(("Каталог клиентов", clients_dir))
+
+    print()
+    ui_panel(
+        "KALIMERAWG · ИТОГОВАЯ КОНФИГУРАЦИЯ",
+        [
+            "Установка завершена. Ниже показаны только безопасные данные.",
+            "Закрытые ключи, PSK, пароли и содержимое клиентских конфигураций не выводятся.",
+        ],
+        "green",
+    )
+    ui_rows("ПОДКЛЮЧЕНИЯ", access_rows, "cyan")
+    ui_rows("СХЕМА РАБОТЫ И DNS", architecture_rows, "magenta")
+    if mtu_rows:
+        ui_rows("АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU", mtu_rows, "blue")
+    ui_rows("ЗАЩИТА ВНЕШНИХ ИНТЕРФЕЙСОВ", security_rows, "yellow")
+    ui_rows("ГОТОВЫЕ ФАЙЛЫ", file_rows, "green")
+    ui_panel(
+        "КОМАНДЫ ENTRY СЕРВЕРА",
+        [
+            "Состояние:  awg-health · server-audit · dns-status",
+            "Клиенты:    vpn-user list/create/delete · awg-old · awg-mobile",
+            "Маршруты:   ru-domain · se-domain · entry-domain · ru-direct-ports",
+            "Прокси/DNS: ru-proxy · ru-proxy-set · dot-switch · doh-switch",
+            "Система:    maintenance · update-all · f2b-reset",
+        ],
+        "blue",
+    )
+    ui_panel(
+        "КОМАНДЫ EXIT СЕРВЕРА",
+        [
+            "awg-health · server-audit · maintenance · update-all · f2b-reset",
+        ],
+        "blue",
+    )
+    ui_panel(
+        "СЛЕДУЮЩИЕ ШАГИ",
+        [
+            "1. Откройте новое SSH-соединение к обоим адресам из блока «ПОДКЛЮЧЕНИЯ».",
+            "2. Безопасно перенесите первый файл клиента и импортируйте его в AmneziaWG.",
+            "3. Проверьте handshake клиента и выполните awg-health --strict.",
+            "Подсказки: kalimera-help · точный синтаксис: <команда> --help.",
+        ],
+        "green",
+    )
+
+
+def ansible(
+    repo: Path,
+    inventory: Path,
+    vault_password: Path,
+    playbook: str,
+    extra_vars: dict[str, object] | None = None,
+) -> None:
+    argv = [
+            require_command("ansible-playbook"),
+            "-i",
+            str(inventory),
+            str(repo / playbook),
+            "--vault-password-file",
+            str(vault_password),
+            "-e",
+            "awg_adoption_mode=apply",
+        ]
+    for key, value in (extra_vars or {}).items():
+        rendered = str(value).lower() if isinstance(value, bool) else str(value)
+        argv.extend(["-e", f"{key}={rendered}"])
+    run(argv)
+
+
+def complete_ssh_transition(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    hosts_document: dict,
+    mtu_result: Path,
+    awg_package_lock: Path,
+) -> bool:
+    children = hosts_document["all"]["children"]
+    managed_hosts = (
+        ("entry", "entry-managed"),
+        ("exit", "exit-managed"),
+    )
+    transitioning = []
+    for group, name in managed_hosts:
+        variables = children[group]["hosts"][name]
+        if variables.get("security_allow_ssh_port_change", False):
+            transitioning.append((group, name, variables))
+
+    if not transitioning:
+        return False
+
+    print("Продолжается переход SSH: временно работают старый и новый порты...")
+    ansible(
+        repo,
+        hosts_path,
+        vault_password,
+        "playbooks/site.yml",
+        {
+            "awg_enable_fail2ban": False,
+            "awg_health_run_during_deploy": False,
+            "awg_telegram_monitor_start_immediately": False,
+            "awg_prepare_apt": True,
+            "awg_restore_apt": False,
+            "awg_mtu_controller_result_path": str(mtu_result),
+            "awg_package_controller_lock_path": str(awg_package_lock),
+        },
+    )
+
+    for _group, _name, variables in transitioning:
+        check_ssh(
+            str(variables["ansible_host"]),
+            str(variables["ansible_user"]),
+            int(variables["ssh_listen_port"]),
+            Path(str(variables["ansible_ssh_private_key_file"])),
+        )
+        current = int(variables["ansible_port"])
+        variables["ansible_port"] = int(variables["ssh_listen_port"])
+        variables["security_allow_ssh_port_change"] = False
+        variables["security_previous_ssh_port"] = current
+
+    require_operator_ssh_confirmation()
+    yaml_write(hosts_path, hosts_document)
+    return True
+
+
+def main() -> None:
+    configure_line_editing()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo-root", required=True, type=Path)
+    parser.add_argument(
+        "--resume", action="store_true", help="продолжить или повторить существующую установку"
+    )
+    parser.add_argument(
+        "--summary", action="store_true", help="показать безопасную итоговую конфигурацию"
+    )
+    parser.add_argument(
+        "--terminal-only",
+        action="store_true",
+        help="обновить только оформление терминала и справку без изменения каскада",
+    )
+    parser.add_argument(
+        "--mobile-i1-mode",
+        choices=("dns-ios", "quic-ios", "quic-ios-test"),
+        help=(
+            "при --resume переключить только I1 mobile-интерфейса: "
+            "quic-ios или совместимый прежний dns-ios"
+        ),
+    )
+    parser.add_argument(
+        "--enable-mobile",
+        action="store_true",
+        help="при --resume безопасно добавить отсутствующий mobile AWG UDP/8443",
+    )
+    args = parser.parse_args()
+    if args.mobile_i1_mode and not args.resume:
+        parser.error("--mobile-i1-mode используется только вместе с --resume")
+    if args.enable_mobile and not args.resume:
+        parser.error("--enable-mobile используется только вместе с --resume")
+    if args.terminal_only and (
+        args.resume or args.summary or args.mobile_i1_mode or args.enable_mobile
+    ):
+        parser.error("--terminal-only нельзя объединять с другими режимами deploy")
+    repo = args.repo_root.resolve()
+    production = repo / "inventory" / "production"
+    state_root = Path.home() / ".local" / "share" / "awg-iac" / "production"
+    mtu_result = state_root / "mtu.yml"
+    awg_package_lock = state_root / "amneziawg-package-lock.txt"
+    vault_password = Path.home() / ".config" / "awg-iac" / "production-vault.pass"
+    if args.summary:
+        if not (production / "hosts.yml").is_file() or not (
+            production / "group_vars" / "entry.yml"
+        ).is_file():
+            fail("Сформированный production inventory не найден")
+        show_deployment_summary(production)
+        return
+    if args.terminal_only:
+        hosts_path = production / "hosts.yml"
+        vault_path = production / "group_vars" / "all" / "vault.yml"
+        if not hosts_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
+            fail("Не найден production inventory или внешний пароль Ansible Vault")
+        ansible(repo, hosts_path, vault_password, "playbooks/terminal.yml")
+        print(
+            "Терминальный интерфейс ENTRY и EXIT обновлён без изменения SSH, "
+            "AWG, UFW, DNS и маршрутизации."
+        )
+        return
+    if args.resume:
+        hosts_path = production / "hosts.yml"
+        vault_path = production / "group_vars" / "all" / "vault.yml"
+        all_vars_path = production / "group_vars" / "all" / "main.yml"
+        if not hosts_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
+            fail("Не найден production inventory или внешний пароль Ansible Vault")
+        if not all_vars_path.is_file():
+            fail("Не найдены групповые переменные production inventory")
+        migrate_production_inventory(production)
+        if args.enable_mobile:
+            enable_mobile_profile(production, vault_password)
+        if args.mobile_i1_mode:
+            set_mobile_i1_mode(production, args.mobile_i1_mode)
+        update_saved_client_configs_cps(state_root / "clients")
+        all_vars = load_yaml(all_vars_path)
+        if (
+            all_vars.get("awg_package_version_mode") == "candidate"
+            and awg_package_lock.is_file()
+        ):
+            pin_resolved_awg_packages(all_vars_path, awg_package_lock)
+            all_vars = load_yaml(all_vars_path)
+        if not all_vars.get("security_admin_authorized_keys"):
+            print("Перед отключением входа по паролю требуется административный публичный SSH-ключ.")
+            all_vars["security_admin_authorized_keys"] = [prompt_admin_public_key()]
+            yaml_write(all_vars_path, all_vars)
+        if not all_vars.get("security_require_admin_authorized_key"):
+            all_vars["security_require_admin_authorized_key"] = True
+            yaml_write(all_vars_path, all_vars)
+        hosts_document = load_yaml(hosts_path)
+        cleanup_callback = lambda: cleanup_deployment(repo, hosts_path, vault_password)
+        atexit.register(cleanup_callback)
+        transition_completed = complete_ssh_transition(
+            repo,
+            hosts_path,
+            vault_password,
+            hosts_document,
+            mtu_result,
+            awg_package_lock,
+        )
+        if awg_package_lock.is_file():
+            pin_resolved_awg_packages(all_vars_path, awg_package_lock)
+        final_variables = {
+            "awg_enable_fail2ban": True,
+            "awg_health_run_during_deploy": False,
+            "awg_telegram_monitor_start_immediately": False,
+            "awg_mtu_controller_result_path": str(mtu_result),
+            "awg_package_controller_lock_path": str(awg_package_lock),
+        }
+        if transition_completed:
+            final_variables.update({"awg_prepare_apt": False, "awg_restore_apt": True})
+        ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
+        if awg_package_lock.is_file():
+            pin_resolved_awg_packages(all_vars_path, awg_package_lock)
+        ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+        ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
+        ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+        update_saved_client_configs_mtu(state_root / "clients", mtu_result)
+        cleanup_deployment(repo, hosts_path, vault_password)
+        atexit.unregister(cleanup_callback)
+        print("Существующая конфигурация повторно применена и успешно проверена.")
+        show_deployment_summary(production)
+        return
+    if production.exists():
+        fail(
+            "inventory/production уже существует; используйте './deploy --resume' "
+            "для продолжения существующей установки"
+        )
+
+    for command in (
+        "ansible-playbook",
+        "ansible-inventory",
+        "ssh",
+        "ssh-copy-id",
+        "ssh-keygen",
+        "sshpass",
+    ):
+        require_command(command)
+
+    show_installer_banner()
+
+    ui_section(
+        1,
+        "СЕРВЕРЫ",
+        "Укажите, где находятся ENTRY и EXIT и как подключаться к ним сейчас.",
+    )
+    local_entry = prompt_bool("Установить ENTRY сервер на этой машине", False)
+    entry_host = "127.0.0.1" if local_entry else prompt("IP-адрес или DNS-имя ENTRY сервера")
+    exit_host = prompt("IP-адрес или DNS-имя EXIT сервера")
+    if not entry_host or not exit_host:
+        fail("Необходимо указать адреса ENTRY сервера и EXIT сервера")
+    if not local_entry:
+        require_public_endpoint(entry_host, "Адрес удалённого ENTRY сервера")
+    require_public_endpoint(exit_host, "Адрес EXIT сервера")
+
+    entry_user = prompt("Пользователь SSH ENTRY сервера", "root")
+    exit_user = prompt("Пользователь SSH EXIT сервера", "root")
+    if local_entry and entry_user != "root":
+        fail("Локальная установка ENTRY сервера должна выполняться от root")
+    entry_current_port = prompt_port(
+        "Текущий SSH-порт ENTRY сервера", detect_local_ssh_port() if local_entry else 22
+    )
+    exit_current_port = prompt_port("Текущий SSH-порт EXIT сервера", 22)
+
+    ui_section(
+        2,
+        "ПОРТЫ",
+        "Новые SSH-порты проверяются до закрытия старых; AWG использует UDP.",
+    )
+    entry_new_port = prompt_port("Новый управляемый SSH-порт ENTRY сервера", 56777)
+    exit_new_port = prompt_port("Новый управляемый SSH-порт EXIT сервера", 56777)
+    if entry_new_port < 1024 or exit_new_port < 1024:
+        fail("Управляемые SSH-порты должны находиться в диапазоне 1024–65535")
+    client_awg_port = prompt_port("UDP-порт AWG для VPN-клиентов ENTRY сервера", 443)
+    transit_awg_port = prompt_port(
+        "Публичный UDP-порт межсерверного AWG на EXIT сервере",
+        443,
+    )
+    legacy_awg_port = prompt_port(
+        "UDP-порт для старых клиентов KeeneticOS 4.3.x",
+        39744,
+    )
+    mobile_awg_port = prompt_port(
+        "UDP-порт мобильного AWG с QUIC-маскировкой",
+        8443,
+    )
+    if client_awg_port == legacy_awg_port:
+        fail("Основной и совместимый клиентские UDP-порты AWG на ENTRY должны различаться")
+    # На ENTRY клиентский kernel-интерфейс и userspace AWG3 не могут надёжно
+    # делить один сокет. Публичным портом каскада остаётся UDP/443 на EXIT, а
+    # локальный порт AWG3 на ENTRY выбирается отдельно и фильтруется по IP EXIT.
+    entry_transit_listen_port = 39745
+    while entry_transit_listen_port in {client_awg_port, legacy_awg_port}:
+        entry_transit_listen_port += 1
+    if entry_transit_listen_port > 65535:
+        fail("Не удалось автоматически выбрать локальный UDP-порт AWG3 на ENTRY")
+    if mobile_awg_port in {
+        client_awg_port, legacy_awg_port, entry_transit_listen_port,
+    }:
+        fail("UDP-порт мобильного AWG должен отличаться от других портов AWG на ENTRY")
+
+    ui_section(
+        3,
+        "БЕЗОПАСНЫЙ ДОСТУП",
+        "Пароли нужны только для bootstrap; постоянный вход останется по вашему ключу.",
+    )
+    entry_password = ""
+    if not local_entry:
+        entry_password = getpass.getpass("Пароль SSH ENTRY сервера (ввод скрыт): ")
+    exit_password = getpass.getpass("Пароль SSH EXIT сервера (ввод скрыт): ")
+    if (not local_entry and not entry_password) or not exit_password:
+        fail("Начальные пароли SSH удалённых серверов не могут быть пустыми")
+
+    print("Вставьте ПУБЛИЧНЫЙ ключ с вашего компьютера. Никогда не вставляйте закрытый ключ.")
+    admin_public_key = prompt_admin_public_key()
+
+    entry_sudo = entry_user != "root" and prompt_bool(
+        "Для sudo на ENTRY сервере используется тот же пароль", True
+    )
+    exit_sudo = exit_user != "root" and prompt_bool(
+        "Для sudo на EXIT сервере используется тот же пароль", True
+    )
+
+    ui_section(
+        4,
+        "МАРШРУТИЗАЦИЯ RU-ТРАФИКА",
+        "Прямой маршрут работает без прокси; SOAX и SOCKS5 получают TUN и fail-open.",
+    )
+    ui_panel(
+        "ВЫБОР МАРШРУТА",
+        [
+            "1 · напрямую через ENTRY сервер",
+            "2 · через SOAX SOCKS5",
+            "3 · через другой SOCKS5-прокси",
+        ],
+        "cyan",
+    )
+    proxy_choice = prompt("Выберите режим", "1")
+    if proxy_choice not in {"1", "2", "3"}:
+        fail("Выбран неподдерживаемый режим RU-трафика")
+    proxy_enabled = proxy_choice != "1"
+    proxy_host = ""
+    proxy_port = 0
+    proxy_username = ""
+    proxy_password = ""
+    expected_proxy_ip = ""
+    if proxy_enabled:
+        proxy_host = prompt(
+            "Адрес SOCKS5-прокси", "proxy.soax.com" if proxy_choice == "2" else None
+        )
+        proxy_port = prompt_port("Порт SOCKS5-прокси", 1337 if proxy_choice == "2" else 1080)
+        proxy_username = getpass.getpass("Имя пользователя SOCKS5, если требуется (ввод скрыт): ")
+        proxy_password = getpass.getpass("Пароль SOCKS5, если требуется (ввод скрыт): ")
+        if bool(proxy_username) != bool(proxy_password):
+            fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
+        expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
+
+    ui_section(
+        5,
+        "DNS И МОНИТОРИНГ",
+        "По умолчанию: Mullvad DoT и Yandex DoH для RU-доменов через прокси.",
+    )
+    telegram_enabled = prompt_bool("Включить мониторинг через Telegram", False)
+    telegram_token = ""
+    telegram_chat = ""
+    if telegram_enabled:
+        ui_panel(
+            "ЛИЧНЫЙ TELEGRAM-БОТ",
+            [
+                "1 · у меня уже есть токен собственного бота",
+                "2 · нужно создать нового бота через официальный @BotFather",
+                "KalimeraWG не предоставляет общего бота и не получает ваши данные.",
+            ],
+            "cyan",
+        )
+        telegram_setup = prompt("Выберите вариант", "1")
+        if telegram_setup not in {"1", "2"}:
+            fail("Выберите 1 для готового бота или 2 для создания нового")
+        if telegram_setup == "2":
+            ui_panel(
+                "СОЗДАНИЕ БОТА ЧЕРЕЗ @BOTFATHER",
+                [
+                    "1. Откройте в Telegram официальный @BotFather с отметкой проверки.",
+                    "2. Отправьте команду /newbot.",
+                    "3. Укажите отображаемое имя бота.",
+                    "4. Укажите уникальное имя пользователя, оканчивающееся на bot.",
+                    "5. Скопируйте выданный токен целиком вместе с двоеточием.",
+                ],
+                "magenta",
+            )
+            input("Нажмите Enter после получения токена от @BotFather: ")
+        telegram_token = getpass.getpass(
+            "Полный токен Telegram-бота с двоеточием (ввод скрыт): "
+        ).strip()
+        if not re.fullmatch(r"[0-9]{6,20}:[A-Za-z0-9_-]{20,}", telegram_token):
+            fail(
+                "Некорректный токен Telegram: введите всю строку BotFather "
+                "целиком вместе с двоеточием"
+            )
+        bot = telegram_api_result(telegram_token, "getMe")
+        if not isinstance(bot, dict) or not bot.get("username"):
+            fail("Telegram не подтвердил токен бота. Проверьте токен и доступ в Интернет")
+        print(f"Telegram-бот подтверждён: @{bot['username']}")
+
+        telegram_chat = prompt(
+            "Числовой Telegram chat ID; Enter — определить автоматически"
+        )
+        if not telegram_chat:
+            ui_panel(
+                "ОПРЕДЕЛЕНИЕ TELEGRAM CHAT ID",
+                [
+                    f"Откройте @{bot['username']} в Telegram.",
+                    "Нажмите Start и отправьте боту любое сообщение.",
+                    "После отправки вернитесь сюда и нажмите Enter.",
+                ],
+                "cyan",
+            )
+            input("Нажмите Enter после отправки сообщения боту: ")
+            discovered = telegram_latest_chat_from_updates(
+                telegram_api_result(telegram_token, "getUpdates?timeout=10")
+            )
+            if discovered is None:
+                fail(
+                    "Chat ID не найден. Отправьте сообщение непосредственно боту "
+                    "или введите ранее сохранённый числовой Chat ID"
+                )
+            telegram_chat, chat_label = discovered
+            print(f"Telegram chat найден: {chat_label} (ID {telegram_chat})")
+        if not telegram_credentials_valid(telegram_token, telegram_chat):
+            fail("Telegram chat ID должен быть отдельным положительным или отрицательным числом")
+
+    dot_upstreams = [
+        {"address": "194.242.2.2", "tls_name": "dns.mullvad.net"},
+    ]
+    if not prompt_bool("Использовать Mullvad DNS-over-TLS по умолчанию", True):
+        dot_addresses = [item.strip() for item in prompt("IPv4-адреса DoT через запятую").split(",") if item.strip()]
+        dot_tls_name = prompt("TLS-имя сервера DoT")
+        if not dot_addresses or not dot_tls_name:
+            fail("Для собственного DoT нужны адреса серверов и TLS-имя")
+        try:
+            for address in dot_addresses:
+                ipaddress.IPv4Address(address)
+        except ValueError:
+            fail("Каждый адрес собственного DoT должен быть IPv4-адресом")
+        dot_upstreams = [{"address": address, "tls_name": dot_tls_name} for address in dot_addresses]
+
+    doh_server = "77.88.8.8"
+    doh_tls_name = "common.dot.dns.yandex.net"
+    doh_path = "/dns-query"
+    if not prompt_bool("Использовать Yandex DNS-over-HTTPS для RU-доменов", True):
+        doh_server = prompt("IPv4-адрес DoH-сервера")
+        doh_tls_name = prompt("TLS-имя DoH-сервера")
+        doh_path = prompt("HTTP-путь DoH", "/dns-query")
+        try:
+            ipaddress.IPv4Address(doh_server)
+        except ValueError:
+            fail("Собственный DoH-сервер должен иметь IPv4-адрес")
+        if not doh_tls_name or not doh_path.startswith("/"):
+            fail("Для собственного DoH нужны TLS-имя и абсолютный HTTP-путь")
+
+    exit_endpoint = prompt("Публичный адрес AWG EXIT сервера", exit_host)
+    require_public_endpoint(exit_endpoint, "AWG endpoint EXIT сервера")
+    exit_public_ipv4 = resolve_single_public_ipv4(exit_endpoint, "AWG endpoint EXIT сервера")
+    entry_public_endpoint = prompt("Публичный адрес AWG ENTRY сервера", entry_host)
+    require_public_endpoint(entry_public_endpoint, "AWG endpoint ENTRY сервера")
+    entry_public_ipv4 = resolve_single_public_ipv4(
+        entry_public_endpoint, "AWG endpoint ENTRY сервера"
+    )
+    ui_section(
+        6,
+        "ПЕРВЫЙ VPN-КЛИЕНТ",
+        "Конфигурация будет создана автоматически и сохранена с правами 0600.",
+    )
+    client_name = prompt("Имя первого VPN-пользователя", "vpn-user")
+    if not client_name or not all(character.isalnum() or character in "-_" for character in client_name):
+        fail("Имя VPN-пользователя может содержать только буквы, цифры, дефис и подчёркивание")
+    ui_panel(
+        "ПРОФИЛЬ МАСКИРОВКИ",
+        [
+            "1 · максимальная производительность",
+            "2 · сбалансированный",
+            "3 · максимальная маскировка",
+            "4 · мобильный QUIC-профиль: отдельный интерфейс и UDP/8443",
+            "5 · KeeneticOS 4.3.x: базовый ASC и отдельный интерфейс",
+        ],
+        "magenta",
+    )
+    profile_choice = prompt("Выберите профиль", "2")
+    profile_names = {
+        "1": "performance", "2": "balanced", "3": "masking",
+        "4": "mobile", "5": "old",
+    }
+    if profile_choice not in profile_names:
+        fail("Выбран неподдерживаемый профиль маскировки")
+    client_profile_name = profile_names[profile_choice]
+    client_subnet_text = prompt("Подсеть AWG-клиентов", "10.66.0.0/24")
+    legacy_client_subnet_text = prompt(
+        "Подсеть старых AWG-клиентов KeeneticOS 4.3.x", "10.67.0.0/24"
+    )
+    mobile_client_subnet_text = prompt(
+        "Подсеть мобильных AWG-клиентов с QUIC-маскировкой", "10.68.0.0/24"
+    )
+    transit_subnet_text = prompt("Подсеть AWG между ENTRY сервером и EXIT сервером", "10.77.0.0/24")
+    try:
+        client_subnet = ipaddress.ip_network(client_subnet_text, strict=True)
+        legacy_client_subnet = ipaddress.ip_network(legacy_client_subnet_text, strict=True)
+        mobile_client_subnet = ipaddress.ip_network(mobile_client_subnet_text, strict=True)
+        transit_subnet = ipaddress.ip_network(transit_subnet_text, strict=True)
+        networks = (
+            client_subnet, legacy_client_subnet, mobile_client_subnet,
+            transit_subnet,
+        )
+        if any(
+            networks[left].overlaps(networks[right])
+            for left in range(len(networks))
+            for right in range(left + 1, len(networks))
+        ):
+            fail("Подсети основных, старых, мобильных клиентов и ENTRY–EXIT не должны пересекаться")
+        client_hosts = client_subnet.hosts()
+        entry_client_ip = next(client_hosts)
+        modern_initial_client_ip = next(client_hosts)
+        legacy_hosts = legacy_client_subnet.hosts()
+        entry_legacy_client_ip = next(legacy_hosts)
+        legacy_initial_client_ip = next(legacy_hosts)
+        mobile_hosts = mobile_client_subnet.hosts()
+        entry_mobile_client_ip = next(mobile_hosts)
+        mobile_initial_client_ip = next(mobile_hosts)
+        transit_hosts = transit_subnet.hosts()
+        exit_transit_ip = next(transit_hosts)
+        entry_transit_ip = next(transit_hosts)
+    except (ValueError, StopIteration):
+        fail("Подсети AWG должны быть корректными IPv4-сетями минимум с двумя доступными адресами")
+
+    config_root = Path.home() / ".config" / "awg-iac"
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    vault_password = config_root / "production-vault.pass"
+    client_config = state_root / "clients" / f"{client_name}.conf"
+
+    if client_config.exists():
+        fail("Отказ от перезаписи существующих защищённых данных VPN-клиента")
+    staging = repo / "work" / f"production-{secrets.token_hex(8)}"
+    config_staging = state_root / f".{client_name}-{secrets.token_hex(8)}.conf.tmp"
+
+    def cleanup_staging() -> None:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if not production.exists():
+            config_staging.unlink(missing_ok=True)
+
+    atexit.register(cleanup_staging)
+
+    if not ssh_private.exists():
+        ssh_private.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        run(
+            [
+                require_command("ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(ssh_private),
+                "-C",
+                "awg-iac-production",
+            ]
+        )
+    ssh_private.chmod(0o600)
+
+    if not vault_password.exists():
+        secure_write(vault_password, (secrets.token_urlsafe(48) + "\n").encode())
+    if stat.S_IMODE(vault_password.stat().st_mode) & 0o077:
+        fail("Права файла пароля Vault недостаточно строгие")
+
+    print("Установка автоматически созданного публичного SSH-ключа...")
+    if local_entry:
+        print("ENTRY сервер: локальная установка ключа без парольного SSH-подключения...")
+        install_local_key(entry_user, ssh_public)
+    else:
+        entry_password = bootstrap_key(
+            entry_host,
+            entry_user,
+            entry_current_port,
+            entry_password,
+            ssh_public,
+            "ENTRY сервер",
+        )
+    exit_password = bootstrap_key(
+        exit_host,
+        exit_user,
+        exit_current_port,
+        exit_password,
+        ssh_public,
+        "EXIT сервер",
+    )
+
+    staging.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(repo / "inventory" / "example", staging)
+    all_vars_path = staging / "group_vars" / "all" / "main.yml"
+    entry_vars_path = staging / "group_vars" / "entry.yml"
+    exit_vars_path = staging / "group_vars" / "exit.yml"
+    all_vars = load_yaml(all_vars_path)
+    entry_vars = load_yaml(entry_vars_path)
+    exit_vars = load_yaml(exit_vars_path)
+    client_mode = (
+        "legacy" if client_profile_name == "old"
+        else "mobile" if client_profile_name == "mobile"
+        else "modern"
+    )
+    client_server_obfuscation = awg_server_obfuscation()
+    legacy_server_obfuscation = awg_legacy_server_obfuscation()
+    mobile_server_obfuscation = awg_mobile_quic_obfuscation()
+    initial_server_obfuscation = (
+        legacy_server_obfuscation if client_mode == "legacy"
+        else mobile_server_obfuscation if client_mode == "mobile"
+        else client_server_obfuscation
+    )
+    initial_client_ip = (
+        legacy_initial_client_ip if client_mode == "legacy"
+        else mobile_initial_client_ip if client_mode == "mobile"
+        else modern_initial_client_ip
+    )
+    transit_obfuscation = awg3_transit_obfuscation()
+    initial_client_obfuscation = awg_client_obfuscation(
+        client_profile_name, initial_server_obfuscation
+    )
+
+    for key in ("ansible_user", "ansible_port", "ssh_listen_port"):
+        all_vars.pop(key, None)
+    all_vars.update(
+        {
+            "awg_adoption_mode": "apply",
+            "awg_package_version_mode": "candidate",
+            "security_manage_ssh": True,
+            "security_admin_authorized_keys": [admin_public_key],
+            "security_require_admin_authorized_key": True,
+            "awg_interserver_entry_address": f"{entry_transit_ip}/32",
+            "awg_telegram_monitor_enabled": telegram_enabled,
+        }
+    )
+    entry_vars.update(
+        {
+            "entry_wan_interface": "auto",
+            "entry_client_address": f"{entry_client_ip}/{client_subnet.prefixlen}",
+            "entry_client_listen_address": str(entry_client_ip),
+            "entry_client_subnet": str(client_subnet),
+            "entry_exit_tunnel_address": f"{entry_transit_ip}/32",
+            "entry_exit_endpoint": f"{exit_endpoint}:{transit_awg_port}",
+            "entry_exit_interface": "awg3",
+            "entry_public_endpoint": entry_public_endpoint,
+            "entry_awg0_listen_port": client_awg_port,
+            "security_interserver_peer_ipv4": exit_public_ipv4,
+            "security_interserver_listen_port": entry_transit_listen_port,
+            "entry_awg0_mtu": 1380,
+            "entry_awg_client_mtu": 1380,
+            "entry_awg0_obfuscation": client_server_obfuscation,
+            "entry_manage_awg_configs": True,
+            "entry_awg1_obfuscation": transit_obfuscation,
+            "entry_awg_client_default_profile": client_profile_name,
+            "entry_awg_client_mode": "modern",
+            "entry_legacy_client_available": True,
+            "entry_legacy_client_enabled": client_mode == "legacy",
+            "entry_legacy_client_interface": "awg-old",
+            "entry_legacy_client_address": f"{entry_legacy_client_ip}/{legacy_client_subnet.prefixlen}",
+            "entry_legacy_client_listen_address": str(entry_legacy_client_ip),
+            "entry_legacy_client_subnet": str(legacy_client_subnet),
+            "entry_legacy_client_listen_port": legacy_awg_port,
+            "entry_legacy_awg_obfuscation": legacy_server_obfuscation,
+            "entry_mobile_client_available": True,
+            "entry_mobile_client_enabled": client_mode == "mobile",
+            "entry_mobile_client_interface": "awg-mobile",
+            "entry_mobile_client_address": f"{entry_mobile_client_ip}/{mobile_client_subnet.prefixlen}",
+            "entry_mobile_client_listen_address": str(entry_mobile_client_ip),
+            "entry_mobile_client_subnet": str(mobile_client_subnet),
+            "entry_mobile_client_listen_port": mobile_awg_port,
+            "entry_mobile_legacy_public_port": 53,
+            "entry_mobile_legacy_internal_port": 39746,
+            "entry_mobile_client_mtu": 1380,
+            "entry_mobile_awg_obfuscation": mobile_server_obfuscation,
+            "entry_mobile_i1_mode": "quic-ios",
+            "awg3_transit_enabled": True,
+            "awg3_transit_interface": "awg3",
+            "awg3_transit_listen_port": entry_transit_listen_port,
+            "awg3_transit_address": f"{entry_transit_ip}/32",
+            "awg3_peer_endpoint_host": exit_endpoint,
+            "awg3_peer_endpoint_port": transit_awg_port,
+            "awg3_peer_tunnel_address": str(exit_transit_ip),
+            "awg3_transit_private_key": "{{ vault_awg_entry_exit_private_key }}",
+            "awg3_transit_peer_public_key": "{{ vault_awg_entry_exit_peer_public_key }}",
+            "awg3_transit_allowed_ips": ["0.0.0.0/0"],
+            "awg3_transit_obfuscation": transit_obfuscation,
+            "entry_ru_proxy_enabled": proxy_enabled,
+            "entry_proxy_server": proxy_host or "127.0.0.1",
+            "entry_proxy_port": proxy_port or 1080,
+            "entry_ru_proxy_expected_ip": expected_proxy_ip,
+            "entry_dot_upstreams": dot_upstreams,
+            "entry_dns_doh_server": doh_server,
+            "entry_dns_doh_tls_name": doh_tls_name,
+            "entry_dns_doh_path": doh_path,
+        }
+    )
+    exit_vars.update(
+        {
+            "exit_wan_interface": "auto",
+            "exit_awg_interface": "awg3",
+            "exit_awg_listen_port": transit_awg_port,
+            "security_interserver_peer_ipv4": entry_public_ipv4,
+            "security_interserver_listen_port": transit_awg_port,
+            "exit_awg_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
+            "exit_awg_subnet": str(transit_subnet),
+            "exit_awg_obfuscation": transit_obfuscation,
+            "exit_manage_awg_config": False,
+            "exit_peer_migration_policy": "explicit",
+            "awg3_transit_enabled": True,
+            "awg3_transit_interface": "awg3",
+            "awg3_transit_listen_port": transit_awg_port,
+            "awg3_transit_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
+            "awg3_peer_endpoint_host": entry_public_endpoint,
+            "awg3_peer_endpoint_port": entry_transit_listen_port,
+            "awg3_peer_tunnel_address": str(entry_transit_ip),
+            "awg3_transit_private_key": "{{ vault_awg_exit_private_key }}",
+            "awg3_transit_peer_public_key": "{{ vault_awg_entry_exit_entry_public_key }}",
+            "awg3_transit_allowed_ips": [f"{entry_transit_ip}/32"],
+            "awg3_transit_obfuscation": transit_obfuscation,
+        }
+    )
+    yaml_write(all_vars_path, all_vars)
+    yaml_write(entry_vars_path, entry_vars)
+    yaml_write(exit_vars_path, exit_vars)
+
+    host_vars = {
+        "entry-managed": {
+            "ansible_host": entry_host,
+            "ansible_user": entry_user,
+            "ansible_port": entry_current_port,
+            "ansible_become": True,
+            "ansible_ssh_private_key_file": str(ssh_private),
+            "ssh_listen_port": entry_new_port,
+            "security_allow_ssh_port_change": entry_current_port != entry_new_port,
+        },
+        "exit-managed": {
+            "ansible_host": exit_host,
+            "ansible_user": exit_user,
+            "ansible_port": exit_current_port,
+            "ansible_become": True,
+            "ansible_ssh_private_key_file": str(ssh_private),
+            "ssh_listen_port": exit_new_port,
+            "security_allow_ssh_port_change": exit_current_port != exit_new_port,
+        },
+    }
+    if local_entry:
+        host_vars["entry-managed"]["ansible_connection"] = "local"
+        host_vars["entry-managed"]["ansible_python_interpreter"] = "/usr/bin/python3"
+    if entry_sudo:
+        host_vars["entry-managed"]["ansible_become_password"] = "{{ vault_entry_become_password }}"
+    if exit_sudo:
+        host_vars["exit-managed"]["ansible_become_password"] = "{{ vault_exit_become_password }}"
+
+    hosts_document = {
+        "all": {
+            "children": {
+                "entry": {"hosts": {"entry-managed": host_vars["entry-managed"]}},
+                "exit": {"hosts": {"exit-managed": host_vars["exit-managed"]}},
+            }
+        }
+    }
+    hosts_path = staging / "hosts.yml"
+    yaml_write(hosts_path, hosts_document)
+
+    entry_private = awg_private_key()
+    legacy_entry_private = awg_private_key()
+    mobile_entry_private = awg_private_key()
+    transit_private = awg_private_key()
+    exit_private = awg_private_key()
+    transit_psk = awg_psk()
+    client_private = awg_private_key()
+    client_psk = awg_psk()
+    vault_document: dict[str, object] = {
+        "vault_awg_entry_private_key": entry_private,
+        "vault_awg_entry_legacy_private_key": legacy_entry_private,
+        "vault_awg_entry_mobile_private_key": mobile_entry_private,
+        "vault_awg_entry_exit_private_key": transit_private,
+        "vault_awg_entry_exit_peer_public_key": awg_public_key(exit_private),
+        "vault_awg_exit_private_key": exit_private,
+        "vault_awg_entry_exit_psk": transit_psk,
+        "vault_awg3_header_protection_key": awg_private_key(),
+        "vault_awg_entry_exit_entry_public_key": awg_public_key(transit_private),
+        "vault_proxy_username": proxy_username,
+        "vault_proxy_password": proxy_password,
+        "vault_entry_client_peers": ([] if client_mode in {"legacy", "mobile"} else [
+            {
+                "name": client_name,
+                "public_key": awg_public_key(client_private),
+                "allowed_ips": [f"{initial_client_ip}/32"],
+                "preshared_key": client_psk,
+            }
+        ]),
+        "vault_entry_legacy_client_peers": ([
+            {
+                "name": client_name,
+                "public_key": awg_public_key(client_private),
+                "allowed_ips": [f"{initial_client_ip}/32"],
+                "preshared_key": client_psk,
+            }
+        ] if client_mode == "legacy" else []),
+        "vault_entry_mobile_client_peers": ([
+            {
+                "name": client_name,
+                "public_key": awg_public_key(client_private),
+                "allowed_ips": [f"{initial_client_ip}/32"],
+                "preshared_key": client_psk,
+            }
+        ] if client_mode == "mobile" else []),
+        "vault_exit_peers": [
+            {
+                "name": "entry",
+                "public_key": awg_public_key(transit_private),
+                "allowed_ips": [f"{entry_transit_ip}/32"],
+                "preshared_key": transit_psk,
+            }
+        ],
+    }
+    if entry_sudo:
+        vault_document["vault_entry_become_password"] = entry_password
+    if exit_sudo:
+        vault_document["vault_exit_become_password"] = exit_password
+    if telegram_enabled:
+        vault_document["vault_telegram_bot_token"] = telegram_token
+        vault_document["vault_telegram_chat_id"] = telegram_chat
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    plaintext = yaml.safe_dump(vault_document, sort_keys=False).encode()
+    encrypted = VaultLib([("default", VaultSecret(vault_secret))]).encrypt(plaintext)
+    secure_write(staging / "group_vars" / "all" / "vault.yml", encrypted)
+    obfuscation = initial_client_obfuscation
+    client_server_private = (
+        legacy_entry_private if client_mode == "legacy" else entry_private
+    )
+    if client_mode == "mobile":
+        client_server_private = mobile_entry_private
+    client_dns_address = (
+        entry_legacy_client_ip if client_mode == "legacy" else entry_client_ip
+    )
+    if client_mode == "mobile":
+        client_dns_address = entry_mobile_client_ip
+    client_address_prefix = (
+        legacy_client_subnet.prefixlen
+        if client_mode == "legacy"
+        else mobile_client_subnet.prefixlen
+        if client_mode == "mobile"
+        else client_subnet.prefixlen
+    )
+    client_endpoint_port = (
+        legacy_awg_port if client_mode == "legacy"
+        else mobile_awg_port if client_mode == "mobile"
+        else client_awg_port
+    )
+    modern_padding = ""
+    modern_signatures = ""
+    if client_mode in {"modern", "mobile"}:
+        modern_padding = f"S3 = {obfuscation['s3']}\nS4 = {obfuscation['s4']}\n"
+    if client_mode == "modern":
+        modern_signatures = (
+            f"I1 = {obfuscation['i1']}\nI2 = {obfuscation['i2']}\n"
+            f"I3 = {obfuscation['i3']}\nI4 = {obfuscation['i4']}\n"
+            f"I5 = {obfuscation['i5']}\n"
+        )
+    elif client_mode == "mobile":
+        modern_signatures = f"I1 = {obfuscation['i1']}\n"
+    client_config_text = (
+        "[Interface]\n"
+        f"PrivateKey = {client_private}\n"
+        f"Address = {initial_client_ip}/{client_address_prefix}\n"
+        f"DNS = {client_dns_address}\n"
+        f"MTU = {1280 if client_mode == 'legacy' else 1380}\n"
+        f"Jc = {obfuscation['jc']}\nJmin = {obfuscation['jmin']}\nJmax = {obfuscation['jmax']}\n"
+        f"S1 = {obfuscation['s1']}\nS2 = {obfuscation['s2']}\n"
+        f"{modern_padding}"
+        f"H1 = {obfuscation['h1']}\nH2 = {obfuscation['h2']}\nH3 = {obfuscation['h3']}\nH4 = {obfuscation['h4']}\n"
+        f"{modern_signatures}\n"
+        "[Peer]\n"
+        f"PublicKey = {awg_public_key(client_server_private)}\n"
+        f"PresharedKey = {client_psk}\n"
+        f"Endpoint = {entry_public_endpoint}:{client_endpoint_port}\n"
+        "AllowedIPs = 0.0.0.0/0, ::/0\n"
+        "PersistentKeepalive = 25\n"
+    )
+    secure_write(config_staging, client_config_text.encode())
+
+    production.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging, production)
+    client_config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.replace(config_staging, client_config)
+    hosts_path = production / "hosts.yml"
+    atexit.unregister(cleanup_staging)
+    cleanup_callback = lambda: cleanup_deployment(repo, hosts_path, vault_password)
+    atexit.register(cleanup_callback)
+
+    ui_step(
+        "ПРЕДВАРИТЕЛЬНЫЙ АУДИТ",
+        "Проверяем Ubuntu, сеть и доступ без изменения конфигурации серверов.",
+    )
+    run(
+        [
+            require_command("ansible-playbook"),
+            "-i",
+            str(hosts_path),
+            str(repo / "playbooks" / "audit.yml"),
+            "--vault-password-file",
+            str(vault_password),
+        ]
+    )
+    ui_step(
+        "ЭТАП 1 · БЕЗОПАСНЫЙ ПЕРЕХОД SSH",
+        "Старый и новый SSH-порты временно работают одновременно; Fail2Ban остановлен.",
+    )
+    ansible(
+        repo,
+        hosts_path,
+        vault_password,
+        "playbooks/site.yml",
+        {
+            "awg_enable_fail2ban": False,
+            "awg_health_run_during_deploy": False,
+            "awg_telegram_monitor_start_immediately": False,
+            "awg_prepare_apt": True,
+            "awg_restore_apt": False,
+            "awg_mtu_controller_result_path": str(mtu_result),
+            "awg_package_controller_lock_path": str(awg_package_lock),
+        },
+    )
+    pin_resolved_awg_packages(
+        production / "group_vars" / "all" / "main.yml", awg_package_lock
+    )
+
+    check_ssh(entry_host, entry_user, entry_new_port, ssh_private)
+    check_ssh(exit_host, exit_user, exit_new_port, ssh_private)
+    require_operator_ssh_confirmation()
+
+    for name, current, desired in (
+        ("entry-managed", entry_current_port, entry_new_port),
+        ("exit-managed", exit_current_port, exit_new_port),
+    ):
+        host_vars[name]["ansible_port"] = desired
+        host_vars[name]["security_allow_ssh_port_change"] = False
+        host_vars[name]["security_previous_ssh_port"] = current
+    hosts_document["all"]["children"]["entry"]["hosts"]["entry-managed"] = host_vars["entry-managed"]
+    hosts_document["all"]["children"]["exit"]["hosts"]["exit-managed"] = host_vars["exit-managed"]
+    yaml_write(hosts_path, hosts_document)
+
+    ui_step(
+        "ЭТАП 2 · ФИНАЛЬНАЯ ПОЛИТИКА",
+        "Закрываем старые порты, включаем Fail2Ban и запускаем строгую проверку.",
+    )
+    ansible(
+        repo,
+        hosts_path,
+        vault_password,
+        "playbooks/site.yml",
+        {
+            "awg_enable_fail2ban": True,
+            "awg_health_run_during_deploy": False,
+            "awg_telegram_monitor_start_immediately": False,
+            "awg_prepare_apt": False,
+            "awg_restore_apt": True,
+            "awg_mtu_controller_result_path": str(mtu_result),
+            "awg_package_controller_lock_path": str(awg_package_lock),
+        },
+    )
+    ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+    ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
+    ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+    update_client_config_mtu(client_config, mtu_result, client_mode)
+    cleanup_deployment(repo, hosts_path, vault_password)
+    atexit.unregister(cleanup_callback)
+
+    ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")
+    show_deployment_summary(production)
+
+
+if __name__ == "__main__":
+    main()

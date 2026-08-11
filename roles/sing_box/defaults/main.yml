@@ -1,0 +1,13 @@
+---
+sing_box_package_cache: /var/cache/ansible/sing-box.deb
+sing_box_config_path: /etc/sing-box/config.json
+sing_box_candidate_path: /run/ansible-sing-box-config.json.candidate
+sing_box_backup_dir: /root/config-backups/entry/sing-box
+sing_box_service_name: sing-box.service
+sing_box_runtime_override_path: /etc/awg/ru-proxy-override.json
+sing_box_dns_override_path: /etc/awg/doh-override.json
+entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
+# gVisor изолирует TCP/UDP обработку TUN от особенностей системного стека.
+# Для policy routing с auto_route=false это надёжнее mixed/system.
+entry_ru_tun_stack: gvisor
+entry_ru_endpoint_independent_nat: true

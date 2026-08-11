@@ -1,0 +1,5 @@
+---
+awg_health_script_path: /usr/local/sbin/awg-health
+awg_health_run_during_deploy: true
+security_ufw_policy_marker: /var/lib/awg-iac/security/ufw-policy.sha256
+awg_telegram_monitor_deferred_flag: /run/awg-telegram-monitor.deferred

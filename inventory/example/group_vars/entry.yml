@@ -1,0 +1,147 @@
+---
+awg_node_role: entry
+
+entry_client_interface: awg0
+entry_exit_interface: awg1
+entry_ru_proxy_interface: sb-ru
+entry_wan_interface: auto
+entry_client_address: 10.66.0.1/24
+entry_client_listen_address: 10.66.0.1
+entry_client_subnet: 10.66.0.0/24
+entry_exit_tunnel_address: "{{ awg_interserver_entry_address }}"
+entry_awg0_listen_port: 443
+entry_awg0_mtu: 1420
+entry_awg1_mtu: 1420
+entry_exit_endpoint: 192.0.2.20:443
+entry_public_endpoint: 192.0.2.10
+security_interserver_peer_ipv4: 192.0.2.20
+security_interserver_listen_port: 39745
+entry_exit_allowed_ips:
+  - 0.0.0.0/0
+entry_exit_persistent_keepalive: 25
+entry_manage_awg_configs: false
+entry_awg_client_default_profile: balanced
+entry_awg_client_mode: modern
+awg3_transit_enabled: false
+awg3_transit_listen_port: 39745
+awg3_peer_endpoint_port: 443
+awg3_peer_tunnel_address: 10.77.0.1
+entry_legacy_client_available: false
+entry_legacy_client_enabled: false
+entry_mobile_client_available: false
+entry_mobile_client_enabled: false
+entry_mobile_client_interface: awg-mobile
+entry_mobile_client_address: 10.68.0.1/24
+entry_mobile_client_listen_address: 10.68.0.1
+entry_mobile_client_subnet: 10.68.0.0/24
+entry_mobile_client_listen_port: 8443
+entry_mobile_legacy_public_port: 53
+entry_mobile_legacy_internal_port: 39746
+entry_mobile_client_mtu: 1380
+
+entry_awg0_obfuscation:
+  jc: 6
+  jmin: 64
+  jmax: 192
+  s1: 48
+  s2: 56
+  s3: 32
+  s4: 24
+  h1: "100000000-149999999"
+  h2: "600000000-649999999"
+  h3: "1100000000-1149999999"
+  h4: "1600000000-1649999999"
+  i1: "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1174>"
+  i2: "<b 0x40><r 127>"
+  i3: "<b 0x41><r 95>"
+  i4: "<b 0x42><r 63>"
+  i5: "<b 0x43><r 31>"
+
+entry_awg1_obfuscation: "{{ entry_awg0_obfuscation }}"
+
+entry_mobile_i1_mode: quic-ios
+entry_mobile_awg_obfuscation:
+  jc: 5
+  jmin: 10
+  jmax: 50
+  s1: 134
+  s2: 79
+  s3: 17
+  s4: 0
+  h1: "1134731367-1758702570"
+  h2: "1999989254-2027383437"
+  h3: "2041897377-2054735816"
+  h4: "2083840314-2084318622"
+  i1: "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1000><r 174>"
+
+entry_exit_mark: "0x1"
+entry_exit_table: 100
+entry_exit_rule_priority: 10000
+
+entry_ru_mark: "0x2"
+entry_ru_table: 200
+entry_ru_rule_priority: 9999
+
+entry_ipsets:
+  - force_exit
+  - force_ru
+  - force_entry_bank
+  - ru
+  - ru_tmp
+
+entry_ru_direct_tcp_ports: []
+
+entry_ru_proxy_fail_open: true
+entry_ru_proxy_disabled_flag: /run/awg-ru-proxy.disabled
+entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
+entry_ru_proxy_watch_interval: 10s
+entry_ru_proxy_fail_threshold: 6
+entry_ru_proxy_success_threshold: 3
+entry_ru_proxy_probe_url: https://api.ipify.org
+entry_ru_proxy_expected_ip: ""
+entry_ru_proxy_connect_timeout: 7
+entry_ru_proxy_max_probe_time: 15
+
+entry_dns_default_port: 5353
+entry_dns_ru_port: 5354
+entry_dns_dot_hostname: dns.mullvad.net
+entry_dns_doh_tls_name: common.dot.dns.yandex.net
+entry_dns_doh_path: /dns-query
+entry_dns_doh_server: 77.88.8.8
+entry_dot_upstreams:
+  - address: 194.242.2.2
+    tls_name: dns.mullvad.net
+
+entry_domain_files_enabled: true
+entry_ru_domain_file: "{{ inventory_dir }}/domains/ru-domain"
+entry_se_domain_file: "{{ inventory_dir }}/domains/se-domain"
+entry_entry_domain_file: "{{ inventory_dir }}/domains/entry-domain"
+
+entry_force_ru_domains: []
+entry_force_exit_domains: []
+entry_direct_domains: []
+
+entry_sing_box_version: "1.13.15"
+entry_sing_box_packages:
+  x86_64:
+    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box_1.13.15_linux_amd64.deb
+    checksum: sha256:49a889611318a35a259077033ba6bd4139d99d953c0bc1778b1950ecd88b63d6
+  aarch64:
+    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box_1.13.15_linux_arm64.deb
+    checksum: sha256:06983de010295bf577eb26b25e503fac0b342c43c8345928ad1713707ffbce34
+entry_ru_tun_stack: gvisor
+entry_ru_endpoint_independent_nat: true
+entry_soax_server: proxy.soax.com
+entry_soax_port: 1337
+# Универсальные имена SOCKS5 для интерактивного установщика. Старые имена SOAX
+# продолжают поддерживаться в существующих inventory.
+entry_proxy_server: "{{ entry_soax_server }}"
+entry_proxy_port: "{{ entry_soax_port }}"
+entry_ru_tun_address: 172.19.0.1/30
+entry_ru_tun_mtu: 1380
+entry_ru_proxy_enabled: true
+
+entry_ru_zone_primary_url: https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone
+entry_ru_zone_fallback_url: https://raw.githubusercontent.com/bivlked/amneziawg-installer/2c86966f59d54c0fd0bcf66639c537558a1a0c25/cascade/ru.zone
+entry_ru_zone_min_networks: 1000
+entry_ru_zone_update_calendar: "*-*-* 03:17:00"

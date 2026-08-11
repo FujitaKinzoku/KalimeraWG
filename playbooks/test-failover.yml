@@ -1,0 +1,119 @@
+---
+- name: Проверка fail-open и восстановления RU-прокси на одноразовом ENTRY
+  hosts: entry
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Запрет изменения failover вне одноразового тестового inventory
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - awg_test_environment | default(false) | bool
+          - entry_ru_proxy_enabled | bool
+        fail_msg: "Тест failover разрешён только на явно отмеченных одноразовых серверах"
+
+  tasks:
+    - name: Управляемая проверка отказа и восстановления RU-прокси
+      block:
+        - name: Остановка watchdog-таймера на время детерминированного теста
+          ansible.builtin.systemd_service:
+            name: awg-ru-proxy-watch.timer
+            state: stopped
+
+        - name: Остановка sing-box для имитации отказа прокси
+          ansible.builtin.systemd_service:
+            name: sing-box.service
+            state: stopped
+
+        - name: Выполнение достаточного числа неуспешных проверок для fail-open
+          ansible.builtin.systemd_service:
+            name: awg-ru-proxy-watch.service
+            state: started
+          loop: "{{ range(0, entry_ru_proxy_fail_threshold | int) | list }}"
+          loop_control:
+            label: "неудачная проверка {{ item + 1 }}"
+
+        - name: Проверка runtime-флага fail-open
+          ansible.builtin.stat:
+            path: >-
+              {{ entry_ru_proxy_disabled_flag |
+                 default('/run/awg-ru-proxy.disabled') }}
+          register: test_fail_open_flag
+
+        - name: Проверка policy rules в режиме fail-open
+          ansible.builtin.command:
+            argv: [ip, -4, rule, show]
+          register: test_fail_open_rules
+          changed_when: false
+          retries: 15
+          delay: 1
+          until:
+            - "'fwmark 0x1' in test_fail_open_rules.stdout"
+            - "'fwmark 0x2' not in test_fail_open_rules.stdout"
+
+        - name: Проверка удаления RU mark при сохранении EXIT mark
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - test_fail_open_flag.stat.exists
+              - "'fwmark 0x1' in test_fail_open_rules.stdout"
+              - "'fwmark 0x2' not in test_fail_open_rules.stdout"
+
+        - name: Проверка резервного DNS во время отказа RU-прокси
+          ansible.builtin.command:
+            argv:
+              - dig
+              - +time=15
+              - +tries=2
+              - "@{{ entry_client_listen_address }}"
+              - yandex.ru
+              - A
+          register: test_fail_open_dns
+          changed_when: false
+          retries: 3
+          delay: 2
+          until: test_fail_open_dns.rc == 0
+
+        - name: Запуск sing-box для восстановления
+          ansible.builtin.systemd_service:
+            name: sing-box.service
+            state: started
+
+        - name: Ожидание запуска TUN и SOCKS
+          ansible.builtin.pause:
+            seconds: 3
+
+        - name: Выполнение достаточного числа успешных проверок для выхода из fail-open
+          ansible.builtin.systemd_service:
+            name: awg-ru-proxy-watch.service
+            state: started
+          loop: "{{ range(0, entry_ru_proxy_success_threshold | int) | list }}"
+          loop_control:
+            label: "успешная проверка {{ item + 1 }}"
+
+        - name: Восстановление watchdog-таймера перед строгой проверкой
+          ansible.builtin.systemd_service:
+            name: awg-ru-proxy-watch.timer
+            enabled: true
+            state: started
+
+        - name: Строгая проверка состояния после восстановления
+          ansible.builtin.command:
+            argv: [/usr/local/sbin/awg-health, --strict]
+          register: test_recovered_health
+          changed_when: false
+          retries: 15
+          delay: 2
+          until: test_recovered_health.rc == 0
+
+      always:
+        - name: Восстановление sing-box после теста failover
+          ansible.builtin.systemd_service:
+            name: sing-box.service
+            state: started
+
+        - name: Восстановление watchdog-таймера после теста failover
+          ansible.builtin.systemd_service:
+            name: awg-ru-proxy-watch.timer
+            enabled: true
+            state: started

@@ -1,0 +1,22 @@
+---
+- name: Проверка зависимостей фильтров Ansible на управляющем узле
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    test_ipv4_interface: 10.77.0.1/24
+    test_ipv4_network: 10.77.0.0/24
+    test_apt_madison_line: " amneziawg-dkms | 1.2.3-ubuntu24.04.1 | https://example.invalid noble/main amd64 Packages"
+  tasks:
+    - name: Проверка поддержки фильтра IPv4-интерфейсов
+      ansible.builtin.assert:
+        that:
+          - (test_ipv4_interface | ansible.utils.ipv4) == test_ipv4_interface
+          - (test_ipv4_network | ansible.utils.ipv4) == test_ipv4_network
+
+    - name: Проверка извлечения версии пакета из репозитория
+      ansible.builtin.assert:
+        that:
+          - >-
+            (test_apt_madison_line.split('|')[1] | trim) ==
+            '1.2.3-ubuntu24.04.1'

@@ -1,0 +1,16 @@
+[Unit]
+Description=Атомарное обновление ipset RU-сетей
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ entry_ru_zone_update_script_path }}
+User=root
+Group=root
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths={{ entry_ru_zone_state_dir }} /run

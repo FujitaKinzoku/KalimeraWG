@@ -1,0 +1,13 @@
+[Unit]
+Description=Аудит сервера AWG без раскрытия секретов
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ awg_server_audit_path }}
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

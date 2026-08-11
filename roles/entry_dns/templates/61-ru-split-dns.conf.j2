@@ -1,0 +1,7 @@
+# Сформировано Ansible. Явные правила EXIT имеют приоритет над RU-зонами.
+{% if entry_ru_proxy_enabled | bool %}
+server=/ru/127.0.0.1#{{ entry_dns_ru_port }}
+server=/ru/127.0.0.1#{{ entry_dns_default_port }}
+server=/xn--p1ai/127.0.0.1#{{ entry_dns_ru_port }}
+server=/xn--p1ai/127.0.0.1#{{ entry_dns_default_port }}
+{% endif %}

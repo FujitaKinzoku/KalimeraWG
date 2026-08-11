@@ -1,0 +1,11 @@
+[Unit]
+Description=Периодическое атомарное обновление RU-сетей
+
+[Timer]
+OnCalendar={{ entry_ru_zone_update_calendar }}
+Persistent=true
+RandomizedDelaySec=20m
+Unit={{ entry_ru_zone_service_name }}
+
+[Install]
+WantedBy=timers.target

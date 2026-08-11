@@ -1,0 +1,336 @@
+---
+- name: "Проверка установленной службы межсерверного AWG 3+"
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ awg3_transit_service_name }}"
+  register: awg3_transit_unit
+  when: not (awg3_transit_enabled | bool)
+
+- name: "Отключение невыбранного межсерверного AWG 3+"
+  ansible.builtin.systemd_service:
+    name: "{{ awg3_transit_service_name }}"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when:
+    - not (awg3_transit_enabled | bool)
+    - awg3_transit_unit.stat.exists
+
+- name: "Удаление невыбранной конфигурации межсерверного AWG 3+"
+  ansible.builtin.file:
+    path: "{{ awg3_transit_config_path }}"
+    state: absent
+  no_log: true
+  when: not (awg3_transit_enabled | bool)
+
+- name: "Проверка параметров межсерверного AWG 3+"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - ansible_architecture in awg3_go_archives
+      - vault_awg3_header_protection_key is defined
+      - vault_awg3_header_protection_key | length == 44
+      - awg3_peer_endpoint_host | length > 0
+      - awg3_peer_tunnel_address | ansible.utils.ipv4
+      - awg3_transit_listen_port | int >= 1
+      - awg3_transit_listen_port | int <= 65535
+      - awg3_peer_endpoint_port | int >= 1
+      - awg3_peer_endpoint_port | int <= 65535
+      - awg3_transit_address | ansible.utils.ipv4
+      - awg3_transit_obfuscation.s1 | int >= 12
+      - awg3_transit_obfuscation.s2 | int >= 12
+      - awg3_transit_obfuscation.s3 | int >= 12
+      - awg3_transit_obfuscation.s4 | int >= 12
+    fail_msg: "AWG 3+ требует отдельный ключ защиты заголовка, IPv4-адреса и S1-S4 не меньше 12"
+  no_log: true
+  when: awg3_transit_enabled | bool
+
+- name: "Установка зависимостей межсерверного AWG 3+"
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - ca-certificates
+      - git
+      - iputils-ping
+      - pkg-config
+    state: present
+    lock_timeout: 600
+  when: awg3_transit_enabled | bool
+
+- name: "Создание каталогов межсерверного AWG 3+"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ awg3_build_root }}", mode: "0755"}
+    - {path: "{{ awg3_cache_root }}", mode: "0755"}
+    - {path: "{{ awg3_transit_config_dir }}", mode: "0700"}
+    - {path: /opt/awg-iac, mode: "0755"}
+    - {path: "{{ awg3_go_install_root }}", mode: "0755"}
+  when: awg3_transit_enabled | bool
+
+- name: "Загрузка закреплённого компилятора Go"
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/{{ awg3_go_archives[ansible_architecture].filename }}"
+    dest: "{{ awg3_cache_root }}/{{ awg3_go_archives[ansible_architecture].filename }}"
+    checksum: "{{ awg3_go_archives[ansible_architecture].checksum }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg3_transit_enabled | bool
+
+- name: "Распаковка закреплённого компилятора Go"
+  ansible.builtin.unarchive:
+    src: "{{ awg3_cache_root }}/{{ awg3_go_archives[ansible_architecture].filename }}"
+    dest: "{{ awg3_go_install_root }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "{{ awg3_go_install_root }}/bin/go"
+  when: awg3_transit_enabled | bool
+
+- name: "Выбор закреплённой версии компилятора Go"
+  ansible.builtin.file:
+    src: "{{ awg3_go_install_root }}"
+    dest: "{{ awg3_go_current_link }}"
+    state: link
+    force: true
+    owner: root
+    group: root
+  when: awg3_transit_enabled | bool
+
+- name: "Получение закреплённого исходного кода amneziawg-go"
+  ansible.builtin.git:
+    repo: https://github.com/amnezia-vpn/amneziawg-go.git
+    dest: "{{ awg3_build_root }}/amneziawg-go"
+    version: "{{ awg3_go_source_version }}"
+    depth: 1
+    force: false
+  register: awg3_go_source
+  when: awg3_transit_enabled | bool
+
+- name: "Получение закреплённого исходного кода amneziawg-tools"
+  ansible.builtin.git:
+    repo: https://github.com/amnezia-vpn/amneziawg-tools.git
+    dest: "{{ awg3_build_root }}/amneziawg-tools"
+    version: "{{ awg3_tools_source_version }}"
+    depth: 1
+    force: false
+  register: awg3_tools_source
+  when: awg3_transit_enabled | bool
+
+- name: "Проверка неизменности исходного кода AWG 3+"
+  ansible.builtin.command:
+    argv: [/usr/bin/git, -C, "{{ item.path }}", rev-parse, HEAD]
+  loop:
+    - path: "{{ awg3_build_root }}/amneziawg-go"
+      commit: "{{ awg3_go_source_commit }}"
+    - path: "{{ awg3_build_root }}/amneziawg-tools"
+      commit: "{{ awg3_tools_source_commit }}"
+  register: awg3_source_revisions
+  changed_when: false
+  failed_when: awg3_source_revisions.stdout | trim != item.commit
+  when: awg3_transit_enabled | bool
+
+- name: "Проверка кэшированного userspace-движка AWG 3+"
+  ansible.builtin.stat:
+    path: "{{ awg3_go_cached_binary }}"
+  register: awg3_go_cached
+  when: awg3_transit_enabled | bool
+
+- name: "Сборка закреплённого userspace-движка AWG 3+"
+  ansible.builtin.command:
+    argv:
+      - "{{ awg3_go_current_link }}/bin/go"
+      - build
+      - -trimpath
+      - -ldflags=-s -w -X main.Version={{ awg3_go_source_version }}
+      - -o
+      - "{{ awg3_go_cached_binary }}"
+      - .
+    chdir: "{{ awg3_build_root }}/amneziawg-go"
+  environment:
+    GOROOT: "{{ awg3_go_current_link }}"
+    GOPATH: "{{ awg3_cache_root }}/gopath"
+    CGO_ENABLED: "0"
+  when:
+    - awg3_transit_enabled | bool
+    - not awg3_go_cached.stat.exists
+
+- name: "Атомарная установка userspace-движка AWG 3+"
+  ansible.builtin.copy:
+    src: "{{ awg3_go_cached_binary }}"
+    dest: "{{ awg3_transit_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Перезапуск межсерверного AWG 3+
+  when: awg3_transit_enabled | bool
+
+- name: "Проверка кэшированного инструмента AWG 3+"
+  ansible.builtin.stat:
+    path: "{{ awg3_tools_cached_binary }}"
+  register: awg3_tools_cached
+  when: awg3_transit_enabled | bool
+
+- name: "Сборка закреплённого инструмента AWG 3+"
+  ansible.builtin.command:
+    argv: [/usr/bin/make, -C, src, wg]
+    chdir: "{{ awg3_build_root }}/amneziawg-tools"
+  when:
+    - awg3_transit_enabled | bool
+    - not awg3_tools_cached.stat.exists
+
+- name: "Сохранение собранного инструмента AWG 3+ в кэше"
+  ansible.builtin.copy:
+    src: "{{ awg3_build_root }}/amneziawg-tools/src/wg"
+    dest: "{{ awg3_tools_cached_binary }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - awg3_transit_enabled | bool
+    - not awg3_tools_cached.stat.exists
+
+- name: "Атомарная установка инструмента AWG 3+"
+  ansible.builtin.copy:
+    src: "{{ awg3_tools_cached_binary }}"
+    dest: "{{ awg3_tools_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Перезапуск межсерверного AWG 3+
+  when: awg3_transit_enabled | bool
+
+- name: "Установка валидатора конфигурации AWG 3+"
+  ansible.builtin.template:
+    src: validate-config.sh.j2
+    dest: "{{ awg3_transit_validate_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: awg3_transit_enabled | bool
+
+- name: "Фиксация выбранного MTU межсерверного канала"
+  ansible.builtin.set_fact:
+    awg3_transit_effective_mtu: >-
+      {{ (awg3_shared_effective_mtu | default(awg3_transit_mtu) | int)
+         if (awg3_mtu_auto | bool) else (awg3_transit_mtu | int) }}
+  when: awg3_transit_enabled | bool
+
+- name: "Проверка действующей конфигурации межсерверного AWG 3+"
+  ansible.builtin.stat:
+    path: "{{ awg3_transit_config_path }}"
+  register: awg3_transit_live_config
+  no_log: true
+  when: awg3_transit_enabled | bool
+
+- name: "Безопасное применение конфигурации межсерверного AWG 3+"
+  when: awg3_transit_enabled | bool
+  block:
+    - name: "Формирование кандидата конфигурации межсерверного AWG 3+"
+      ansible.builtin.template:
+        src: transit.conf.j2
+        dest: "{{ awg3_transit_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: "Сравнение кандидата с действующей конфигурацией AWG 3+"
+      ansible.builtin.command:
+        argv: [/usr/bin/cmp, --silent, "{{ awg3_transit_config_path }}", "{{ awg3_transit_candidate_path }}"]
+      register: awg3_transit_compare
+      changed_when: false
+      failed_when: awg3_transit_compare.rc not in [0, 1]
+      when: awg3_transit_live_config.stat.exists
+      no_log: true
+
+    - name: "Проверка кандидата реальным движком AWG 3+"
+      ansible.builtin.command:
+        argv: ["{{ awg3_transit_validate_path }}", "{{ awg3_transit_candidate_path }}"]
+      changed_when: false
+      no_log: true
+
+    - name: "Определение необходимости установки конфигурации AWG 3+"
+      ansible.builtin.set_fact:
+        awg3_transit_requires_install: >-
+          {{ (not awg3_transit_live_config.stat.exists) or
+             (awg3_transit_compare.rc | default(1) == 1) }}
+      no_log: true
+
+    - name: "Создание каталога резервных копий AWG 3+"
+      ansible.builtin.file:
+        path: "{{ awg3_transit_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - awg3_transit_live_config.stat.exists
+        - awg3_transit_requires_install | bool
+
+    - name: "Резервное копирование конфигурации AWG 3+"
+      ansible.builtin.copy:
+        src: "{{ awg3_transit_config_path }}"
+        dest: "{{ awg3_transit_backup_dir }}/{{ awg3_transit_interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - awg3_transit_live_config.stat.exists
+        - awg3_transit_requires_install | bool
+      no_log: true
+
+    - name: "Атомарная установка конфигурации AWG 3+"
+      ansible.builtin.copy:
+        src: "{{ awg3_transit_candidate_path }}"
+        dest: "{{ awg3_transit_config_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: awg3_transit_requires_install | bool
+      notify: Перезапуск межсерверного AWG 3+
+      no_log: true
+  always:
+    - name: "Удаление кандидата конфигурации AWG 3+"
+      ansible.builtin.file:
+        path: "{{ awg3_transit_candidate_path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+
+- name: "Установка управляющего скрипта межсерверного AWG 3+"
+  ansible.builtin.template:
+    src: transit-setup.sh.j2
+    dest: "{{ awg3_transit_setup_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Перезапуск межсерверного AWG 3+
+  when: awg3_transit_enabled | bool
+
+- name: "Установка systemd-службы межсерверного AWG 3+"
+  ansible.builtin.template:
+    src: awg3-transit.service.j2
+    dest: "/etc/systemd/system/{{ awg3_transit_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезапуск межсерверного AWG 3+
+  when: awg3_transit_enabled | bool
+
+- name: "Запуск межсерверного AWG 3+"
+  ansible.builtin.systemd_service:
+    name: "{{ awg3_transit_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: awg3_transit_enabled | bool

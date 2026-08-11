@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly ENV_FILE={{ awg_telegram_monitor_env_path | quote }}
+readonly STATE_DIR={{ awg_telegram_monitor_state_dir | quote }}
+readonly NODE_ROLE={{ awg_node_role | quote }}
+{% if awg_node_role == 'entry' and entry_ru_proxy_enabled | bool %}
+readonly PROXY_MONITORED=true
+readonly PROXY_DISABLED_FLAG={{ entry_ru_proxy_disabled_flag | quote }}
+readonly PROXY_MANUAL_FLAG={{ entry_ru_proxy_manual_disabled_flag | quote }}
+{% else %}
+readonly PROXY_MONITORED=false
+readonly PROXY_DISABLED_FLAG=''
+readonly PROXY_MANUAL_FLAG=''
+{% endif %}
+
+test_mode=false
+case "${0##*/}:${1:-}" in
+    telegram-test:)
+        [[ $# -eq 0 ]] || { echo 'Использование: telegram-test' >&2; exit 2; }
+        test_mode=true
+        ;;
+    telegram-test:--help|telegram-test:-h)
+        [[ $# -eq 1 ]] || { echo 'Использование: telegram-test' >&2; exit 2; }
+        echo 'Использование: telegram-test'
+        exit 0
+        ;;
+    *:)
+        [[ $# -eq 0 ]] || { echo 'Использование: awg-telegram-monitor [--test]' >&2; exit 2; }
+        ;;
+    *:--test)
+        [[ $# -eq 1 ]] || { echo 'Использование: awg-telegram-monitor [--test]' >&2; exit 2; }
+        test_mode=true
+        ;;
+    *:--help|*:-h)
+        [[ $# -eq 1 ]] || { echo 'Использование: awg-telegram-monitor [--test]' >&2; exit 2; }
+        echo 'Использование: awg-telegram-monitor [--test]'
+        exit 0
+        ;;
+    *) echo 'Использование: awg-telegram-monitor [--test]' >&2; exit 2 ;;
+esac
+
+if [[ ! -r "$ENV_FILE" ]]; then
+    [[ "$test_mode" == false ]] && exit 0
+    echo 'Telegram-мониторинг не настроен.' >&2
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+: "${TELEGRAM_BOT_TOKEN:?}"
+: "${TELEGRAM_CHAT_ID:?}"
+
+install -d -m 0700 "$STATE_DIR"
+exec 9>"$STATE_DIR/lock"
+flock -n 9 || exit 0
+
+send_message() {
+    local message="$1"
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' \
+        "$TELEGRAM_BOT_TOKEN" |
+        curl --silent --show-error --fail --config - \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" >/dev/null
+}
+
+node="${NODE_ROLE^^}"
+host="$(hostname --fqdn 2>/dev/null || hostname)"
+
+if [[ "$test_mode" == true ]]; then
+    send_message "AWG ${node}: тестовое уведомление получено; мониторинг ${host} доступен"
+    echo 'Тестовое уведомление Telegram отправлено.'
+    exit 0
+fi
+
+current=healthy
+reason=''
+audit_output=''
+if ! audit_output="$({{ awg_server_audit_path | quote }} 2>&1)"; then
+    current=failed
+    reason="$(printf '%s\n' "$audit_output" |
+        awk '/^FAIL / {print; count++} count == 8 {exit}')"
+elif [[ "$PROXY_MONITORED" == true &&
+        -e "$PROXY_DISABLED_FLAG" && ! -e "$PROXY_MANUAL_FLAG" ]]; then
+    current=degraded
+    reason='RU-прокси недоступен; активирован fail-open напрямую через ENTRY'
+fi
+unset audit_output
+
+previous="$(cat "$STATE_DIR/status" 2>/dev/null || true)"
+boot_id="$(cat /proc/sys/kernel/random/boot_id)"
+previous_boot_id="$(cat "$STATE_DIR/boot-id" 2>/dev/null || true)"
+boot_changed=false
+if [[ -n "$previous_boot_id" && "$boot_id" != "$previous_boot_id" ]]; then
+    boot_changed=true
+fi
+
+message=''
+if [[ "$boot_changed" == true ]]; then
+    case "$current" in
+        healthy)
+            message="AWG ${node}: сервер ${host} перезапущен; состояние исправно"
+            ;;
+        degraded)
+            message="AWG ${node}: сервер ${host} перезапущен\n${reason}"
+            ;;
+        failed)
+            message="AWG ${node}: сервер ${host} перезапущен; проверка состояния не пройдена\n${reason}"
+            ;;
+    esac
+elif [[ "$current" != "$previous" ]]; then
+    case "$current" in
+        failed)
+            message="AWG ${node}: проверка состояния не пройдена\n${reason}"
+            ;;
+        degraded)
+            message="AWG ${node}: работа в резервном режиме\n${reason}"
+            ;;
+        healthy)
+            if [[ "$previous" == degraded ]]; then
+                message="AWG ${node}: RU-прокси восстановлен; штатная маршрутизация включена"
+            elif [[ -n "$previous" ]]; then
+                message="AWG ${node}: состояние восстановлено"
+            fi
+            ;;
+    esac
+fi
+
+if [[ -n "$message" ]]; then
+    send_message "$message"
+fi
+
+printf '%s\n' "$current" >"$STATE_DIR/status"
+printf '%s\n' "$boot_id" >"$STATE_DIR/boot-id"

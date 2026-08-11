@@ -1,0 +1,33 @@
+[Interface]
+PrivateKey = {{ awg3_transit_private_key }}
+ListenPort = {{ awg3_transit_listen_port }}
+Jc = {{ awg3_transit_obfuscation.jc }}
+Jmin = {{ awg3_transit_obfuscation.jmin }}
+Jmax = {{ awg3_transit_obfuscation.jmax }}
+S1 = {{ awg3_transit_obfuscation.s1 }}
+S2 = {{ awg3_transit_obfuscation.s2 }}
+S3 = {{ awg3_transit_obfuscation.s3 }}
+S4 = {{ awg3_transit_obfuscation.s4 }}
+H1 = {{ awg3_transit_obfuscation.h1 }}
+H2 = {{ awg3_transit_obfuscation.h2 }}
+H3 = {{ awg3_transit_obfuscation.h3 }}
+H4 = {{ awg3_transit_obfuscation.h4 }}
+I1 = {{ awg3_transit_obfuscation.i1 }}
+I2 = {{ awg3_transit_obfuscation.i2 }}
+I3 = {{ awg3_transit_obfuscation.i3 }}
+I4 = {{ awg3_transit_obfuscation.i4 }}
+I5 = {{ awg3_transit_obfuscation.i5 }}
+HeaderProtectionKey = {{ vault_awg3_header_protection_key }}
+ContentPaddingAddition = {{ awg3_content_padding_addition }}
+RekeyAfterTime = {{ awg3_rekey_after_time }}
+RekeyTimeout = {{ awg3_rekey_timeout }}
+RejectAfterTime = {{ awg3_reject_after_time }}
+KeepaliveTimeout = {{ awg3_keepalive_timeout }}
+MaxHandshakeAttempts = {{ awg3_max_handshake_attempts }}
+
+[Peer]
+PublicKey = {{ awg3_transit_peer_public_key }}
+PresharedKey = {{ vault_awg_entry_exit_psk }}
+AllowedIPs = {{ awg3_transit_allowed_ips | join(', ') }}
+Endpoint = {{ awg3_peer_endpoint_host }}:{{ awg3_peer_endpoint_port }}
+PersistentKeepalive = {{ awg3_persistent_keepalive }}

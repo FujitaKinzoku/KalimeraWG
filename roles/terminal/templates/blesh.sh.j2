@@ -1,0 +1,14 @@
+# Безопасная загрузка закреплённого ble.sh в интерактивном Bash.
+[[ $- == *i* ]] || return 0
+[[ -n ${BASH_VERSION:-} ]] || return 0
+[[ ${TERM:-dumb} != dumb ]] || return 0
+[[ -z ${BLE_VERSION:-} ]] || return 0
+
+KALIMERA_BLESH={{ terminal_blesh_install_dir }}/ble.sh
+KALIMERA_BLERC=/etc/kalimera/blesh-init.sh
+
+if [[ -r $KALIMERA_BLESH && -r $KALIMERA_BLERC ]]; then
+    source -- "$KALIMERA_BLESH" --attach=none --rcfile "$KALIMERA_BLERC"
+    [[ -z ${BLE_VERSION:-} ]] || ble-attach
+fi
+unset KALIMERA_BLESH KALIMERA_BLERC

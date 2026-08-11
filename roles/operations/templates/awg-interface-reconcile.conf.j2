@@ -1,0 +1,6 @@
+[Unit]
+After=ufw.service
+
+[Service]
+ExecStartPost=/bin/systemctl --no-block try-restart awg-local-peer-apply.service
+ExecStartPost=/bin/systemctl --no-block try-restart awg-entry-routing.service

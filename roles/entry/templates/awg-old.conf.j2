@@ -1,0 +1,27 @@
+[Interface]
+PrivateKey = {{ vault_awg_entry_legacy_private_key }}
+Address = {{ entry_legacy_client_address }}
+ListenPort = {{ entry_legacy_client_listen_port }}
+MTU = {{ entry_legacy_client_mtu }}
+Table = off
+Jc = {{ entry_legacy_awg_obfuscation.jc }}
+Jmin = {{ entry_legacy_awg_obfuscation.jmin }}
+Jmax = {{ entry_legacy_awg_obfuscation.jmax }}
+S1 = {{ entry_legacy_awg_obfuscation.s1 }}
+S2 = {{ entry_legacy_awg_obfuscation.s2 }}
+H1 = {{ entry_legacy_awg_obfuscation.h1 }}
+H2 = {{ entry_legacy_awg_obfuscation.h2 }}
+H3 = {{ entry_legacy_awg_obfuscation.h3 }}
+H4 = {{ entry_legacy_awg_obfuscation.h4 }}
+
+{% for peer in vault_entry_legacy_client_peers | default([]) %}
+[Peer]
+#_Name = {{ peer.name }}
+#_Profile = old
+PublicKey = {{ peer.public_key }}
+{% if peer.preshared_key | default('') | length > 0 %}
+PresharedKey = {{ peer.preshared_key }}
+{% endif %}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+
+{% endfor %}

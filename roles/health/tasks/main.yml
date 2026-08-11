@@ -1,0 +1,36 @@
+---
+- name: "Установка: проверка состояния — этап 1"
+  ansible.builtin.apt:
+    name:
+      - curl
+      - dnsutils
+    state: present
+    lock_timeout: 600
+
+- name: "Установка: проверка состояния — этап 2"
+  ansible.builtin.template:
+    src: awg-health.sh.j2
+    dest: "{{ awg_health_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: "Применение: проверка состояния — этап 3"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Настройка: проверка состояния — этап 4"
+  ansible.builtin.command:
+    argv:
+      - "{{ awg_health_script_path }}"
+      - --strict
+  register: awg_health_deploy_result
+  changed_when: false
+  retries: 12
+  delay: 5
+  until: awg_health_deploy_result.rc == 0
+  when: awg_health_run_during_deploy | bool
+
+- name: "Настройка: проверка состояния — этап 5"
+  ansible.builtin.debug:
+    var: awg_health_deploy_result.stdout_lines
+  when: awg_health_run_during_deploy | bool

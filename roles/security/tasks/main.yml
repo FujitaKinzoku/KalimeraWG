@@ -1,0 +1,745 @@
+---
+- name: "Проверка: безопасность — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_admin_authorized_keys | length > 0
+    fail_msg: "До отключения входа по паролю требуется минимум один публичный административный SSH-ключ"
+  when:
+    - security_manage_ssh | bool
+    - security_require_admin_authorized_key | bool
+
+- name: "Установка: безопасность — этап 2"
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ item }}"
+    state: present
+    manage_dir: true
+    exclusive: false
+  loop: "{{ security_admin_authorized_keys }}"
+  no_log: true
+  when:
+    - security_manage_ssh | bool
+    - security_admin_authorized_keys | length > 0
+
+- name: "Установка: безопасность — этап 3"
+  ansible.builtin.template:
+    src: sysctl.conf.j2
+    dest: "{{ security_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить sysctl
+
+- name: "Согласование запрета ICMP echo с загружаемой после sysctl политикой UFW"
+  ansible.builtin.lineinfile:
+    path: /etc/ufw/sysctl.conf
+    regexp: '^\s*net/ipv4/icmp_echo_ignore_all\s*='
+    line: net/ipv4/icmp_echo_ignore_all=1
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить sysctl
+
+- name: "Проверка изоляции межсерверного канала"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - (security_interserver_peer_ipv4 | ansible.utils.ipv4) == security_interserver_peer_ipv4
+      - security_interserver_listen_port | int >= 1
+      - security_interserver_listen_port | int <= 65535
+      - >-
+        awg_node_role != 'entry' or not (awg3_transit_enabled | default(false) | bool) or
+        (entry_awg0_listen_port | int != security_interserver_listen_port | int)
+      - >-
+        awg_node_role != 'entry' or not (entry_legacy_client_available | default(false) | bool) or
+        (entry_legacy_client_listen_port | int != security_interserver_listen_port | int)
+      - >-
+        awg_node_role != 'entry' or not (entry_legacy_client_available | default(false) | bool) or
+        (entry_legacy_client_listen_port | int != entry_awg0_listen_port | int)
+      - >-
+        awg_node_role != 'entry' or not (entry_mobile_client_available | default(false) | bool) or
+        (entry_mobile_client_listen_port | int >= 1 and entry_mobile_client_listen_port | int <= 65535)
+      - >-
+        awg_node_role != 'entry' or not (entry_mobile_client_available | default(false) | bool) or
+        (entry_mobile_client_listen_port | int != security_interserver_listen_port | int)
+      - >-
+        awg_node_role != 'entry' or not (entry_mobile_client_available | default(false) | bool) or
+        (entry_mobile_client_listen_port | int != entry_awg0_listen_port | int)
+      - >-
+        awg_node_role != 'entry' or not (entry_mobile_client_available | default(false) | bool) or
+        not (entry_legacy_client_available | default(false) | bool) or
+        (entry_mobile_client_listen_port | int != entry_legacy_client_listen_port | int)
+    fail_msg: >-
+      Для изоляции межсерверного AWG требуется IPv4 второго сервера и отдельный
+      UDP-порт, не совпадающий с портами VPN-клиентов ENTRY.
+  when:
+    - awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool)
+
+- name: "Проверка SSH-портов перед пересборкой UFW"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - ssh_listen_port | int >= 1024
+      - ssh_listen_port | int <= 65535
+      - ansible_port | default(22) | int >= 1
+      - ansible_port | default(22) | int <= 65535
+      - >-
+        (ssh_listen_port | int == ansible_port | default(22) | int) or
+        (security_allow_ssh_port_change | bool)
+    fail_msg: >-
+      Пересборка UFW остановлена: SSH-порты или политика безопасного перехода
+      заданы некорректно.
+
+- name: "Создание каталога состояния управляемого UFW"
+  ansible.builtin.file:
+    path: "{{ security_ufw_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "Расчёт отпечатка требуемой политики UFW"
+  ansible.builtin.set_fact:
+    security_ufw_policy_fingerprint: >-
+      {{ ([
+          awg_node_role,
+          (entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface),
+          (ansible_port | default(22) | string),
+          (ssh_listen_port | string),
+          (security_interserver_peer_ipv4 | string),
+          (security_interserver_listen_port | string),
+          (awg3_transit_interface | default('') | string),
+          (awg3_peer_tunnel_address | default('') | string),
+          (entry_awg0_listen_port | default('') | string),
+          (entry_legacy_client_listen_port | default('') | string),
+          (entry_mobile_client_listen_port | default('') | string),
+          (entry_client_interface | default('') | string),
+          (entry_legacy_client_interface | default('') | string),
+          (entry_mobile_client_interface | default('') | string),
+          (entry_client_subnet | default('') | string),
+          (entry_legacy_client_subnet | default('') | string),
+          (entry_mobile_client_subnet | default('') | string),
+          (entry_exit_interface | default('') | string),
+          (entry_ru_proxy_interface | default('') | string),
+          (exit_awg_interface | default('') | string),
+          (exit_awg_subnet | default('') | string)
+        ] | join('|')) | hash('sha256') }}
+
+- name: "Проверка отпечатка действующей политики UFW"
+  ansible.builtin.slurp:
+    path: "{{ security_ufw_policy_marker }}"
+  register: security_ufw_policy_marker_content
+  failed_when: false
+  changed_when: false
+
+- name: "Получение фактического набора правил UFW"
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status, numbered]
+  register: security_ufw_actual_status
+  changed_when: false
+  failed_when: false
+
+- name: "Определение необходимости пересборки UFW"
+  ansible.builtin.set_fact:
+    security_ufw_rebuild_required: >-
+      {{ security_ufw_authoritative | bool and
+         (((security_ufw_policy_marker_content.content | default('') |
+            b64decode | trim).split('|') | first | default('')) !=
+           security_ufw_policy_fingerprint or
+          ((security_ufw_policy_marker_content.content | default('') |
+            b64decode | trim).split('|') | last | default('')) !=
+           (security_ufw_actual_status.stdout | default('') | hash('sha256'))) }}
+
+- name: "Сброс прежних UFW-правил перед авторитетной пересборкой"
+  ansible.builtin.file:
+    path: /root/config-backups/security/ufw
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: security_ufw_rebuild_required | bool
+
+- name: "Резервное копирование UFW перед авторитетной пересборкой"
+  ansible.builtin.copy:
+    src: "/etc/ufw/{{ item }}"
+    dest: "/root/config-backups/security/ufw/{{ item }}.{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [user.rules, user6.rules]
+  when: security_ufw_rebuild_required | bool
+
+- name: "Подготовка аварийного восстановления UFW"
+  ansible.builtin.copy:
+    src: "/etc/ufw/{{ item }}"
+    dest: "/run/awg-ufw-recovery-{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: [user.rules, user6.rules]
+  when: security_ufw_rebuild_required | bool
+
+- name: "Маркировка незавершённой пересборки UFW"
+  ansible.builtin.file:
+    path: /run/awg-ufw-rebuild-in-progress
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+  when: security_ufw_rebuild_required | bool
+
+- name: "Удаление прежнего подтверждения UFW перед пересборкой"
+  ansible.builtin.file:
+    path: "{{ security_ufw_policy_marker }}"
+    state: absent
+  when: security_ufw_rebuild_required | bool
+
+- name: "Сброс прежних UFW-правил перед авторитетной пересборкой"
+  community.general.ufw:
+    state: reset
+  when: security_ufw_rebuild_required | bool
+
+- name: "Разрешение SSH только на внешнем интерфейсе"
+  community.general.ufw:
+    rule: limit
+    port: "{{ item }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}"
+    direction: in
+    comment: Управляемый SSH
+  loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+
+- name: "Удаление прежних SSH-правил без привязки к интерфейсу"
+  community.general.ufw:
+    rule: limit
+    port: "{{ item }}"
+    proto: tcp
+    delete: true
+  loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+
+- name: "Разрешение SSH к ENTRY только из клиентского AWG-туннеля"
+  community.general.ufw:
+    rule: limit
+    port: "{{ item }}"
+    proto: tcp
+    interface: "{{ entry_client_interface }}"
+    direction: in
+    from_ip: "{{ entry_client_subnet }}"
+    comment: Управляемый SSH внутри AWG
+  loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+  when: awg_node_role == 'entry'
+
+- name: "Разрешение SSH к ENTRY из мобильного AWG-туннеля"
+  community.general.ufw:
+    rule: limit
+    port: "{{ item }}"
+    proto: tcp
+    interface: "{{ entry_mobile_client_interface }}"
+    direction: in
+    from_ip: "{{ entry_mobile_client_subnet }}"
+    comment: Управляемый SSH внутри мобильного AWG
+  loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+  when:
+    - awg_node_role == 'entry'
+    - entry_mobile_client_available | default(false) | bool
+
+- name: "Разрешение межсерверного AWG только от второго сервера"
+  community.general.ufw:
+    rule: allow
+    port: "{{ security_interserver_listen_port }}"
+    proto: udp
+    interface: "{{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}"
+    direction: in
+    from_ip: "{{ security_interserver_peer_ipv4 }}"
+    comment: Изолированный межсерверный AWG
+  when:
+    - awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool)
+
+- name: "Удаление прежнего общего правила межсерверного AWG"
+  community.general.ufw:
+    rule: allow
+    port: "{{ security_interserver_listen_port }}"
+    proto: udp
+    delete: true
+  when:
+    - awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool)
+
+- name: "Удаление общего правила межсерверного AWG на внешнем интерфейсе"
+  community.general.ufw:
+    rule: allow
+    port: "{{ security_interserver_listen_port }}"
+    proto: udp
+    interface: "{{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool)
+
+- name: "Разрешение служебного трафика только от второго сервера внутри AWG 3+"
+  community.general.ufw:
+    rule: allow
+    interface: "{{ awg3_transit_interface }}"
+    direction: in
+    from_ip: "{{ awg3_peer_tunnel_address }}"
+    comment: Изолированный внутренний канал AWG 3+
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Разрешение клиентского AWG только на внешнем интерфейсе ENTRY"
+  community.general.ufw:
+    rule: allow
+    port: "{{ entry_awg0_listen_port }}"
+    proto: udp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    comment: Клиенты AmneziaWG
+  when: awg_node_role == 'entry'
+
+- name: "Удаление прежнего клиентского AWG-правила без привязки к интерфейсу"
+  community.general.ufw:
+    rule: allow
+    port: "{{ entry_awg0_listen_port }}"
+    proto: udp
+    delete: true
+  when: awg_node_role == 'entry'
+
+- name: "Разрешение: безопасность — этап 8"
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+    interface: "{{ entry_client_interface }}"
+    direction: in
+    comment: Управляемый DNS AWG
+  loop:
+    - udp
+    - tcp
+  when: awg_node_role == 'entry'
+
+- name: "Определение фактического состояния совместимого AWG-интерфейса"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - is-active
+      - --quiet
+      - "awg-quick@{{ entry_legacy_client_interface }}.service"
+  register: security_legacy_awg_active
+  changed_when: false
+  failed_when: false
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Разрешение совместимых клиентов AWG только на внешнем интерфейсе"
+  community.general.ufw:
+    rule: allow
+    port: "{{ entry_legacy_client_listen_port }}"
+    proto: udp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    comment: Совместимые клиенты AmneziaWG
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+    - >-
+      (entry_legacy_client_enabled | default(false) | bool) or
+      (security_legacy_awg_active.rc | default(3) == 0)
+
+- name: "Закрытие порта неактивного совместимого AWG-интерфейса"
+  community.general.ufw:
+    rule: allow
+    port: "{{ entry_legacy_client_listen_port }}"
+    proto: udp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+    - not (
+        (entry_legacy_client_enabled | default(false) | bool) or
+        (security_legacy_awg_active.rc | default(3) == 0)
+      )
+
+- name: "Удаление прежнего правила совместимых клиентов без привязки к интерфейсу"
+  community.general.ufw:
+    rule: allow
+    port: "{{ entry_legacy_client_listen_port }}"
+    proto: udp
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Разрешение DNS legacy-клиентов AWG"
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+    interface: "{{ entry_legacy_client_interface }}"
+    direction: in
+    comment: DNS совместимых клиентов AWG
+  loop: [udp, tcp]
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Разрешение DNS мобильных клиентов AWG"
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+    interface: "{{ entry_mobile_client_interface }}"
+    direction: in
+    comment: DNS мобильных клиентов AWG
+  loop: [udp, tcp]
+  when:
+    - awg_node_role == 'entry'
+    - entry_mobile_client_available | default(false) | bool
+
+- name: "Разрешение: безопасность — этап 9"
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: "{{ exit_awg_interface }}"
+    interface_out: "{{ exit_wan_interface }}"
+    from_ip: "{{ exit_awg_subnet }}"
+    comment: Маршрутизация AmneziaWG
+  when: awg_node_role == 'exit'
+
+- name: "Разрешение: безопасность — этап 10"
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: "{{ entry_client_interface }}"
+    interface_out: "{{ item }}"
+    from_ip: "{{ entry_client_subnet }}"
+    comment: Управляемая пересылка AWG ENTRY сервера
+  loop:
+    - "{{ entry_wan_interface }}"
+    - "{{ entry_exit_interface }}"
+    - "{{ entry_ru_proxy_interface }}"
+  when: awg_node_role == 'entry'
+
+- name: "Разрешение маршрутизации legacy-клиентов AWG"
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: "{{ entry_legacy_client_interface }}"
+    interface_out: "{{ item }}"
+    from_ip: "{{ entry_legacy_client_subnet }}"
+    comment: Пересылка совместимого AWG ENTRY сервера
+  loop:
+    - "{{ entry_wan_interface }}"
+    - "{{ entry_exit_interface }}"
+    - "{{ entry_ru_proxy_interface }}"
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Разрешение маршрутизации мобильных клиентов AWG"
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: "{{ entry_mobile_client_interface }}"
+    interface_out: "{{ item }}"
+    from_ip: "{{ entry_mobile_client_subnet }}"
+    comment: Пересылка мобильного AWG ENTRY сервера
+  loop:
+    - "{{ entry_wan_interface }}"
+    - "{{ entry_exit_interface }}"
+    - "{{ entry_ru_proxy_interface }}"
+  when:
+    - awg_node_role == 'entry'
+    - entry_mobile_client_available | default(false) | bool
+
+- name: "Настройка: безопасность — этап 11"
+  community.general.ufw:
+    policy: deny
+    direction: routed
+
+- name: "Разрешение исходящих соединений для DNS, обновлений и прокси"
+  community.general.ufw:
+    policy: allow
+    direction: outgoing
+
+- name: "Включение: безопасность — этап 12"
+  community.general.ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+
+- name: "Фиксация отпечатка применённой политики UFW"
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status, numbered]
+  register: security_ufw_final_status
+  changed_when: false
+
+- name: "Фиксация отпечатка применённой политики UFW"
+  ansible.builtin.copy:
+    dest: "{{ security_ufw_policy_marker }}"
+    content: >-
+      {{ security_ufw_policy_fingerprint }}|{{ security_ufw_final_status.stdout | hash('sha256') }}
+
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: "Завершение транзакции пересборки UFW"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /run/awg-ufw-rebuild-in-progress
+    - /run/awg-ufw-recovery-user.rules
+    - /run/awg-ufw-recovery-user6.rules
+  when: security_ufw_rebuild_required | bool
+
+- name: "Согласование: безопасность — этап 13"
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    state: present
+    sysctl_set: true
+    reload: true
+    sysctl_file: "{{ security_sysctl_file }}"
+
+- name: "Гарантированный запрет ответов ICMP echo после согласования MTU"
+  ansible.posix.sysctl:
+    name: net.ipv4.icmp_echo_ignore_all
+    value: "1"
+    state: present
+    sysctl_set: true
+    reload: true
+    sysctl_file: "{{ security_sysctl_file }}"
+
+- name: "Управление: безопасность — этап 14"
+  when: security_manage_ssh | bool
+  block:
+    - name: "Проверка: безопасность — этап 15"
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - ssh_listen_port | int >= 1024
+          - ssh_listen_port | int <= 65535
+          - ssh_password_authentication | bool == false
+          - ssh_root_login in ['prohibit-password', 'no']
+          - >-
+            (ssh_listen_port | int == ansible_port | default(22) | int) or
+            (security_allow_ssh_port_change | bool)
+        fail_msg: >-
+          Для изменения действующего SSH-порта требуется
+          security_allow_ssh_port_change=true после проверки правила UFW и
+          внеполосного способа восстановления доступа.
+
+    - name: "Создание: безопасность — этап 16"
+      ansible.builtin.file:
+        path: "{{ security_ssh_dropin_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "Проверка: безопасность — этап 17"
+      ansible.builtin.stat:
+        path: "{{ security_ssh_dropin_path }}"
+      register: security_ssh_live
+
+    - name: "Настройка: безопасность — этап 18"
+      ansible.builtin.template:
+        src: sshd-awg.conf.j2
+        dest: "{{ security_ssh_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+
+    - name: "Проверка: безопасность — этап 19"
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -t
+          - -f
+          - "{{ security_ssh_candidate_path }}"
+      changed_when: false
+
+    - name: "Проверка: безопасность — этап 20"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cmp
+          - --silent
+          - "{{ security_ssh_dropin_path }}"
+          - "{{ security_ssh_candidate_path }}"
+      register: security_ssh_compare
+      changed_when: false
+      failed_when: security_ssh_compare.rc not in [0, 1]
+      when: security_ssh_live.stat.exists
+
+    - name: "Определение: безопасность — этап 21"
+      ansible.builtin.set_fact:
+        security_ssh_changed: >-
+          {{ (not security_ssh_live.stat.exists) or
+             (security_ssh_compare.rc | default(1) == 1) }}
+
+    - name: "Создание: безопасность — этап 22"
+      ansible.builtin.file:
+        path: "{{ security_ssh_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - security_ssh_live.stat.exists
+        - security_ssh_changed | bool
+
+    - name: "Резервное копирование: безопасность — этап 23"
+      ansible.builtin.copy:
+        src: "{{ security_ssh_dropin_path }}"
+        dest: >-
+          {{ security_ssh_backup_dir }}/{{ security_ssh_dropin_path | basename }}.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - security_ssh_live.stat.exists
+        - security_ssh_changed | bool
+
+    - name: "Установка: безопасность — этап 24"
+      ansible.builtin.copy:
+        src: "{{ security_ssh_candidate_path }}"
+        dest: "{{ security_ssh_dropin_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      when: security_ssh_changed | bool
+      notify: Безопасно перезагрузить SSH
+
+    - name: "Проверка: безопасность — этап 25"
+      ansible.builtin.stat:
+        path: "{{ security_ssh_legacy_dropin_path }}"
+      register: security_ssh_legacy
+
+    - name: "Создание: безопасность — этап 26"
+      ansible.builtin.file:
+        path: "{{ security_ssh_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: security_ssh_legacy.stat.exists
+
+    - name: "Резервное копирование: безопасность — этап 27"
+      ansible.builtin.copy:
+        src: "{{ security_ssh_legacy_dropin_path }}"
+        dest: >-
+          {{ security_ssh_backup_dir }}/legacy-99-awg-managed.conf.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: security_ssh_legacy.stat.exists
+
+    - name: "Удаление: безопасность — этап 28"
+      ansible.builtin.file:
+        path: "{{ security_ssh_legacy_dropin_path }}"
+        state: absent
+      when: security_ssh_legacy.stat.exists
+      notify: Безопасно перезагрузить SSH
+
+    - name: "Проверка: безопасность — этап 29"
+      ansible.builtin.command:
+        argv: [/usr/sbin/sshd, -t]
+      changed_when: false
+
+    - name: "Определение: безопасность — этап 30"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/systemctl
+          - is-active
+          - --quiet
+          - ssh.socket
+      register: security_ssh_socket_state
+      changed_when: false
+      failed_when: false
+
+    - name: "Запись: безопасность — этап 31"
+      ansible.builtin.set_fact:
+        security_ssh_socket_active: "{{ security_ssh_socket_state.rc == 0 }}"
+      changed_when: false
+
+    - name: "Проверка: безопасность — этап 32"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ss
+          - -H
+          - -ltn
+          - "sport = :{{ ssh_listen_port }}"
+      register: security_ssh_desired_listener
+      changed_when: false
+
+    - name: "Планирование: безопасность — этап 33"
+      ansible.builtin.command: /usr/bin/true
+      changed_when: true
+      when: security_ssh_desired_listener.stdout | trim | length == 0
+      notify: Безопасно перезагрузить SSH
+
+    - name: "Проверка: безопасность — этап 34"
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/sshd
+          - -T
+          - -C
+          - user=root,host=localhost,addr=127.0.0.1
+      register: security_sshd_effective
+      changed_when: false
+
+    - name: "Проверка: безопасность — этап 35"
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - "('port ' ~ (ssh_listen_port | string)) in security_sshd_effective.stdout_lines"
+          - "'passwordauthentication no' in security_sshd_effective.stdout_lines"
+          - >-
+            (ssh_root_login == 'no' and
+             'permitrootlogin no' in security_sshd_effective.stdout_lines) or
+            (ssh_root_login == 'prohibit-password' and
+             (('permitrootlogin prohibit-password' in security_sshd_effective.stdout_lines) or
+              ('permitrootlogin without-password' in security_sshd_effective.stdout_lines)))
+
+    - name: "Применение: безопасность — этап 36"
+      ansible.builtin.meta: flush_handlers
+
+    - name: "Проверка: безопасность — этап 37"
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ ssh_listen_port }}"
+        state: started
+        timeout: 15
+
+    - name: "Удаление: безопасность — этап 38"
+      community.general.ufw:
+        rule: limit
+        port: "{{ security_previous_ssh_port }}"
+        proto: tcp
+        interface: "{{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}"
+        direction: in
+        delete: true
+      when:
+        - not security_allow_ssh_port_change | bool
+        - security_previous_ssh_port | default(ssh_listen_port) | int != ssh_listen_port | int
+
+  always:
+    - name: "Удаление: безопасность — этап 39"
+      ansible.builtin.file:
+        path: "{{ security_ssh_candidate_path }}"
+        state: absent
+      changed_when: false
+
+- name: "Вывод: безопасность — этап 40"
+  ansible.builtin.debug:
+    msg: "SSH не изменяется, поскольку security_manage_ssh=false."
+  when: not security_manage_ssh | bool

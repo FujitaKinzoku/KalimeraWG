@@ -1,0 +1,91 @@
+---
+- name: Проверка конфигурации закреплённой версией sing-box
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    sing_box_test_root: /tmp/awg-sing-box-validation
+    sing_box_test_architecture: "{{ lookup('ansible.builtin.pipe', 'uname -m') | trim }}"
+
+  tasks:
+    - name: Загрузка безопасных общих примерных переменных
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/example/group_vars/all/main.yml"
+
+    - name: Загрузка безопасных примерных переменных ENTRY
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/example/group_vars/entry.yml"
+
+    - name: Проверка закреплённого артефакта и конфигурации sing-box
+      block:
+        - name: Создание изолированного каталога проверки sing-box
+          ansible.builtin.file:
+            path: "{{ sing_box_test_root }}"
+            state: directory
+            mode: "0700"
+
+        - name: Загрузка официального пакета sing-box с проверкой checksum
+          ansible.builtin.get_url:
+            url: "{{ entry_sing_box_packages[sing_box_test_architecture].url }}"
+            dest: "{{ sing_box_test_root }}/sing-box.deb"
+            checksum: "{{ entry_sing_box_packages[sing_box_test_architecture].checksum }}"
+            mode: "0600"
+
+        - name: Распаковка пакета sing-box без установки
+          ansible.builtin.command:
+            argv:
+              - dpkg-deb
+              - --extract
+              - "{{ sing_box_test_root }}/sing-box.deb"
+              - "{{ sing_box_test_root }}/package"
+          changed_when: false
+
+        - name: Формирование тестовых SOCKS5-конфигураций с аутентификацией и без неё
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
+            dest: "{{ sing_box_test_root }}/config-{{ item.name }}.json"
+            mode: "0600"
+          loop:
+            - name: authenticated
+              username: example-user
+              password: example-value
+              override: {}
+            - name: anonymous
+              username: ""
+              password: ""
+              override: {}
+            - name: runtime-override
+              username: ignored-user
+              password: ignored-value
+              override:
+                server: override.example.invalid
+                server_port: 1081
+                username: runtime-user
+                password: runtime-value
+          vars:
+            vault_proxy_username: "{{ item.username }}"
+            vault_proxy_password: "{{ item.password }}"
+            sing_box_runtime_proxy_override: "{{ item.override }}"
+          no_log: true
+
+        - name: Семантическая проверка конфигураций закреплённой версией sing-box
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - check
+              - --config
+              - "{{ sing_box_test_root }}/config-{{ item }}.json"
+          loop:
+            - authenticated
+            - anonymous
+            - runtime-override
+          changed_when: false
+          no_log: true
+
+      always:
+        - name: Удаление изолированного каталога проверки sing-box
+          ansible.builtin.file:
+            path: "{{ sing_box_test_root }}"
+            state: absent
+          changed_when: false
+          no_log: true

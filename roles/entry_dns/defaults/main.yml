@@ -1,0 +1,14 @@
+---
+entry_dns_candidate_root: /run/ansible-entry-dns-candidate
+entry_dns_backup_root: /root/config-backups/entry/dns
+entry_dns_dot_override_path: /etc/awg/dot-override.json
+entry_dnsmasq_config_dir: /etc/dnsmasq.d
+entry_unbound_config_dir: /etc/unbound/unbound.conf.d
+entry_domain_files_enabled: false
+entry_dnsmasq_managed_files:
+  - name: 50-awg-base.conf
+    template: 50-awg-base.conf.j2
+  - name: 60-domain-policy.conf
+    template: 60-domain-policy.conf.j2
+  - name: 62-force-entry.conf
+    template: 62-force-entry.conf.j2

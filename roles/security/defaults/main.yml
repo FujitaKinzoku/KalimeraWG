@@ -1,0 +1,16 @@
+---
+security_sysctl_file: /etc/sysctl.d/90-awg-managed.conf
+security_fail2ban_file: /etc/fail2ban/jail.d/zz-awg-sshd.local
+security_manage_ssh: false
+security_allow_ssh_port_change: false
+security_admin_authorized_keys: []
+security_require_admin_authorized_key: false
+security_ssh_dropin_path: /etc/ssh/sshd_config.d/00-awg-managed.conf
+security_ssh_legacy_dropin_path: /etc/ssh/sshd_config.d/99-awg-managed.conf
+security_ssh_candidate_path: /run/ansible-sshd-awg.conf.candidate
+security_ssh_backup_dir: /root/config-backups/security/ssh
+security_interserver_peer_ipv4: ""
+security_interserver_listen_port: "{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) }}"
+security_ufw_authoritative: true
+security_ufw_state_dir: /var/lib/awg-iac/security
+security_ufw_policy_marker: "{{ security_ufw_state_dir }}/ufw-policy.sha256"

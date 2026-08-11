@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+usage() { echo 'Использование: maintenance [--scheduled]'; }
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+    --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+export DEBIAN_FRONTEND=noninteractive
+exec 9>/run/awg-apt-maintenance.lock
+flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
+if [[ "${1:-}" == "--scheduled" ]]; then
+    apt-get -o DPkg::Lock::Timeout=600 -q update
+    unattended-upgrade -d
+    /usr/local/sbin/awg-kernel-guard
+    {{ awg_server_audit_path | quote }} --quiet
+else
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 --simulate upgrade
+    /usr/local/sbin/awg-kernel-guard
+    {{ awg_server_audit_path | quote }}
+    printf '\nТребуется перезагрузка: '
+    [[ -e /var/run/reboot-required ]] && echo да || echo нет
+fi

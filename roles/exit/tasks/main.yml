@@ -1,0 +1,206 @@
+---
+- name: "Проверка прежней конфигурации межсерверного AWG 2 на EXIT"
+  ansible.builtin.stat:
+    path: "{{ exit_awg_config_path }}"
+  register: exit_legacy_transit_config
+  no_log: true
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Остановка прежнего межсерверного AWG 2 на EXIT"
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ exit_legacy_awg_interface }}.service"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Создание каталога резервной копии прежнего AWG 2 на EXIT"
+  ansible.builtin.file:
+    path: "{{ exit_awg_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - awg3_transit_enabled | default(false) | bool
+    - exit_legacy_transit_config.stat.exists
+
+- name: "Резервное копирование прежнего AWG 2 на EXIT"
+  ansible.builtin.copy:
+    src: "{{ exit_awg_config_path }}"
+    dest: >-
+      {{ exit_awg_backup_dir }}/{{ exit_legacy_awg_interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - awg3_transit_enabled | default(false) | bool
+    - exit_legacy_transit_config.stat.exists
+
+- name: "Удаление прежней активной конфигурации AWG 2 на EXIT"
+  ansible.builtin.file:
+    path: "{{ exit_awg_config_path }}"
+    state: absent
+  no_log: true
+  when: awg3_transit_enabled | default(false) | bool
+
+- name: "Проверка: EXIT сервер — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - exit_peer_migration_policy in ['preserve', 'entry_only', 'explicit']
+      - exit_docker_policy in ['preserve', 'remove']
+
+- name: "Проверка: EXIT сервер — этап 2"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - exit_peer_migration_policy == 'explicit'
+      - (exit_awg_address | ansible.utils.ipv4) == exit_awg_address
+      - (exit_awg_subnet | ansible.utils.ipv4) == exit_awg_subnet
+    fail_msg: >-
+      Управляемое развёртывание EXIT требует явной политики миграции peers и
+      проверенных значений IPv4-интерфейса и подсети.
+  when: exit_manage_awg_config | bool
+
+- name: "Проверка: EXIT сервер — этап 3"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - vault_awg_exit_private_key is defined
+      - vault_exit_peers is defined
+      - vault_exit_peers | length > 0
+    fail_msg: "Требуются зашифрованный ключ AWG EXIT и явный список пиров."
+  when: exit_manage_awg_config | bool
+  no_log: true
+
+- name: "Проверка: EXIT сервер — этап 4"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - >-
+        awg_interserver_entry_address in
+        (vault_exit_peers | map(attribute='allowed_ips') | flatten)
+    fail_msg: >-
+      Зашифрованная модель peers EXIT должна содержать общий туннельный адрес
+      ENTRY в явном списке AllowedIPs.
+  when: exit_manage_awg_config | bool
+  no_log: true
+
+- name: "Подготовка: EXIT сервер — этап 5"
+  ansible.builtin.file:
+    path: "{{ exit_awg_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: exit_manage_awg_config | bool
+
+- name: "Проверка: EXIT сервер — этап 6"
+  ansible.builtin.stat:
+    path: "{{ exit_awg_config_path }}"
+  register: exit_awg_live_config
+  when: exit_manage_awg_config | bool
+  no_log: true
+
+- name: "Безопасное применение: EXIT сервер — этап 7"
+  when: exit_manage_awg_config | bool
+  block:
+    - name: "Формирование: EXIT сервер — этап 8"
+      ansible.builtin.template:
+        src: awg0.conf.j2
+        dest: "{{ exit_awg_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: EXIT сервер — этап 9"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/awg-quick
+          - strip
+          - "{{ exit_awg_candidate_path }}"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: EXIT сервер — этап 10"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cmp
+          - --silent
+          - "{{ exit_awg_config_path }}"
+          - "{{ exit_awg_candidate_path }}"
+      register: exit_awg_compare
+      changed_when: false
+      failed_when: exit_awg_compare.rc not in [0, 1]
+      when: exit_awg_live_config.stat.exists
+      no_log: true
+
+    - name: "Настройка: EXIT сервер — этап 11"
+      ansible.builtin.set_fact:
+        exit_awg_requires_install: >-
+          {{ (not exit_awg_live_config.stat.exists) or
+             (exit_awg_compare.rc | default(1) == 1) }}
+      no_log: true
+
+    - name: "Подготовка: EXIT сервер — этап 12"
+      ansible.builtin.file:
+        path: "{{ exit_awg_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - exit_awg_live_config.stat.exists
+        - exit_awg_requires_install | bool
+
+    - name: "Резервное копирование: EXIT сервер — этап 13"
+      ansible.builtin.copy:
+        src: "{{ exit_awg_config_path }}"
+        dest: >-
+          {{ exit_awg_backup_dir }}/awg0.conf.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - exit_awg_live_config.stat.exists
+        - exit_awg_requires_install | bool
+      no_log: true
+
+    - name: "Установка: EXIT сервер — этап 14"
+      ansible.builtin.copy:
+        src: "{{ exit_awg_candidate_path }}"
+        dest: "{{ exit_awg_config_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: exit_awg_requires_install | bool
+      notify: Перезапустить AWG EXIT сервера
+      no_log: true
+
+  always:
+    - name: "Удаление: EXIT сервер — этап 15"
+      ansible.builtin.file:
+        path: "{{ exit_awg_candidate_path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+
+- name: "Включение: EXIT сервер — этап 16"
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ exit_awg_interface }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: exit_manage_awg_config | bool
+
+- name: "Сохранение: EXIT сервер — этап 17"
+  ansible.builtin.debug:
+    msg: "Активна политика сохранения Docker; пакеты и службы Docker не изменяются."
+  when: exit_docker_policy == 'preserve'

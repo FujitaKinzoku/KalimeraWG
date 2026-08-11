@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+mode="${1:-up}"
+iface={{ awg3_transit_interface | quote }}
+config={{ awg3_transit_config_path | quote }}
+peer={{ awg3_peer_tunnel_address | quote }}
+if [[ "$mode" == up ]]; then
+    for _ in {1..50}; do
+        ip link show "$iface" >/dev/null 2>&1 && break
+        sleep 0.1
+    done
+    {{ awg3_tools_binary_path }} setconf "$iface" "$config"
+    ip address replace {{ awg3_transit_address | quote }} dev "$iface"
+    ip link set mtu {{ awg3_transit_effective_mtu }} up dev "$iface"
+    ip -4 route replace "${peer}/32" dev "$iface"
+{% if awg_node_role == 'entry' %}
+    systemctl --no-block try-restart awg-entry-routing.service >/dev/null 2>&1 || true
+    systemctl --no-block try-restart awg-local-peer-apply.service >/dev/null 2>&1 || true
+{% endif %}
+{% if awg_node_role == 'exit' %}
+    iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE 2>/dev/null || iptables -w 10 -t nat -A POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
+    iptables -w 10 -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    iptables -w 10 -t mangle -C FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    iptables -w 10 -C FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || iptables -w 10 -I FORWARD -i "$iface" -o "$iface" -j DROP
+{% endif %}
+elif [[ "$mode" == down ]]; then
+    ip -4 route del "${peer}/32" dev "$iface" 2>/dev/null || true
+{% if awg_node_role == 'exit' %}
+    iptables -w 10 -t nat -D POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE 2>/dev/null || true
+    iptables -w 10 -t mangle -D FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -w 10 -t mangle -D FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -w 10 -D FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || true
+{% endif %}
+else
+    echo 'Использование: awg3-transit-setup {up|down}' >&2
+    exit 2
+fi

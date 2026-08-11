@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+controller_venv="${XDG_DATA_HOME:-$HOME/.local/share}/awg-iac/controller-venv"
+
+install_controller_packages() {
+    packages=(python3 python3-venv openssh-client sshpass)
+    if [[ "$(id -u)" -eq 0 ]]; then
+        apt-get -o DPkg::Lock::Timeout=600 update
+        apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo apt-get -o DPkg::Lock::Timeout=600 update
+        sudo apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+    else
+        printf 'Установите пакеты управляющего окружения: %s\n' "${packages[*]}" >&2
+        exit 1
+    fi
+}
+
+for command in python3 ssh ssh-keygen ssh-copy-id sshpass; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf 'Не хватает зависимостей управляющего окружения. Установить автоматически? [Y/n]: '
+        if [[ -t 0 ]]; then
+            # Включаем GNU Readline, хотя сам загрузочный сценарий неинтерактивен.
+            # Это обеспечивает работу Backspace, Delete и клавиш со стрелками.
+            IFS= read -e -r answer
+        else
+            IFS= read -r answer
+        fi
+        case "${answer:-y}" in
+            y|Y|yes|YES|д|Д|да|ДА) install_controller_packages ;;
+            *) exit 1 ;;
+        esac
+        break
+    fi
+done
+
+if [[ ! -x "$controller_venv/bin/python" ]]; then
+    python3 -m venv "$controller_venv"
+fi
+
+"$controller_venv/bin/python" -m pip install --disable-pip-version-check -q \
+    -r "$repo_root/requirements.txt"
+"$controller_venv/bin/ansible-galaxy" collection install \
+    -r "$repo_root/requirements.yml" >/dev/null
+
+export PATH="$controller_venv/bin:$PATH"
+exec "$controller_venv/bin/python" \
+    "$repo_root/scripts/lib/interactive_deploy.py" --repo-root "$repo_root" "$@"

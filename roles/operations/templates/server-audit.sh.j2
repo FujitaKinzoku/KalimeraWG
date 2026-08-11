@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() { echo 'Использование: server-audit [--quiet]'; }
+quiet=false
+case "${1:-}" in
+    '') ;;
+    --quiet) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; quiet=true ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+failures=0
+
+record() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        [[ "$quiet" == true ]] || printf 'OK   %s\n' "$label"
+    else
+        [[ "$quiet" == true ]] || printf 'FAIL %s\n' "$label"
+        failures=$((failures + 1))
+    fi
+}
+
+disk_ok() {
+    local used
+    used="$(df --output=pcent / | tail -n 1 | tr -dc '0-9')"
+    [[ -n "$used" && "$used" -lt 90 ]]
+}
+
+no_failed_units() {
+    ! systemctl --failed --no-legend --plain |
+        awk '$1 != "awg-server-audit.service" { found=1 } END { exit !found }'
+}
+
+record 'строгая проверка AWG' {{ awg_health_script_path | quote }} --strict
+record 'корневой раздел заполнен менее чем на 90%' disk_ok
+record 'нет неисправных модулей systemd' no_failed_units
+record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
+record 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+
+[[ "$quiet" == true ]] || printf 'Ошибок аудита: %d\n' "$failures"
+if [[ "$quiet" == false && "$failures" -gt 0 ]]; then
+    systemctl --failed --no-legend --plain --no-pager |
+        awk '$1 != "awg-server-audit.service"' || true
+fi
+if [[ "$failures" -eq 0 ]]; then
+    systemctl reset-failed {{ awg_server_audit_service_name | quote }} 2>/dev/null || true
+fi
+exit "$failures"

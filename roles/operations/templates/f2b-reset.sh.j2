@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+usage() { echo 'Использование: f2b-reset [status|IP|--all]'; }
+fail2ban-client ping >/dev/null
+case "${1:-status}" in
+    status)
+        [[ $# -le 1 ]] || { usage >&2; exit 2; }
+        ;;
+    --all)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        fail2ban-client unban --all
+        echo 'Все блокировки Fail2Ban сняты по явному запросу.'
+        ;;
+    --help|-h)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        usage
+        exit 0
+        ;;
+    *)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError as error:
+    raise SystemExit(f"Некорректный IP-адрес: {error}")
+PY
+        fail2ban-client set sshd unbanip "$1"
+        echo "Адрес $1 удалён из блокировок jail sshd."
+        ;;
+esac
+fail2ban-client status sshd

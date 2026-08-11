@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+    echo 'Использование: dot-switch {status|mullvad|custom IP[,IP...] TLS_NAME|reset}'
+}
+
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+readonly config=/etc/unbound/unbound.conf.d/90-awg-dot.conf
+readonly override={{ entry_dns_dot_override_path | quote }}
+readonly backup_dir=/root/config-backups/entry/dns/unbound
+readonly dns_port={{ entry_dns_default_port }}
+
+validate_ipv4() {
+    python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+try:
+    ipaddress.IPv4Address(sys.argv[1])
+except ipaddress.AddressValueError as error:
+    raise SystemExit(f"Некорректный IPv4-адрес: {error}")
+PY
+}
+
+validate_tls_name() {
+    local value="$1" label
+    local -a labels=()
+    [[ "$(printf '%s' "$value" | wc -c)" -le 253 ]] || return 1
+    [[ "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
+    IFS=. read -ra labels <<<"$value"
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+action="${1:---help}"
+case "$action" in
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    status)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        echo 'Текущие DoT upstream:'
+        grep -E '^[[:space:]]*forward-addr:' "$config" |
+            sed -E 's/^[[:space:]]*forward-addr:[[:space:]]*/  /'
+        [[ -e "$override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
+        exit 0
+        ;;
+    mullvad)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        addresses='194.242.2.2,194.242.2.3'
+        tls_name=dns.mullvad.net
+        ;;
+    custom)
+        [[ $# -eq 3 ]] || { usage >&2; exit 2; }
+        addresses="$2"
+        tls_name="$3"
+        ;;
+    reset)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        addresses={{ entry_dot_upstreams | map(attribute='address') | join(',') | quote }}
+        tls_name=''
+        ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+validate_tls_name "${tls_name:-dns.invalid}" || {
+    echo 'Некорректное TLS-имя' >&2
+    exit 2
+}
+
+declare -a values=()
+declare -a tls_values=()
+if [[ "$action" == reset ]]; then
+{% for upstream in entry_dot_upstreams %}
+    values+=({{ upstream.address | quote }})
+    tls_values+=({{ upstream.tls_name | quote }})
+{% endfor %}
+else
+    IFS=, read -ra values <<<"$addresses"
+    for _ in "${values[@]}"; do tls_values+=("$tls_name"); done
+fi
+[[ -n "${values[*]:-}" ]] || { echo 'Нужно указать хотя бы один DoT upstream.' >&2; exit 2; }
+
+lines=''
+json='[]'
+for index in "${!values[@]}"; do
+    ip="${values[$index]}"
+    tls="${tls_values[$index]}"
+    validate_ipv4 "$ip"
+    validate_tls_name "$tls" || { echo 'Некорректное TLS-имя' >&2; exit 2; }
+    lines+="    forward-addr: $ip@853#$tls"$'\n'
+    json="$(jq --arg address "$ip" --arg tls_name "$tls" \
+        '. + [{address:$address,tls_name:$tls_name}]' <<<"$json")"
+done
+
+exec 9>/run/awg-dot-switch.lock
+flock 9
+install -d -m 0700 "$backup_dir" "$(dirname "$override")"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+config_backup="$backup_dir/90-awg-dot.conf.$timestamp"
+override_backup="$backup_dir/dot-override.json.$timestamp"
+cp -a "$config" "$config_backup"
+override_existed=false
+if [[ -e "$override" ]]; then
+    cp -a "$override" "$override_backup"
+    override_existed=true
+fi
+
+tmp="$(mktemp /run/unbound-dot.XXXXXX)"
+override_tmp="$(mktemp /run/unbound-dot-override.XXXXXX)"
+committed=false
+cleanup() {
+    local rc=$?
+    if (( rc != 0 )) && [[ "$committed" == true ]]; then
+        install -m 0644 "$config_backup" "$config" || true
+        if [[ "$override_existed" == true ]]; then
+            install -m 0600 "$override_backup" "$override" || true
+        else
+            rm -f "$override"
+        fi
+        systemctl restart unbound.service >/dev/null 2>&1 || true
+        echo 'Изменение DoT отменено; предыдущая конфигурация восстановлена.' >&2
+    fi
+    rm -f "$tmp" "$override_tmp"
+    return "$rc"
+}
+trap cleanup EXIT
+
+sed '/^[[:space:]]*forward-addr:/d' "$config" >"$tmp"
+printf '%s' "$lines" >>"$tmp"
+jq -n --argjson upstreams "$json" '{upstreams:$upstreams}' >"$override_tmp"
+unbound-checkconf "$tmp" >/dev/null
+
+committed=true
+install -m 0644 "$tmp" "$config"
+if [[ "$action" == reset ]]; then
+    rm -f "$override"
+else
+    install -m 0600 "$override_tmp" "$override"
+fi
+systemctl restart unbound.service
+dig +short +time=5 +tries=1 @127.0.0.1 -p "$dns_port" example.com A |
+    grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+committed=false
+echo 'Upstream-серверы DoT проверены и применены.'

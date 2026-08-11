@@ -1,0 +1,70 @@
+---
+entry_required_interfaces:
+  - awg0
+  - awg1
+entry_required_ipsets:
+  - force_exit
+  - force_ru
+  - force_entry_bank
+  - ru
+  - ru_tmp
+entry_manage_awg_configs: false
+entry_awg_config_dir: /etc/amnezia/amneziawg
+entry_awg_backup_root: /root/config-backups/entry/awg
+entry_awg_candidate_root: /run/awg-ansible
+entry_legacy_exit_interface: awg1
+entry_awg_client_mode: modern
+entry_awg_client_mtu: 1380
+entry_awg0_listen_port: 443
+awg3_transit_enabled: false
+entry_legacy_client_available: false
+entry_legacy_client_enabled: false
+entry_legacy_client_interface: awg-old
+entry_legacy_client_address: 10.67.0.1/24
+entry_legacy_client_listen_address: 10.67.0.1
+entry_legacy_client_subnet: 10.67.0.0/24
+entry_legacy_client_listen_port: 39744
+entry_legacy_client_mtu: 1280
+entry_mobile_client_available: false
+entry_mobile_client_enabled: false
+entry_mobile_client_interface: awg-mobile
+entry_mobile_client_address: 10.68.0.1/24
+entry_mobile_client_listen_address: 10.68.0.1
+entry_mobile_client_subnet: 10.68.0.0/24
+entry_mobile_client_listen_port: 8443
+# Эти значения нужны только для удаления правил старой схемы UDP/53 -> UDP/39746.
+entry_mobile_legacy_public_port: 53
+entry_mobile_legacy_internal_port: 39746
+entry_mobile_client_mtu: 1380
+entry_mobile_firewall_path: /usr/local/sbin/awg-mobile-firewall
+entry_mobile_i1_mode: quic-ios
+entry_mobile_awg_obfuscation:
+  jc: 5
+  jmin: 10
+  jmax: 50
+  s1: 134
+  s2: 79
+  s3: 17
+  s4: 0
+  h1: "1134731367-1758702570"
+  h2: "1999989254-2027383437"
+  h3: "2041897377-2054735816"
+  h4: "2083840314-2084318622"
+  i1: "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1000><r 174>"
+entry_legacy_awg_obfuscation:
+  jc: 4
+  jmin: 64
+  jmax: 96
+  s1: 48
+  s2: 56
+  s3: 0
+  s4: 0
+  h1: 100000001
+  h2: 600000001
+  h3: 1100000001
+  h4: 1600000001
+  i1: ""
+  i2: ""
+  i3: ""
+  i4: ""
+  i5: ""

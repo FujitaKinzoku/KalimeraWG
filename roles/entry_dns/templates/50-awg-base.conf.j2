@@ -1,0 +1,17 @@
+interface={{ entry_client_interface }}
+listen-address={{ entry_client_listen_address }}
+{% if entry_legacy_client_available | default(false) | bool %}
+interface={{ entry_legacy_client_interface }}
+listen-address={{ entry_legacy_client_listen_address }}
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+interface={{ entry_mobile_client_interface }}
+listen-address={{ entry_mobile_client_listen_address }}
+{% endif %}
+bind-dynamic
+no-resolv
+no-hosts
+strict-order
+server=127.0.0.1#{{ entry_dns_default_port }}
+cache-size=5000
+filter-AAAA

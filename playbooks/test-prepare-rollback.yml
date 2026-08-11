@@ -1,0 +1,68 @@
+---
+- name: Подготовка обратимого теста rollback AWG на одноразовых серверах
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Запрет теста rollback вне одноразового inventory
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - awg_test_environment | default(false) | bool
+        fail_msg: "Тест rollback разрешён только на явно отмеченных одноразовых серверах"
+
+  tasks:
+    - name: Выбор путей теста rollback для каждого сервера
+      ansible.builtin.set_fact:
+        rollback_test_live: >-
+          {{ '/etc/amnezia/amneziawg-v3/awg3.conf'
+             if awg3_transit_enabled | default(false) | bool
+             else '/etc/amnezia/amneziawg/awg0.conf' }}
+        rollback_test_dir: >-
+          {{ ('/root/config-backups/' ~ awg_node_role ~ '/awg3')
+             if awg3_transit_enabled | default(false) | bool
+             else ((awg_node_role == 'entry') |
+               ternary('/root/config-backups/entry/awg/awg0',
+                       '/root/config-backups/exit/awg0')) }}
+        rollback_test_source: >-
+          {{ ('/root/config-backups/' ~ awg_node_role ~ '/awg3/acceptance-awg3.conf')
+             if awg3_transit_enabled | default(false) | bool
+             else ((awg_node_role == 'entry') |
+               ternary('/root/config-backups/entry/awg/awg0/acceptance-awg0.conf',
+                       '/root/config-backups/exit/awg0/acceptance-awg0.conf')) }}
+
+    - name: Создание разрешённого каталога теста rollback
+      ansible.builtin.file:
+        path: "{{ rollback_test_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Сохранение точной AWG-конфигурации для теста rollback
+      ansible.builtin.copy:
+        src: "{{ rollback_test_live }}"
+        dest: "{{ rollback_test_source }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Добавление безопасного маркера в действующую AWG-конфигурацию
+      ansible.builtin.lineinfile:
+        path: "{{ rollback_test_live }}"
+        line: "# acceptance rollback marker"
+        insertafter: EOF
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Проверка отличия действующей AWG-конфигурации от источника rollback
+      ansible.builtin.command:
+        argv: [cmp, --silent, "{{ rollback_test_live }}", "{{ rollback_test_source }}"]
+      register: rollback_test_compare
+      changed_when: false
+      failed_when: rollback_test_compare.rc != 1
+      no_log: true

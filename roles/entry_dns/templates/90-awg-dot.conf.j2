@@ -1,0 +1,25 @@
+server:
+    interface: 127.0.0.1
+    port: {{ entry_dns_default_port }}
+    access-control: 127.0.0.0/8 allow
+    do-ip4: yes
+    do-ip6: no
+    do-udp: yes
+    do-tcp: yes
+    hide-identity: yes
+    hide-version: yes
+    qname-minimisation: yes
+    aggressive-nsec: yes
+    tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
+    verbosity: 1
+
+remote-control:
+    control-enable: yes
+    control-interface: /run/unbound.ctl
+
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+{% for upstream in entry_dns_effective_dot_upstreams | default(entry_dot_upstreams) %}
+    forward-addr: {{ upstream.address }}@853#{{ upstream.tls_name }}
+{% endfor %}

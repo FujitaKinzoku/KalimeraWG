@@ -1,0 +1,11 @@
+---
+- name: Аудит AWG-инфраструктуры без изменения серверов
+  hosts: all
+  gather_facts: false
+  check_mode: true
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений о серверах для аудита
+      ansible.builtin.setup:
+  roles:
+    - role: preflight

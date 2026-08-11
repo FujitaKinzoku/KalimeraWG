@@ -1,0 +1,10 @@
+[Unit]
+Wants=awg-quick@{{ entry_client_interface }}.service unbound.service {{ entry_routing_service_name }}
+# awg-quick запускается после nss-lookup.target, а пакетная служба dnsmasq — до
+# этой цели. Принудительный запуск dnsmasq после AWG или маршрутизации создал бы
+# циклическую зависимость systemd при загрузке.
+After=unbound.service
+
+[Service]
+Restart=on-failure
+RestartSec=5s

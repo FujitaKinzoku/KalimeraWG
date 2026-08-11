@@ -1,0 +1,16 @@
+---
+exit_required_interfaces:
+  - awg0
+exit_peer_migration_policy: preserve
+exit_docker_policy: preserve
+exit_manage_awg_config: false
+exit_awg_config_path: /etc/amnezia/amneziawg/awg0.conf
+exit_awg_candidate_path: /run/ansible-awg0.conf
+exit_awg_backup_dir: /root/config-backups/exit/awg0
+exit_awg_interface: awg0
+exit_legacy_awg_interface: awg0
+exit_wan_interface: eth0
+exit_awg_listen_port: 443
+exit_awg_mtu: 1420
+exit_tcp_mss: 1336
+awg3_transit_enabled: false

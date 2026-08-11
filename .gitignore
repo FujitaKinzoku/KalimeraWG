@@ -1,0 +1,73 @@
+# Real inventory and encrypted-variable working files
+inventory/production/
+inventory/test/
+inventory/**/vault.yml
+inventory/**/host_vars/
+!inventory/example/
+!inventory/example/**
+
+# Secret material
+.vault-password*
+vault-password*
+*.agekey
+*.sops.yaml.local
+secrets.yml
+secrets.yaml
+secrets.env
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+
+# Generated client artifacts
+client-configs/
+clients/
+qr/
+*.qr
+*.png
+
+# Reports, captures, runtime and backups
+*.log
+*.pcap
+*.pcapng
+*.core
+*.pid
+*.sock
+*.lock
+*.retry
+*.bak
+*.backup
+*.backup.*
+*.tar
+*.tar.gz
+*.tgz
+inventory-report*
+server-audit-*.txt
+config-backups/
+backups/
+
+# Dynamic and generated state
+ru.zone
+ru.zone.*
+*.runtime
+.ansible/
+.cache/
+.tmp/
+tmp/
+work/
+outputs/
+__pycache__/
+*.pyc
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

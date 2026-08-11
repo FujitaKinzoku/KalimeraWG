@@ -1,0 +1,11 @@
+---
+- name: "Перезагрузка: watchdog RU-прокси — этап 1"
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Перезагрузить модули systemd для watchdog
+
+- name: "Настройка: watchdog RU-прокси — этап 2"
+  ansible.builtin.systemd_service:
+    name: "{{ entry_routing_service_name }}"
+    state: restarted
+  listen: Повторно применить маршрутизацию ENTRY после изменения watchdog

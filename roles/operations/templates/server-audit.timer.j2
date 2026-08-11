@@ -1,0 +1,11 @@
+[Unit]
+Description=Периодический аудит сервера AWG
+
+[Timer]
+OnCalendar={{ awg_server_audit_calendar }}
+Persistent=true
+RandomizedDelaySec=5m
+Unit={{ awg_server_audit_service_name }}
+
+[Install]
+WantedBy=timers.target

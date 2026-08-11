@@ -1,0 +1,22 @@
+# Цветовая схема и поведение ble.sh для KalimeraWG.
+bleopt highlight_syntax=1
+bleopt highlight_filename=1
+bleopt complete_auto_complete=1
+bleopt complete_auto_delay=300
+bleopt exec_errexit_mark=
+bleopt char_width_mode=west
+
+# Enter выполняет обычную строку или добавляет строку в незавершённом блоке.
+# Ctrl+J всегда выполняет весь подготовленный блок.
+ble-bind -f 'C-m' 'accept-single-line-or-newline'
+ble-bind -f 'C-j' 'accept-line'
+
+ble-face -s syntax_error fg=red,bg=default,bold
+ble-face -s argument_error fg=red,bg=default,bold
+ble-face -s command_file fg=green,bg=default
+ble-face -s command_builtin fg=cyan,bg=default
+ble-face -s command_builtin_dot fg=cyan,bg=default,bold
+ble-face -s command_function fg=magenta,bg=default
+ble-face -s command_alias fg=cyan,bg=default
+ble-face -s command_keyword fg=blue,bg=default,bold
+ble-face -s command_directory fg=green,bg=default

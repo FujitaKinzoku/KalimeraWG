@@ -1,0 +1,71 @@
+---
+- name: "Проверка: watchdog RU-прокси — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_ru_proxy_watch_interval is match('^[1-9][0-9]*s$')
+      - entry_ru_proxy_fail_threshold | int >= 2
+      - entry_ru_proxy_success_threshold | int >= 2
+      - entry_ru_proxy_connect_timeout | int >= 1
+      - entry_ru_proxy_max_probe_time | int >= entry_ru_proxy_connect_timeout | int
+      - entry_ru_proxy_probe_url is match('^https://')
+    fail_msg: "Проверьте пороги watchdog RU-прокси и адрес HTTPS-проверки"
+
+- name: "Установка: watchdog RU-прокси — этап 2"
+  ansible.builtin.template:
+    src: awg-ru-proxy-watch.sh.j2
+    dest: "{{ entry_ru_proxy_watch_script_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Установка: watchdog RU-прокси — этап 3"
+  ansible.builtin.template:
+    src: awg-ru-proxy-watch.service.j2
+    dest: "/etc/systemd/system/{{ entry_ru_proxy_watch_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить модули systemd для watchdog
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Установка: watchdog RU-прокси — этап 4"
+  ansible.builtin.template:
+    src: awg-ru-proxy-watch.timer.j2
+    dest: "/etc/systemd/system/{{ entry_ru_proxy_watch_timer_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить модули systemd для watchdog
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Применение: watchdog RU-прокси — этап 5"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Проверка: watchdog RU-прокси — этап 6"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_manual_disabled_flag }}"
+  register: entry_watchdog_manual_disabled
+
+- name: "Настройка: watchdog RU-прокси — этап 7"
+  ansible.builtin.systemd_service:
+    name: "{{ entry_ru_proxy_watch_timer_name }}"
+    enabled: "{{ not entry_watchdog_manual_disabled.stat.exists }}"
+    state: "{{ entry_watchdog_manual_disabled.stat.exists | ternary('stopped', 'started') }}"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Отключение: watchdog RU-прокси — этап 8"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, disable, --now, "{{ entry_ru_proxy_watch_timer_name }}"]
+  register: entry_watchdog_disable_result
+  changed_when: entry_watchdog_disable_result.rc == 0
+  failed_when: false
+  when: not entry_ru_proxy_enabled | bool
+
+- name: "Удаление: watchdog RU-прокси — этап 9"
+  ansible.builtin.file:
+    path: "{{ entry_ru_proxy_disabled_flag }}"
+    state: absent
+  when: not entry_ru_proxy_enabled | bool
+  notify: Повторно применить маршрутизацию ENTRY после изменения watchdog

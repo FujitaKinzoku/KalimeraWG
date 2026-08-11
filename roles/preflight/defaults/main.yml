@@ -1,0 +1,5 @@
+---
+awg_supported_distribution: Ubuntu
+awg_supported_release: "24.04"
+awg_backup_root: /root/config-backups
+awg_adoption_mode: audit

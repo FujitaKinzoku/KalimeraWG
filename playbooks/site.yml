@@ -1,0 +1,445 @@
+---
+- import_playbook: audit.yml
+
+- name: Подготовка APT на обоих серверах
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Временная остановка таймеров автоматического обновления
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      when: awg_prepare_apt | default(true) | bool
+
+    - name: Ожидание штатного завершения уже запущенного обновления
+      ansible.builtin.shell: |
+        unattended_upgrade_pattern='^(/usr/bin/python3([.][0-9]+)?[[:space:]]+)?/usr/bin/unattended-upgrade([[:space:]]|$)'
+        deadline=$((SECONDS + {{ awg_apt_wait_timeout_seconds | default(1800) | int }}))
+        while /usr/bin/systemctl is-active --quiet apt-daily.service \
+           || /usr/bin/systemctl is-active --quiet apt-daily-upgrade.service \
+           || /usr/bin/pgrep -f "$unattended_upgrade_pattern" >/dev/null; do
+          if (( SECONDS >= deadline )); then
+            printf '%s\n' 'Автоматическое обновление Ubuntu не завершилось за допустимое время.' >&2
+            /usr/bin/systemctl is-active apt-daily.service apt-daily-upgrade.service >&2 || true
+            /usr/bin/pgrep -a -f "$unattended_upgrade_pattern" >&2 || true
+            exit 124
+          fi
+          /usr/bin/sleep 5
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: awg_prepare_apt | default(true) | bool
+
+- name: Двустороннее согласование MTU между ENTRY и EXIT
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    awg_mtu_wan_interface: >-
+      {{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}
+    awg_mtu_peer_ipv4: "{{ security_interserver_peer_ipv4 }}"
+    awg_mtu_participants: >-
+      {{ (groups['entry'] | default([])) + (groups['exit'] | default([])) }}
+  tasks:
+    - name: Установка средства безопасного измерения MTU
+      ansible.builtin.apt:
+        name:
+          - iptables
+          - iputils-ping
+        state: present
+        lock_timeout: 600
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Удаление остаточного временного разрешения ICMP
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - -w
+          - "10"
+          - -D
+          - INPUT
+          - -i
+          - "{{ awg_mtu_wan_interface }}"
+          - -s
+          - "{{ awg_mtu_peer_ipv4 }}/32"
+          - -p
+          - icmp
+          - --icmp-type
+          - echo-request
+          - -m
+          - comment
+          - --comment
+          - awg-mtu-peer-temporary
+          - -j
+          - ACCEPT
+      changed_when: false
+      failed_when: false
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Удаление остаточного временного запрета ICMP
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/iptables
+          - -w
+          - "10"
+          - -D
+          - INPUT
+          - -i
+          - "{{ awg_mtu_wan_interface }}"
+          - -p
+          - icmp
+          - --icmp-type
+          - echo-request
+          - -m
+          - comment
+          - --comment
+          - awg-mtu-other-temporary
+          - -j
+          - DROP
+      changed_when: false
+      failed_when: false
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Измерение MTU с обязательным удалением временного ICMP-правила
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+      block:
+        - name: Временное включение ответов ICMP echo для измерения MTU
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/sysctl
+              - -w
+              - net.ipv4.icmp_echo_ignore_all=0
+          changed_when: false
+
+        - name: Временный запрет ICMP echo от остальных адресов
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/iptables
+              - -w
+              - "10"
+              - -I
+              - INPUT
+              - "1"
+              - -i
+              - "{{ awg_mtu_wan_interface }}"
+              - -p
+              - icmp
+              - --icmp-type
+              - echo-request
+              - -m
+              - comment
+              - --comment
+              - awg-mtu-other-temporary
+              - -j
+              - DROP
+          changed_when: false
+
+        - name: Временное разрешение ICMP только от второго сервера
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/iptables
+              - -w
+              - "10"
+              - -I
+              - INPUT
+              - "1"
+              - -i
+              - "{{ awg_mtu_wan_interface }}"
+              - -s
+              - "{{ awg_mtu_peer_ipv4 }}/32"
+              - -p
+              - icmp
+              - --icmp-type
+              - echo-request
+              - -m
+              - comment
+              - --comment
+              - awg-mtu-peer-temporary
+              - -j
+              - ACCEPT
+          changed_when: false
+
+        - name: Определение максимального двустороннего IPv4 PMTU
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            peer={{ awg_mtu_peer_ipv4 | quote }}
+            route_mtu="$(ip -o link show dev {{ awg_mtu_wan_interface | quote }} |
+              sed -n 's/.* mtu \([0-9][0-9]*\).*/\1/p')"
+            route_mtu="${route_mtu:-1500}"
+            low=1000
+            high=$((route_mtu - 28))
+            discovered=1280
+            if ping -4 -c 1 -W 2 -M do -s "$low" "$peer" >/dev/null 2>&1; then
+              while (( low < high )); do
+                mid=$(((low + high + 1) / 2))
+                if ping -4 -c 1 -W 2 -M do -s "$mid" "$peer" >/dev/null 2>&1; then
+                  low="$mid"
+                else
+                  high=$((mid - 1))
+                fi
+              done
+              discovered=$((low + 28))
+            fi
+            (( discovered <= route_mtu )) || discovered="$route_mtu"
+            printf '%s\n' "$discovered"
+          args:
+            executable: /bin/bash
+          register: awg_mtu_outer_probe
+          changed_when: false
+
+        - name: Расчёт безопасного MTU текущего направления AWG 3+
+          ansible.builtin.set_fact:
+            awg3_directional_outer_pmtu: "{{ awg_mtu_outer_probe.stdout | int }}"
+            awg3_directional_effective_mtu: >-
+              {{ [[(awg_mtu_outer_probe.stdout | int) -
+                    (awg3_mtu_overhead | default(80) | int) - 32 -
+                    (awg3_transit_obfuscation.s4 | int),
+                    (awg3_mtu_ceiling | default(1420) | int)] | min,
+                   (awg3_mtu_minimum | default(1120) | int)] | max }}
+      always:
+        - name: Закрытие временного ICMP-доступа после измерения MTU
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/iptables
+              - -w
+              - "10"
+              - -D
+              - INPUT
+              - -i
+              - "{{ awg_mtu_wan_interface }}"
+              - -s
+              - "{{ awg_mtu_peer_ipv4 }}/32"
+              - -p
+              - icmp
+              - --icmp-type
+              - echo-request
+              - -m
+              - comment
+              - --comment
+              - awg-mtu-peer-temporary
+              - -j
+              - ACCEPT
+          changed_when: false
+          failed_when: false
+
+        - name: Удаление временного запрета ICMP от остальных адресов
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/iptables
+              - -w
+              - "10"
+              - -D
+              - INPUT
+              - -i
+              - "{{ awg_mtu_wan_interface }}"
+              - -p
+              - icmp
+              - --icmp-type
+              - echo-request
+              - -m
+              - comment
+              - --comment
+              - awg-mtu-other-temporary
+              - -j
+              - DROP
+          changed_when: false
+          failed_when: false
+
+        - name: Глобальное отключение ответов ICMP echo после измерения MTU
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/sysctl
+              - -w
+              - net.ipv4.icmp_echo_ignore_all=1
+          changed_when: false
+
+    - name: Выбор минимального результата обоих направлений
+      ansible.builtin.set_fact:
+        awg3_shared_outer_pmtu: >-
+          {{ awg_mtu_participants |
+             map('extract', hostvars, 'awg3_directional_outer_pmtu') |
+             map('int') | min }}
+        awg3_shared_effective_mtu: >-
+          {{ awg_mtu_participants |
+             map('extract', hostvars, 'awg3_directional_effective_mtu') |
+             map('int') | min }}
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Создание каталога состояния MTU
+      ansible.builtin.file:
+        path: /var/lib/awg-iac
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Согласование MTU клиентского интерфейса с каскадом
+      ansible.builtin.set_fact:
+        entry_awg0_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
+        entry_awg_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
+        entry_legacy_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1280] | min }}"
+        entry_mobile_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
+      when:
+        - awg_node_role == 'entry'
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Сохранение результата MTU на серверах
+      ansible.builtin.copy:
+        dest: /var/lib/awg-iac/mtu.yml
+        content: |
+          directional_outer_pmtu: {{ awg3_directional_outer_pmtu }}
+          shared_outer_pmtu: {{ awg3_shared_outer_pmtu }}
+          transit_mtu: {{ awg3_shared_effective_mtu }}
+          client_mtu: {{ [awg3_shared_effective_mtu | int, 1380] | min }}
+          mobile_client_mtu: {{ [awg3_shared_effective_mtu | int, 1380] | min }}
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+
+    - name: Передача безопасного результата MTU управляющему компьютеру
+      ansible.builtin.copy:
+        dest: "{{ awg_mtu_controller_result_path }}"
+        content: |
+          shared_outer_pmtu: {{ awg3_shared_outer_pmtu }}
+          transit_mtu: {{ awg3_shared_effective_mtu }}
+          client_mtu: {{ [awg3_shared_effective_mtu | int, 1380] | min }}
+          legacy_client_mtu: {{ [awg3_shared_effective_mtu | int, 1280] | min }}
+          mobile_client_mtu: {{ [awg3_shared_effective_mtu | int, 1380] | min }}
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg3_transit_enabled | default(false) | bool
+        - awg_mtu_controller_result_path is defined
+
+- name: Настройка ENTRY сервера
+  hosts: entry
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений об ENTRY сервере
+      ansible.builtin.setup:
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: amneziawg
+      when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
+    - role: entry
+      when: awg_adoption_mode == 'apply'
+    - role: awg3_transit
+      when: awg_adoption_mode == 'apply'
+    - role: sing_box
+      when: awg_adoption_mode == 'apply'
+    - role: entry_routing
+      when: awg_adoption_mode == 'apply'
+    - role: entry_dns
+      when: awg_adoption_mode == 'apply'
+    - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: entry_watchdog
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: health
+      when: awg_adoption_mode == 'apply'
+  post_tasks:
+    - name: Передача закреплённых версий AmneziaWG управляющему компьютеру
+      ansible.builtin.fetch:
+        src: /var/lib/awg-iac/amneziawg-package-lock.txt
+        dest: "{{ awg_package_controller_lock_path }}"
+        flat: true
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg_package_controller_lock_path is defined
+
+- name: Настройка EXIT сервера
+  hosts: exit
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений об EXIT сервере
+      ansible.builtin.setup:
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: amneziawg
+      when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
+    - role: exit
+      when: awg_adoption_mode == 'apply'
+    - role: awg3_transit
+      when: awg_adoption_mode == 'apply'
+    - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: health
+      when: awg_adoption_mode == 'apply'
+
+- name: Восстановление автоматических обновлений
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Включение таймеров автоматического обновления после установки
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+      when: awg_restore_apt | default(true) | bool

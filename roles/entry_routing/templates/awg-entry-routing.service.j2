@@ -1,0 +1,15 @@
+[Unit]
+Description=Управляемая policy routing AWG на ENTRY
+After=network-online.target awg-quick@{{ entry_client_interface }}.service {% if awg3_transit_enabled | default(false) | bool %}{{ awg3_transit_service_name }}{% else %}awg-quick@{{ entry_exit_interface }}.service{% endif %} sing-box.service
+Wants=network-online.target
+Requires=awg-quick@{{ entry_client_interface }}.service {% if awg3_transit_enabled | default(false) | bool %}{{ awg3_transit_service_name }}{% else %}awg-quick@{{ entry_exit_interface }}.service{% endif %}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ entry_routing_script_path }} apply
+ExecReload={{ entry_routing_script_path }} apply
+ExecStop={{ entry_routing_script_path }} remove
+
+[Install]
+WantedBy=multi-user.target

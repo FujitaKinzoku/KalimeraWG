@@ -1,0 +1,38 @@
+[Interface]
+PrivateKey = {{ vault_awg_entry_private_key }}
+Address = {{ entry_client_address }}
+ListenPort = {{ entry_awg0_listen_port }}
+MTU = {{ entry_awg0_mtu }}
+Table = off
+Jc = {{ entry_awg0_obfuscation.jc }}
+Jmin = {{ entry_awg0_obfuscation.jmin }}
+Jmax = {{ entry_awg0_obfuscation.jmax }}
+S1 = {{ entry_awg0_obfuscation.s1 }}
+S2 = {{ entry_awg0_obfuscation.s2 }}
+{% if entry_awg_client_mode | default('modern') == 'modern' %}
+S3 = {{ entry_awg0_obfuscation.s3 }}
+S4 = {{ entry_awg0_obfuscation.s4 }}
+{% endif %}
+H1 = {{ entry_awg0_obfuscation.h1 }}
+H2 = {{ entry_awg0_obfuscation.h2 }}
+H3 = {{ entry_awg0_obfuscation.h3 }}
+H4 = {{ entry_awg0_obfuscation.h4 }}
+{% if entry_awg_client_mode | default('modern') == 'modern' %}
+I1 = {{ entry_awg0_obfuscation.i1 }}
+I2 = {{ entry_awg0_obfuscation.i2 }}
+I3 = {{ entry_awg0_obfuscation.i3 }}
+I4 = {{ entry_awg0_obfuscation.i4 }}
+I5 = {{ entry_awg0_obfuscation.i5 }}
+{% endif %}
+
+{% for peer in vault_entry_client_peers %}
+[Peer]
+#_Name = {{ peer.name }}
+#_Profile = {{ entry_awg_client_default_profile | default('balanced') }}
+PublicKey = {{ peer.public_key }}
+{% if peer.preshared_key | default('') | length > 0 %}
+PresharedKey = {{ peer.preshared_key }}
+{% endif %}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+
+{% endfor %}

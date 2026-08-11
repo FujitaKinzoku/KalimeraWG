@@ -1,0 +1,293 @@
+---
+- name: "Проверка: прокси sing-box — этап 1"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_manual_disabled_flag }}"
+  register: sing_box_manual_disabled
+
+- name: "Проверка: прокси sing-box — этап 2"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_sing_box_version | length > 0
+      - ansible_architecture in entry_sing_box_packages
+      - entry_sing_box_packages[ansible_architecture].url is match('^https://github.com/SagerNet/sing-box/releases/download/')
+      - entry_sing_box_packages[ansible_architecture].checksum is match('^sha256:[0-9a-f]{64}$')
+      - entry_ru_tun_stack in ['system', 'gvisor', 'mixed']
+      - (vault_proxy_username | default(vault_soax_username | default(''))) is string
+      - (vault_proxy_password | default(vault_soax_password | default(''))) is string
+    fail_msg: "Требуются закреплённый пакет sing-box и зашифрованные учётные данные SOCKS5, если задана аутентификация"
+  no_log: true
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Проверка постоянного локального переопределения RU-прокси"
+  ansible.builtin.stat:
+    path: "{{ sing_box_runtime_override_path }}"
+  register: sing_box_runtime_override_file
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Загрузка постоянного локального переопределения RU-прокси"
+  ansible.builtin.slurp:
+    path: "{{ sing_box_runtime_override_path }}"
+  register: sing_box_runtime_override_content
+  when:
+    - entry_ru_proxy_enabled | bool
+    - sing_box_runtime_override_file.stat.exists
+  no_log: true
+
+- name: "Разбор постоянного локального переопределения RU-прокси"
+  ansible.builtin.set_fact:
+    sing_box_runtime_proxy_override: >-
+      {{ (sing_box_runtime_override_content.content | b64decode | from_json)
+         if sing_box_runtime_override_file.stat.exists else {} }}
+  when: entry_ru_proxy_enabled | bool
+  no_log: true
+
+- name: "Проверка постоянного локального переопределения RU-прокси"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - sing_box_runtime_proxy_override is mapping
+      - >-
+        sing_box_runtime_proxy_override | length == 0 or
+        (sing_box_runtime_proxy_override.server | default('')) is match('^[A-Za-z0-9.-]+$')
+      - >-
+        sing_box_runtime_proxy_override | length == 0 or
+        (sing_box_runtime_proxy_override.server_port | default(0) | int >= 1 and
+         sing_box_runtime_proxy_override.server_port | default(0) | int <= 65535)
+      - >-
+        ((sing_box_runtime_proxy_override.username | default('') | length > 0) ==
+         (sing_box_runtime_proxy_override.password | default('') | length > 0))
+    fail_msg: "Локальное переопределение RU-прокси повреждено; применить его безопасно невозможно"
+  when: entry_ru_proxy_enabled | bool
+  no_log: true
+
+- name: Проверка постоянного локального переопределения DoH
+  ansible.builtin.stat:
+    path: "{{ sing_box_dns_override_path }}"
+  register: sing_box_dns_override_file
+  when: entry_ru_proxy_enabled | bool
+
+- name: Загрузка постоянного локального переопределения DoH
+  ansible.builtin.slurp:
+    path: "{{ sing_box_dns_override_path }}"
+  register: sing_box_dns_override_content
+  when:
+    - entry_ru_proxy_enabled | bool
+    - sing_box_dns_override_file.stat.exists | default(false)
+
+- name: Разбор постоянного локального переопределения DoH
+  ansible.builtin.set_fact:
+    sing_box_runtime_dns_override: >-
+      {{ (sing_box_dns_override_content.content | b64decode | from_json)
+         if (sing_box_dns_override_file.stat.exists | default(false)) else {} }}
+  when: entry_ru_proxy_enabled | bool
+
+- name: Проверка структуры постоянного локального переопределения DoH
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - sing_box_runtime_dns_override is mapping
+      - >-
+        sing_box_runtime_dns_override | length == 0 or
+        sing_box_runtime_dns_override.server | default('') | ansible.utils.ipv4
+      - >-
+        sing_box_runtime_dns_override | length == 0 or
+        (sing_box_runtime_dns_override.server_port | default(0) | int >= 1 and
+         sing_box_runtime_dns_override.server_port | default(0) | int <= 65535)
+      - >-
+        sing_box_runtime_dns_override | length == 0 or
+        sing_box_runtime_dns_override.tls_name | default('') is match('^[A-Za-z0-9.-]+$')
+      - >-
+        sing_box_runtime_dns_override | length == 0 or
+        sing_box_runtime_dns_override.path | default('') is match('^/[A-Za-z0-9._~!$&()*+,;=:@%/?-]*$')
+    fail_msg: "Локальное переопределение DoH повреждено; применить его безопасно невозможно"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Создание: прокси sing-box — этап 3"
+  ansible.builtin.file:
+    path: "{{ sing_box_package_cache | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Загрузка: прокси sing-box — этап 4"
+  ansible.builtin.get_url:
+    url: "{{ entry_sing_box_packages[ansible_architecture].url }}"
+    dest: "{{ sing_box_package_cache }}"
+    checksum: "{{ entry_sing_box_packages[ansible_architecture].checksum }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Установка: прокси sing-box — этап 5"
+  ansible.builtin.apt:
+    deb: "{{ sing_box_package_cache }}"
+    state: present
+    lock_timeout: 600
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Подготовка: прокси sing-box — этап 6"
+  ansible.builtin.file:
+    path: "{{ sing_box_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Проверка: прокси sing-box — этап 7"
+  ansible.builtin.stat:
+    path: "{{ sing_box_config_path }}"
+  register: sing_box_live_config
+  no_log: true
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Безопасное применение: прокси sing-box — этап 8"
+  when: entry_ru_proxy_enabled | bool
+  block:
+    - name: "Формирование: прокси sing-box — этап 9"
+      ansible.builtin.template:
+        src: config.json.j2
+        dest: "{{ sing_box_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: прокси sing-box — этап 10"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/sing-box
+          - check
+          - --config
+          - "{{ sing_box_candidate_path }}"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: прокси sing-box — этап 11"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cmp
+          - --silent
+          - "{{ sing_box_config_path }}"
+          - "{{ sing_box_candidate_path }}"
+      register: sing_box_compare
+      changed_when: false
+      failed_when: sing_box_compare.rc not in [0, 1]
+      when: sing_box_live_config.stat.exists
+      no_log: true
+
+    - name: "Определение: прокси sing-box — этап 12"
+      ansible.builtin.set_fact:
+        sing_box_requires_install: >-
+          {{ (not sing_box_live_config.stat.exists) or
+             (sing_box_compare.rc | default(1) == 1) }}
+      no_log: true
+
+    - name: "Создание: прокси sing-box — этап 13"
+      ansible.builtin.file:
+        path: "{{ sing_box_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - sing_box_live_config.stat.exists
+        - sing_box_requires_install | bool
+
+    - name: "Резервное копирование: прокси sing-box — этап 14"
+      ansible.builtin.copy:
+        src: "{{ sing_box_config_path }}"
+        dest: >-
+          {{ sing_box_backup_dir }}/config.json.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - sing_box_live_config.stat.exists
+        - sing_box_requires_install | bool
+      no_log: true
+
+    - name: "Установка: прокси sing-box — этап 15"
+      ansible.builtin.copy:
+        src: "{{ sing_box_candidate_path }}"
+        dest: "{{ sing_box_config_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: sing_box_requires_install | bool
+      notify: Перезапустить sing-box, если он выбран
+      no_log: true
+
+  always:
+    - name: "Удаление: прокси sing-box — этап 16"
+      ansible.builtin.file:
+        path: "{{ sing_box_candidate_path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+
+- name: "Создание каталога восстановления маршрутов после запуска sing-box"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ sing_box_service_name }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Связывание запуска sing-box с восстановлением policy routing"
+  ansible.builtin.template:
+    src: 50-awg-routing-reconcile.conf.j2
+    dest: "/etc/systemd/system/{{ sing_box_service_name }}.d/50-awg-routing-reconcile.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: sing_box_routing_dropin
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Перезагрузка systemd после изменения связи sing-box"
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when:
+    - entry_ru_proxy_enabled | bool
+    - sing_box_routing_dropin.changed
+
+- name: "Применение: прокси sing-box — этап 17"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Настройка: прокси sing-box — этап 18"
+  ansible.builtin.systemd_service:
+    name: "{{ sing_box_service_name }}"
+    enabled: "{{ not sing_box_manual_disabled.stat.exists }}"
+    state: "{{ sing_box_manual_disabled.stat.exists | ternary('stopped', 'started') }}"
+    daemon_reload: true
+  no_log: true
+  when: entry_ru_proxy_enabled | bool
+
+- name: "Отключение: прокси sing-box — этап 19"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, disable, --now, "{{ sing_box_service_name }}"]
+  register: sing_box_disable_result
+  changed_when: sing_box_disable_result.rc == 0
+  failed_when: false
+  when: not entry_ru_proxy_enabled | bool
+
+- name: "Удаление: прокси sing-box — этап 20"
+  ansible.builtin.file:
+    path: "{{ sing_box_config_path }}"
+    state: absent
+  no_log: true
+  when: not entry_ru_proxy_enabled | bool
+
+- name: "Удаление связи маршрутизации невыбранного sing-box"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ sing_box_service_name }}.d/50-awg-routing-reconcile.conf"
+    state: absent
+  when: not entry_ru_proxy_enabled | bool

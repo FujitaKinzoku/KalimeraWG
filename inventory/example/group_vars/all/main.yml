@@ -1,0 +1,43 @@
+---
+ansible_user: root
+ansible_port: 56777
+ansible_become: true
+
+awg_adoption_mode: audit
+awg_backup_root: /root/config-backups
+awg_manage_root_ssh: false
+awg_remove_legacy_files: false
+awg_remove_docker: false
+
+# Общий несекретный адрес ENTRY, ожидаемый в AllowedIPs peer на EXIT.
+awg_interserver_entry_address: 10.77.0.2/32
+
+# При первом применении выбирается единый доступный набор для ENTRY и EXIT.
+# Интерактивный deploy сразу сохраняет точные версии в production inventory.
+awg_package_version_mode: candidate
+
+# Верхний предел межсерверного MTU; клиентский MTU не превышает 1380 и всегда
+# остаётся меньше либо равен фактически выбранному межсерверному MTU.
+awg3_mtu_ceiling: 1420
+
+ssh_listen_port: 56777
+ssh_password_authentication: false
+ssh_root_login: prohibit-password
+security_manage_ssh: true
+security_allow_ssh_port_change: false
+
+fail2ban_sshd:
+  maxretry: 3
+  findtime: 24h
+  bantime: 5h
+  bantime_increment: true
+  bantime_factor: 2
+  bantime_max: 10d
+
+awg_unattended_security_updates: true
+# Только защитный предел: установка продолжится сразу после освобождения APT.
+awg_apt_wait_timeout_seconds: 1800
+awg_server_audit_calendar: "*-*-* 04:40:00"
+awg_maintenance_calendar: "Sun *-*-* 05:20:00"
+awg_telegram_monitor_enabled: false
+awg_telegram_monitor_interval: 60s

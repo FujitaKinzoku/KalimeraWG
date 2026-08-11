@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly DIR={{ awg_domain_policy_dir | quote }}
+readonly OUT=/etc/dnsmasq.d/63-awg-local-domain-policy.conf
+readonly PROXY_DISABLED={{ entry_ru_proxy_disabled_flag | quote }}
+readonly PROXY_MANUAL_DISABLED={{ entry_ru_proxy_manual_disabled_flag | quote }}
+command_name="$(basename "$0")"
+readonly command_name
+readonly -a policy_names=(ru-domain se-domain entry-domain)
+readonly -a policy_sets=(force_ru force_exit force_entry_bank)
+
+case "$command_name" in
+    ru-domain|se-domain|entry-domain) file="$DIR/$command_name" ;;
+    *) echo 'Запускайте как ru-domain, se-domain или entry-domain' >&2; exit 2 ;;
+esac
+
+usage() {
+    echo "Использование: $command_name [list|clear|sync|add DOMAIN|del DOMAIN] [--defer]"
+}
+
+action="${1:-list}"
+defer=false
+if (( $# > 0 )) && [[ "${!#}" == --defer ]]; then
+    defer=true
+    set -- "${@:1:$(($# - 1))}"
+fi
+
+case "$action" in
+    list) [[ $# -le 1 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 && "$defer" == false ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    clear) [[ $# -eq 1 ]] || { usage >&2; exit 2; } ;;
+    sync) [[ $# -eq 1 && "$defer" == false ]] || { usage >&2; exit 2; } ;;
+    add|del) [[ $# -eq 2 ]] || { usage >&2; exit 2; } ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+if [[ "$action" =~ ^(add|del)$ ]]; then
+    domain="${2,,}"
+    domain="${domain%.}"
+    [[ "$(printf '%s' "$domain" | wc -c)" -le 253 && "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || {
+        echo 'Некорректный домен ASCII/IDNA' >&2
+        exit 2
+    }
+fi
+
+install -d -m 0755 "$DIR"
+for policy_name in "${policy_names[@]}"; do
+    [[ -e "$DIR/$policy_name" ]] || install -m 0644 /dev/null "$DIR/$policy_name"
+done
+
+if [[ "$action" == list ]]; then
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file"
+    exit 0
+fi
+
+exec 9>/run/awg-domain-policy.lock
+flock 9
+
+snapshot="$(mktemp -d /run/awg-domain-policy-state.XXXXXX)"
+tmp="$(mktemp /run/awg-domain-policy.XXXXXX)"
+output_existed=false
+completed=false
+for policy_name in "${policy_names[@]}"; do
+    cp -a "$DIR/$policy_name" "$snapshot/$policy_name"
+done
+if [[ -e "$OUT" ]]; then
+    cp -a "$OUT" "$snapshot/output.conf"
+    output_existed=true
+fi
+
+restore_state() {
+    local policy_name
+    for policy_name in "${policy_names[@]}"; do
+        install -m 0644 "$snapshot/$policy_name" "$DIR/$policy_name"
+    done
+    if [[ "$output_existed" == true ]]; then
+        install -m 0644 "$snapshot/output.conf" "$OUT"
+    else
+        rm -f "$OUT"
+    fi
+    dnsmasq --test >/dev/null 2>&1 || true
+    for policy_name in "${policy_sets[@]}"; do
+        ipset flush "$policy_name" 2>/dev/null || true
+    done
+    systemctl restart dnsmasq.service >/dev/null 2>&1 || true
+}
+
+cleanup() {
+    local rc=$?
+    if (( rc != 0 )) && [[ "$completed" == false ]]; then
+        restore_state
+        echo 'Изменение доменной политики отменено; предыдущая конфигурация восстановлена.' >&2
+    fi
+    rm -f "$tmp"
+    rm -rf "$snapshot"
+    return "$rc"
+}
+trap cleanup EXIT
+
+if [[ "$action" == clear ]]; then
+    : >"$file"
+elif [[ "$action" =~ ^(add|del)$ ]]; then
+    for policy_name in "${policy_names[@]}"; do
+        sed -i "/^${domain//./\.}$/d" "$DIR/$policy_name"
+    done
+    [[ "$action" == del ]] || printf '%s\n' "$domain" >>"$file"
+fi
+
+for policy_name in "${policy_names[@]}"; do
+    sort -u -o "$DIR/$policy_name" "$DIR/$policy_name"
+done
+
+if [[ "$defer" == true ]]; then
+    completed=true
+    echo "Изменение $command_name подготовлено; применение отложено."
+    exit 0
+fi
+
+proxy_dns=false
+if systemctl is-active --quiet {{ sing_box_service_name | quote }} &&
+        [[ ! -e "$PROXY_DISABLED" && ! -e "$PROXY_MANUAL_DISABLED" ]]; then
+    proxy_dns=true
+fi
+
+{
+    echo '# Сформировано локальными командами управления доменами AWG.'
+    while read -r domain; do
+        [[ -z "$domain" ]] || {
+            echo "ipset=/$domain/force_ru"
+            [[ "$proxy_dns" == false ]] || echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
+            echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
+        }
+    done <"$DIR/ru-domain"
+    while read -r domain; do
+        [[ -z "$domain" ]] || {
+            echo "ipset=/$domain/force_exit"
+            echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
+        }
+    done <"$DIR/se-domain"
+    while read -r domain; do
+        [[ -z "$domain" ]] || echo "ipset=/$domain/force_entry_bank"
+    done <"$DIR/entry-domain"
+} >"$tmp"
+
+changed=false
+if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
+    install -m 0644 "$tmp" "$OUT"
+    dnsmasq --test
+    for policy_set in "${policy_sets[@]}"; do
+        ipset flush "$policy_set" 2>/dev/null || true
+    done
+    systemctl reset-failed dnsmasq.service 2>/dev/null || true
+    systemctl restart dnsmasq.service
+    changed=true
+fi
+completed=true
+
+if [[ "$action" == sync ]]; then
+    [[ "$changed" == false ]] || echo 'Локальная доменная политика синхронизирована.'
+elif [[ "$action" == clear ]]; then
+    echo "Список $command_name очищен."
+elif [[ "$action" == add ]]; then
+    echo "$domain добавлен в $command_name."
+else
+    echo "$domain удалён из $command_name."
+fi

@@ -1,0 +1,71 @@
+---
+- name: "Проверка: предварительная проверка — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_adoption_mode in ['audit', 'apply']
+    fail_msg: "awg_adoption_mode должен иметь значение audit или apply"
+
+- name: "Проверка: предварительная проверка — этап 2"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - ansible_distribution == awg_supported_distribution
+      - ansible_distribution_version is version(awg_supported_release, '>=')
+      - ansible_distribution_version is version('25.00', '<')
+    fail_msg: "Репозиторий поддерживает только Ubuntu 24.04.x"
+
+- name: "Проверка: предварительная проверка — этап 3"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_backup_root == '/root/config-backups'
+    fail_msg: "Резервные копии конфигураций разрешены только в /root/config-backups"
+
+- name: "Определение: предварительная проверка — этап 4"
+  ansible.builtin.set_fact:
+    entry_wan_interface: "{{ ansible_default_ipv4.interface | default('') }}"
+  when:
+    - awg_node_role == 'entry'
+    - entry_wan_interface | default('auto') in ['auto', '']
+
+- name: "Определение: предварительная проверка — этап 5"
+  ansible.builtin.set_fact:
+    exit_wan_interface: "{{ ansible_default_ipv4.interface | default('') }}"
+  when:
+    - awg_node_role == 'exit'
+    - exit_wan_interface | default('auto') in ['auto', '']
+
+- name: "Проверка: предварительная проверка — этап 6"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - >-
+        (awg_node_role == 'entry' and entry_wan_interface | length > 0) or
+        (awg_node_role == 'exit' and exit_wan_interface | length > 0)
+    fail_msg: "Не удалось определить пригодный WAN-интерфейс по основному маршруту"
+
+- name: "Проверка согласованности пары ENTRY и EXIT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - groups['entry'] | default([]) | length == 1
+      - groups['exit'] | default([]) | length == 1
+      - >-
+        (hostvars[groups['entry'][0]].awg3_transit_enabled | default(false) | bool) ==
+        (hostvars[groups['exit'][0]].awg3_transit_enabled | default(false) | bool)
+      - >-
+        not (hostvars[groups['entry'][0]].awg3_transit_enabled | default(false) | bool) or
+        ((hostvars[groups['entry'][0]].awg3_peer_endpoint_port | int) ==
+         (hostvars[groups['exit'][0]].awg3_transit_listen_port | int) and
+         (hostvars[groups['exit'][0]].awg3_peer_endpoint_port | int) ==
+         (hostvars[groups['entry'][0]].awg3_transit_listen_port | int))
+    fail_msg: >-
+      Inventory должен содержать ровно одну согласованную пару ENTRY/EXIT;
+      режим AWG 3+ и взаимные endpoint/listen UDP-порты обязаны быть согласованы.
+  run_once: true
+
+- name: "Вывод: предварительная проверка — этап 7"
+  ansible.builtin.debug:
+    msg: "Предварительная проверка пройдена; при awg_adoption_mode=audit роли конфигурации не запускаются"
+  when: awg_adoption_mode == 'audit'

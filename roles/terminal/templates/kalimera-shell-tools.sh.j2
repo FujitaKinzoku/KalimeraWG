@@ -1,0 +1,36 @@
+# Цветной и предсказуемый вывод стандартных инструментов KalimeraWG.
+[[ $- == *i* ]] || return 0
+[[ -z ${KALIMERA_SHELL_TOOLS_LOADED:-} ]] || return 0
+KALIMERA_SHELL_TOOLS_LOADED=1
+
+export LESS='-R -F -X'
+export SYSTEMD_COLORS=1
+export SYSTEMD_PAGERSECURE=1
+
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias egrep='grep -E --color=auto'
+    alias fgrep='grep -F --color=auto'
+fi
+
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ip='ip -color=auto'
+alias diff='diff --color=auto'
+
+if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+    source /usr/share/bash-completion/bash_completion
+elif [[ -r /etc/bash_completion ]]; then
+    source /etc/bash_completion
+fi
+
+alias kalimera='kalimera-help'
+
+# Справка показывается один раз для каждого нового SSH/терминального сеанса.
+if [[ -t 1 && -z ${KALIMERA_HELP_SHOWN:-} && -x /usr/local/sbin/kalimera-help ]]; then
+    export KALIMERA_HELP_SHOWN=1
+    /usr/local/sbin/kalimera-help
+fi

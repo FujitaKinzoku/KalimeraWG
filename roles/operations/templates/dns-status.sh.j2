@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() { echo 'Использование: dns-status'; }
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+readonly dot_config=/etc/unbound/unbound.conf.d/90-awg-dot.conf
+readonly doh_config={{ sing_box_config_path | quote }}
+readonly dot_override={{ entry_dns_dot_override_path | quote }}
+readonly doh_override={{ sing_box_dns_override_path | quote }}
+readonly disabled_flag={{ entry_ru_proxy_disabled_flag | quote }}
+readonly manual_flag={{ entry_ru_proxy_manual_disabled_flag | quote }}
+readonly policy_dir={{ awg_domain_policy_dir | quote }}
+
+color=false
+if [[ -t 1 && -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]] &&
+        command -v tput >/dev/null 2>&1 && (( $(tput colors 2>/dev/null || printf 0) >= 8 )); then
+    color=true
+fi
+if [[ "$color" == true ]]; then
+    cyan=$'\e[1;36m'; green=$'\e[1;32m'; yellow=$'\e[1;33m'; red=$'\e[1;31m'; reset=$'\e[0m'
+else
+    cyan=''; green=''; yellow=''; red=''; reset=''
+fi
+
+service_state() {
+    if systemctl is-active --quiet "$1"; then
+        printf '%sактивна%s' "$green" "$reset"
+    else
+        printf '%sнеактивна%s' "$yellow" "$reset"
+    fi
+}
+
+query_state() {
+    local port="$1" domain="$2"
+    if dig +short +time=3 +tries=1 @127.0.0.1 -p "$port" "$domain" A 2>/dev/null |
+            grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+        printf '%sOK%s' "$green" "$reset"
+    else
+        printf '%sFAIL%s' "$red" "$reset"
+    fi
+}
+
+printf '%s=== DNS KALIMERAWG ===%s\n' "$cyan" "$reset"
+printf 'dnsmasq: %s · Unbound: %s\n' "$(service_state dnsmasq.service)" "$(service_state unbound.service)"
+printf 'DNS клиентов: {{ entry_client_listen_address }}:53 → dnsmasq → Unbound/DoT\n'
+printf 'Основной DNS-тест: %s\n' "$(query_state {{ entry_dns_default_port }} example.com)"
+
+printf '\n%sDoT по умолчанию%s\n' "$cyan" "$reset"
+grep -E '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null |
+    sed -E 's/^[[:space:]]*forward-addr:[[:space:]]*/  /' || true
+[[ -e "$dot_override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
+
+printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
+if [[ -f "$doh_config" ]]; then
+    jq -r '
+      .dns.servers[] | select(.tag == "yandex-doh-ru") |
+      "  https://\(.tls.server_name):\(.server_port)\(.path) [адрес \(.server)]"
+    ' "$doh_config"
+    [[ -e "$doh_override" ]] && echo 'Источник: локальное переопределение doh-switch' || echo 'Источник: зашифрованный inventory'
+    if systemctl is-active --quiet {{ sing_box_service_name | quote }} &&
+            [[ ! -e "$disabled_flag" && ! -e "$manual_flag" ]]; then
+        printf 'Режим RU DNS: DoH через SOCKS5 · тест: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
+    else
+        echo 'Режим RU DNS: резервный DoT через ENTRY'
+    fi
+else
+    echo 'DoH не настроен: RU-прокси не выбран при установке.'
+fi
+
+printf '\n%sДоменные политики%s\n' "$cyan" "$reset"
+for policy in ru-domain se-domain entry-domain; do
+    count="$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$policy_dir/$policy" 2>/dev/null | wc -l)"
+    printf '  %-13s %s\n' "$policy" "$count"
+done

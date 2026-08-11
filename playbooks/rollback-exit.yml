@@ -1,0 +1,114 @@
+---
+- name: Откат AWG-конфигурации EXIT из разрешённой резервной копии
+  hosts: exit
+  gather_facts: true
+  any_errors_fatal: true
+  vars:
+    exit_rollback_components:
+      awg0:
+        prefix: /root/config-backups/exit/awg0/
+        destination: /etc/amnezia/amneziawg/awg0.conf
+        validator: awg
+        service: awg-quick@awg0.service
+      awg3:
+        prefix: /root/config-backups/exit/awg3/
+        destination: /etc/amnezia/amneziawg-v3/awg3.conf
+        validator: awg3
+        service: awg3-transit.service
+  pre_tasks:
+    - name: Проверка наличия установленного health-check
+      ansible.builtin.stat:
+        path: /usr/local/sbin/awg-health
+      register: awg_health_script
+
+  tasks:
+    - name: Проверка выбранного компонента rollback EXIT
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_component is defined
+          - rollback_component in exit_rollback_components
+          - rollback_file is defined
+          - "'..' not in rollback_file"
+        fail_msg: "Укажите rollback_component awg0 или awg3 и разрешённый backup-файл"
+
+    - name: Выбор политики rollback EXIT
+      ansible.builtin.set_fact:
+        exit_rollback: "{{ exit_rollback_components[rollback_component] }}"
+
+    - name: Проверка разрешённой границы backup EXIT
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_file.startswith(exit_rollback.prefix)
+          - rollback_file | basename | length > 0
+        fail_msg: "rollback_file находится вне каталога выбранного компонента EXIT"
+
+    - name: Проверка источника rollback
+      ansible.builtin.stat:
+        path: "{{ rollback_file }}"
+      register: rollback_source
+      no_log: true
+
+    - name: Проверка обычного rollback-файла с владельцем root
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - rollback_source.stat.exists
+          - rollback_source.stat.isreg
+          - rollback_source.stat.pw_name == 'root'
+        fail_msg: "Разрешённый rollback-файл отсутствует либо имеет неожиданного владельца"
+      no_log: true
+
+    - name: Проверка синтаксиса AWG в rollback-файле
+      ansible.builtin.command:
+        argv: [/usr/bin/awg-quick, strip, "{{ rollback_file }}"]
+      changed_when: false
+      no_log: true
+      when: exit_rollback.validator == 'awg'
+
+    - name: Проверка синтаксиса AWG 3+ в rollback-файле
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg3-validate-config, "{{ rollback_file }}"]
+      changed_when: false
+      no_log: true
+      when: exit_rollback.validator == 'awg3'
+
+    - name: Проверка действующей конфигурации EXIT перед rollback
+      ansible.builtin.stat:
+        path: "{{ exit_rollback.destination }}"
+      register: rollback_current_exit
+      no_log: true
+
+    - name: Сохранение действующей конфигурации EXIT перед rollback
+      ansible.builtin.copy:
+        src: "{{ exit_rollback.destination }}"
+        dest: >-
+          {{ exit_rollback.prefix }}pre-rollback-{{ exit_rollback.destination | basename }}.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: rollback_current_exit.stat.exists
+      no_log: true
+
+    - name: Восстановление AWG-конфигурации EXIT
+      ansible.builtin.copy:
+        src: "{{ rollback_file }}"
+        dest: "{{ exit_rollback.destination }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Перезапуск восстановленного компонента EXIT
+      ansible.builtin.systemd_service:
+        name: "{{ exit_rollback.service }}"
+        state: restarted
+
+    - name: Проверка состояния EXIT после rollback, если health-check установлен
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-health, --strict]
+      changed_when: false
+      when: awg_health_script.stat.exists

@@ -1,0 +1,46 @@
+---
+awg_node_role: exit
+
+exit_awg_interface: awg0
+exit_wan_interface: auto
+exit_awg_listen_port: 443
+security_interserver_peer_ipv4: 192.0.2.10
+security_interserver_listen_port: 443
+exit_awg_mtu: 1420
+exit_tcp_mss: 1336
+awg3_transit_enabled: false
+awg3_transit_listen_port: 443
+awg3_peer_endpoint_port: 39745
+awg3_peer_tunnel_address: 10.77.0.2
+
+exit_awg_address: 10.77.0.1/24
+exit_awg_subnet: 10.77.0.0/24
+
+# Включайте только на чистом тестовом сервере либо после проверенного принятия.
+exit_manage_awg_config: false
+
+# Несекретные параметры AmneziaWG. Замените их проверенными значениями.
+exit_awg_obfuscation:
+  jc: 8
+  jmin: 64
+  jmax: 256
+  s1: 48
+  s2: 56
+  s3: 32
+  s4: 24
+  h1: "100000000-149999999"
+  h2: "600000000-649999999"
+  h3: "1100000000-1149999999"
+  h4: "1600000000-1649999999"
+  i1: "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1174>"
+  i2: "<b 0x40><r 127>"
+  i3: "<b 0x41><r 95>"
+  i4: "<b 0x42><r 63>"
+  i5: "<b 0x43><r 31>"
+
+# При принятии существующие peers не удаляются. Явную проверенную модель peers
+# задавайте только после решения о сохранении прямых клиентов EXIT.
+exit_peer_migration_policy: preserve
+
+# Docker считается неактивным устаревшим компонентом и удаляется только явно.
+exit_docker_policy: preserve

@@ -1,0 +1,102 @@
+---
+- name: "Определение: ENTRY сервер — этап 1"
+  ansible.builtin.set_fact:
+    entry_awg_live_path: >-
+      {{ entry_awg_config_dir }}/{{ entry_awg_config_item.interface }}.conf
+    entry_awg_candidate_path: >-
+      {{ entry_awg_candidate_root }}/{{ entry_awg_config_item.interface }}.conf
+    entry_awg_backup_dir: >-
+      {{ entry_awg_backup_root }}/{{ entry_awg_config_item.interface }}
+  no_log: true
+
+- name: "Проверка: ENTRY сервер — этап 2"
+  ansible.builtin.stat:
+    path: "{{ entry_awg_live_path }}"
+  register: entry_awg_live_stat
+  no_log: true
+
+- name: "Безопасное применение: ENTRY сервер — этап 3"
+  block:
+    - name: "Формирование: ENTRY сервер — этап 4"
+      ansible.builtin.template:
+        src: "{{ entry_awg_config_item.template }}"
+        dest: "{{ entry_awg_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: ENTRY сервер — этап 5"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/awg-quick
+          - strip
+          - "{{ entry_awg_candidate_path }}"
+      changed_when: false
+      no_log: true
+
+    - name: "Проверка: ENTRY сервер — этап 6"
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/cmp
+          - --silent
+          - "{{ entry_awg_live_path }}"
+          - "{{ entry_awg_candidate_path }}"
+      register: entry_awg_compare
+      changed_when: false
+      failed_when: entry_awg_compare.rc not in [0, 1]
+      when: entry_awg_live_stat.stat.exists
+      no_log: true
+
+    - name: "Определение: ENTRY сервер — этап 7"
+      ansible.builtin.set_fact:
+        entry_awg_requires_install: >-
+          {{ (not entry_awg_live_stat.stat.exists) or
+             (entry_awg_compare.rc | default(1) == 1) }}
+      no_log: true
+
+    - name: "Создание: ENTRY сервер — этап 8"
+      ansible.builtin.file:
+        path: "{{ entry_awg_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - entry_awg_live_stat.stat.exists
+        - entry_awg_requires_install | bool
+
+    - name: "Резервное копирование: ENTRY сервер — этап 9"
+      ansible.builtin.copy:
+        src: "{{ entry_awg_live_path }}"
+        dest: >-
+          {{ entry_awg_backup_dir }}/{{ entry_awg_config_item.interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - entry_awg_live_stat.stat.exists
+        - entry_awg_requires_install | bool
+      no_log: true
+
+    - name: "Установка: ENTRY сервер — этап 10"
+      ansible.builtin.copy:
+        src: "{{ entry_awg_candidate_path }}"
+        dest: "{{ entry_awg_live_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: entry_awg_requires_install | bool
+      notify: Перезапустить интерфейсы AWG ENTRY сервера
+      no_log: true
+
+  always:
+    - name: "Удаление: ENTRY сервер — этап 11"
+      ansible.builtin.file:
+        path: "{{ entry_awg_candidate_path }}"
+        state: absent
+      changed_when: false
+      no_log: true

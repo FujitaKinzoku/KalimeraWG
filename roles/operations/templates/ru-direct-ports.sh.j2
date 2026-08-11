@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly file={{ entry_ru_direct_tcp_ports_file | quote }}
+readonly routing={{ entry_routing_script_path | quote }}
+readonly backup_dir=/root/config-backups/entry/routing
+
+usage() { echo 'Использование: ru-direct-ports [list|clear|add PORT|del PORT|apply] [--defer]'; }
+action="${1:-list}"
+defer=false
+if (( $# > 0 )) && [[ "${!#}" == --defer ]]; then
+  defer=true
+  set -- "${@:1:$(($# - 1))}"
+fi
+case "$action" in
+  list|status) [[ ( $# -eq 0 || $# -eq 1 ) && "$defer" == false ]] || { usage >&2; exit 2; }; cat "$file"; exit 0 ;;
+  --help|-h) [[ $# -eq 1 && "$defer" == false ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+  clear|apply|add|del) ;;
+  *) usage >&2; exit 2 ;;
+esac
+if [[ "$action" =~ ^(clear|apply)$ && $# -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ "$action" == apply && "$defer" == true ]]; then
+  usage >&2
+  exit 2
+fi
+
+exec 9>/run/awg-ru-direct-ports.lock
+flock 9
+
+if [[ "$action" == apply ]]; then
+  "$routing" apply
+  echo 'Политика прямых RU-портов применена.'
+  exit 0
+fi
+
+if [[ "$action" =~ ^(add|del)$ ]]; then
+  [[ $# -eq 2 && "$2" =~ ^[0-9]+$ && "$2" -ge 1 && "$2" -le 65535 && "$2" -ne 25 ]] || {
+    echo 'Порт должен находиться в диапазоне 1..65535 и не равняться 25' >&2
+    exit 2
+  }
+  port="$2"
+fi
+
+old_file="$(mktemp /run/awg-ru-direct-ports.old.XXXXXX)"
+new_file="$(mktemp /run/awg-ru-direct-ports.new.XXXXXX)"
+trap 'rm -f "$old_file" "$new_file"' EXIT
+cp -a "$file" "$old_file"
+cp -a "$file" "$new_file"
+
+case "$action" in
+  clear) : >"$new_file" ;;
+  add)
+    sed -i "/^${port}$/d" "$new_file"
+    printf '%s\n' "$port" >>"$new_file"
+    ;;
+  del) sed -i "/^${port}$/d" "$new_file" ;;
+esac
+sort -nu -o "$new_file" "$new_file"
+
+if cmp --silent "$new_file" "$file"; then
+  echo 'Политика прямых RU-портов уже соответствует запросу.'
+  exit 0
+fi
+
+install -d -m 0700 "$backup_dir"
+install -m 0600 "$file" "$backup_dir/ru-direct-ports.$(date -u +%Y%m%dT%H%M%SZ)"
+install -m 0644 "$new_file" "$file"
+if [[ "$defer" == true ]]; then
+  echo 'Изменение прямых RU-портов подготовлено; применение отложено.'
+  exit 0
+fi
+if ! "$routing" apply; then
+  install -m 0644 "$old_file" "$file"
+  "$routing" apply >/dev/null 2>&1 || true
+  echo 'Изменение прямых RU-портов отменено из-за ошибки маршрутизации.' >&2
+  exit 1
+fi
+
+case "$action" in
+  clear) echo 'Политика прямых RU-портов очищена.' ;;
+  add) echo "TCP-порт $port добавлен в прямой RU-маршрут." ;;
+  del) echo "TCP-порт $port удалён из прямого RU-маршрута." ;;
+esac

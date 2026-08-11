@@ -1,0 +1,30 @@
+[Interface]
+PrivateKey = {{ vault_awg_exit_private_key }}
+Address = {{ exit_awg_address }}
+MTU = {{ exit_awg_mtu }}
+ListenPort = {{ exit_awg_listen_port }}
+PostUp = iptables -t nat -C POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE; iptables -t mangle -C FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || iptables -t mangle -A FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}; iptables -t mangle -C FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || iptables -t mangle -A FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}; while iptables -D FORWARD -i %i -o %i -j DROP 2>/dev/null; do :; done; iptables -I FORWARD -i %i -o %i -j DROP
+PostDown = iptables -t nat -D POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE 2>/dev/null || true; iptables -t mangle -D FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || true; iptables -t mangle -D FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || true; iptables -D FORWARD -i %i -o %i -j DROP 2>/dev/null || true
+Jc = {{ exit_awg_obfuscation.jc }}
+Jmin = {{ exit_awg_obfuscation.jmin }}
+Jmax = {{ exit_awg_obfuscation.jmax }}
+S1 = {{ exit_awg_obfuscation.s1 }}
+S2 = {{ exit_awg_obfuscation.s2 }}
+S3 = {{ exit_awg_obfuscation.s3 }}
+S4 = {{ exit_awg_obfuscation.s4 }}
+H1 = {{ exit_awg_obfuscation.h1 }}
+H2 = {{ exit_awg_obfuscation.h2 }}
+H3 = {{ exit_awg_obfuscation.h3 }}
+H4 = {{ exit_awg_obfuscation.h4 }}
+I1 = {{ exit_awg_obfuscation.i1 }}
+
+{% for peer in vault_exit_peers %}
+[Peer]
+#_Name = {{ peer.name }}
+PublicKey = {{ peer.public_key }}
+{% if peer.preshared_key | default('') | length > 0 %}
+PresharedKey = {{ peer.preshared_key }}
+{% endif %}
+AllowedIPs = {{ peer.allowed_ips | join(', ') }}
+
+{% endfor %}

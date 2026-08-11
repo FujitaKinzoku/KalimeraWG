@@ -1,0 +1,8 @@
+---
+- name: Обновление терминального интерфейса KalimeraWG без изменения каскада
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: terminal
+      when: terminal_enabled | default(true) | bool

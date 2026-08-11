@@ -1,0 +1,7 @@
+[Service]
+# Префикс «+» выполняет служебное действие с правами root, не меняя
+# непривилегированного пользователя основного процесса sing-box.
+# На чистой установке служба маршрутизации создаётся позже роли sing-box.
+# Восстановление policy routing является best-effort: его отсутствие не должно
+# превращать успешно запущенный sing-box в неисправную службу.
+ExecStartPost=+/bin/sh -c '/bin/systemctl --no-block try-restart awg-entry-routing.service >/dev/null 2>&1 || true'

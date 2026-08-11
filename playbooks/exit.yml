@@ -1,0 +1,39 @@
+---
+- name: Настройка EXIT сервера
+  hosts: exit
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений об EXIT сервере
+      ansible.builtin.setup:
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - preflight
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: amneziawg
+      when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
+    - role: exit
+      when: awg_adoption_mode == 'apply'
+    - role: awg3_transit
+      when: awg_adoption_mode == 'apply'
+    - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: health
+      when: awg_adoption_mode == 'apply'

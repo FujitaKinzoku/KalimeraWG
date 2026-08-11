@@ -1,0 +1,58 @@
+---
+- name: Запуск Telegram-мониторинга после завершения настройки
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    telegram_monitor_state_dir: >-
+      {{ awg_telegram_monitor_state_dir | default('/var/lib/awg-telegram-monitor') }}
+    telegram_monitor_timer_name: >-
+      {{ awg_telegram_monitor_timer_name | default('awg-telegram-monitor.timer') }}
+    telegram_monitor_deferred_flag: >-
+      {{ awg_telegram_monitor_deferred_flag | default('/run/awg-telegram-monitor.deferred') }}
+  tasks:
+    - name: Создание каталога состояния Telegram-мониторинга
+      ansible.builtin.file:
+        path: "{{ telegram_monitor_state_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: awg_telegram_monitor_enabled | bool
+
+    - name: Фиксация исходного исправного состояния без уведомления
+      ansible.builtin.copy:
+        dest: "{{ telegram_monitor_state_dir }}/status"
+        content: "healthy\n"
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      when: awg_telegram_monitor_enabled | bool
+
+    - name: Получение идентификатора текущей загрузки сервера
+      ansible.builtin.command: cat /proc/sys/kernel/random/boot_id
+      register: telegram_monitor_boot_id
+      changed_when: false
+      when: awg_telegram_monitor_enabled | bool
+
+    - name: Фиксация текущей загрузки без ложного уведомления о перезапуске
+      ansible.builtin.copy:
+        dest: "{{ telegram_monitor_state_dir }}/boot-id"
+        content: "{{ telegram_monitor_boot_id.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      when: awg_telegram_monitor_enabled | bool
+
+    - name: Включение Telegram-мониторинга
+      ansible.builtin.systemd_service:
+        name: "{{ telegram_monitor_timer_name }}"
+        enabled: "{{ awg_telegram_monitor_enabled | bool }}"
+        state: "{{ (awg_telegram_monitor_enabled | bool) | ternary('started', 'stopped') }}"
+
+    - name: Завершение отложенного запуска Telegram-мониторинга
+      ansible.builtin.file:
+        path: "{{ telegram_monitor_deferred_flag }}"
+        state: absent

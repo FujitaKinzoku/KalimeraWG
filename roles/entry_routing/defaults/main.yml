@@ -1,0 +1,14 @@
+---
+entry_routing_script_path: /usr/local/sbin/awg-entry-routing
+entry_ru_zone_update_script_path: /usr/local/sbin/awg-ru-zone-update
+entry_ru_zone_state_dir: /var/lib/awg-routing
+entry_ru_zone_cache_path: /var/lib/awg-routing/ru.zone
+entry_ru_proxy_mode_path: /var/lib/awg-routing/proxy.mode
+entry_routing_service_name: awg-entry-routing.service
+entry_ru_zone_service_name: awg-ru-zone-update.service
+entry_ru_zone_timer_name: awg-ru-zone-update.timer
+entry_ru_zone_min_networks: 1000
+entry_ru_proxy_disabled_flag: /run/awg-ru-proxy.disabled
+entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
+entry_ru_direct_tcp_ports_file: /etc/awg/ru-direct-ports
+entry_ru_proxy_udp_mode_path: /var/lib/awg-routing/proxy-udp.mode

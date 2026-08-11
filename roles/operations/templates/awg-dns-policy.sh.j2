@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || exit 1
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { echo 'Использование: awg-dns-policy' >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { echo 'Использование: awg-dns-policy' >&2; exit 2; }; echo 'Использование: awg-dns-policy'; exit 0 ;;
+    *) echo 'Использование: awg-dns-policy' >&2; exit 2 ;;
+esac
+
+readonly output=/etc/dnsmasq.d/61-ru-split-dns.conf
+readonly default_port={{ entry_dns_default_port }}
+readonly proxy_port={{ entry_dns_ru_port }}
+readonly disabled_flag={{ entry_ru_proxy_disabled_flag | quote }}
+readonly manual_flag={{ entry_ru_proxy_manual_disabled_flag | quote }}
+temporary="$(mktemp /run/awg-dns-policy.XXXXXX)"
+previous="$(mktemp /run/awg-dns-policy.previous.XXXXXX)"
+output_existed=false
+committed=false
+if [[ -e "$output" ]]; then
+    cp -a "$output" "$previous"
+    output_existed=true
+fi
+
+cleanup() {
+    local rc=$?
+    if (( rc != 0 )) && [[ "$committed" == true ]]; then
+        if [[ "$output_existed" == true ]]; then
+            install -m 0644 "$previous" "$output" || true
+        else
+            rm -f "$output"
+        fi
+        systemctl restart dnsmasq.service >/dev/null 2>&1 || true
+        echo 'Изменение базовой DNS-политики отменено; предыдущая конфигурация восстановлена.' >&2
+    fi
+    rm -f "$temporary" "$previous"
+    return "$rc"
+}
+trap cleanup EXIT
+
+proxy_dns=false
+if systemctl is-active --quiet {{ sing_box_service_name | quote }} && \
+        [[ ! -e "$disabled_flag" && ! -e "$manual_flag" ]]; then
+    proxy_dns=true
+fi
+
+{
+    echo '# Сформировано awg-dns-policy. Явные правила EXIT имеют приоритет.'
+    for zone in ru xn--p1ai; do
+        if [[ "$proxy_dns" == true ]]; then
+            echo "server=/$zone/127.0.0.1#$proxy_port"
+        fi
+        echo "server=/$zone/127.0.0.1#$default_port"
+    done
+} >"$temporary"
+
+if [[ ! -f "$output" ]] || ! cmp --silent "$temporary" "$output"; then
+    committed=true
+    install -m 0644 "$temporary" "$output"
+    dnsmasq --test
+    systemctl restart dnsmasq.service
+    committed=false
+fi
+
+/usr/local/sbin/ru-domain sync

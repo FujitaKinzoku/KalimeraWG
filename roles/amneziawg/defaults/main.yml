@@ -1,0 +1,12 @@
+---
+amneziawg_ppa: ppa:amnezia/ppa
+awg_package_version_mode: pinned
+amneziawg_package_names:
+  - amneziawg
+  - amneziawg-dkms
+  - amneziawg-tools
+amneziawg_package_lock_path: /var/lib/awg-iac/amneziawg-package-lock.txt
+amneziawg_build_packages:
+  - build-essential
+  - dkms
+  - "linux-headers-{{ ansible_kernel }}"

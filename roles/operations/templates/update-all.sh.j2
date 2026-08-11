@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+usage() { echo 'Использование: update-all'; }
+case "${1:-}" in
+  '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+  --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
+export DEBIAN_FRONTEND=noninteractive
+exec 9>/run/awg-apt-maintenance.lock
+flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
+packages=(amneziawg amneziawg-dkms amneziawg-tools sing-box)
+new_holds=()
+for package in "${packages[@]}"; do
+  dpkg-query -W "$package" >/dev/null 2>&1 || continue
+  if ! apt-mark showhold | grep -Fxq "$package"; then apt-mark hold "$package" >/dev/null; new_holds+=("$package"); fi
+done
+cleanup() { [[ -z "${new_holds[*]}" ]] || apt-mark unhold "${new_holds[@]}" >/dev/null; }
+trap cleanup EXIT
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 -y upgrade
+apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+/usr/local/sbin/awg-kernel-guard
+{{ awg_server_audit_path | quote }}
+[[ ! -e /var/run/reboot-required ]] || echo 'Требуется перезагрузка; автоматически она не выполнялась.'

@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CLIENT_IFS=({{ entry_client_interface | quote }}{% if entry_legacy_client_available | default(false) | bool %} {{ entry_legacy_client_interface | quote }}{% endif %}{% if entry_mobile_client_available | default(false) | bool %} {{ entry_mobile_client_interface | quote }}{% endif %})
+CLIENT_SUBNETS=({{ entry_client_subnet | quote }}{% if entry_legacy_client_available | default(false) | bool %} {{ entry_legacy_client_subnet | quote }}{% endif %}{% if entry_mobile_client_available | default(false) | bool %} {{ entry_mobile_client_subnet | quote }}{% endif %})
+CLIENT_DNS_ADDRESSES=({{ entry_client_listen_address | quote }}{% if entry_legacy_client_available | default(false) | bool %} {{ entry_legacy_client_listen_address | quote }}{% endif %}{% if entry_mobile_client_available | default(false) | bool %} {{ entry_mobile_client_listen_address | quote }}{% endif %})
+readonly EXIT_IF={{ entry_exit_interface | quote }}
+readonly PROXY_IF={{ entry_ru_proxy_interface | quote }}
+readonly WAN_IF={{ entry_wan_interface | quote }}
+readonly EXIT_MARK={{ entry_exit_mark | quote }}
+readonly EXIT_TABLE={{ entry_exit_table }}
+readonly EXIT_PRIORITY={{ entry_exit_rule_priority }}
+readonly RU_MARK={{ entry_ru_mark | quote }}
+readonly RU_TABLE={{ entry_ru_table }}
+readonly RU_PRIORITY={{ entry_ru_rule_priority }}
+readonly MAIL_PORTS_FILE={{ entry_ru_direct_tcp_ports_file | quote }}
+DIRECT_PORTS=()
+while IFS= read -r direct_port; do
+    [[ -z "$direct_port" ]] && continue
+    if [[ ! "$direct_port" =~ ^[0-9]+$ ]] ||
+            (( direct_port < 1 || direct_port > 65535 || direct_port == 25 )); then
+        echo "Некорректный прямой RU-порт: $direct_port" >&2
+        exit 1
+    fi
+    DIRECT_PORTS+=("$direct_port")
+done <"$MAIL_PORTS_FILE"
+readonly -a DIRECT_PORTS
+readonly PROXY_DISABLED_FLAG={{ entry_ru_proxy_disabled_flag | quote }}
+readonly PROXY_MANUAL_DISABLED_FLAG={{ entry_ru_proxy_manual_disabled_flag | quote }}
+readonly PROXY_UDP_MODE_FILE={{ entry_ru_proxy_udp_mode_path | quote }}
+readonly RU_CACHE={{ entry_ru_zone_cache_path | quote }}
+readonly CHAIN=AWG_RU_PROXY
+PROXY_UDP_MODE=direct
+if [[ -r "$PROXY_UDP_MODE_FILE" ]]; then
+    read -r PROXY_UDP_MODE <"$PROXY_UDP_MODE_FILE" || PROXY_UDP_MODE=direct
+fi
+[[ "$PROXY_UDP_MODE" == proxy || "$PROXY_UDP_MODE" == direct ]] || PROXY_UDP_MODE=direct
+readonly PROXY_UDP_MODE
+
+exec 9>/run/awg-entry-routing.lock
+flock -w 30 9 || {
+    echo 'Не удалось получить блокировку маршрутизации за 30 секунд.' >&2
+    exit 1
+}
+restore_file="$(mktemp /run/awg-entry-routing.iptables.XXXXXX)"
+trap 'rm -f "$restore_file"' EXIT
+
+delete_all() {
+    local table="$1"
+    shift
+    while iptables -w 10 -t "$table" -C "$@" 2>/dev/null; do
+        iptables -w 10 -t "$table" -D "$@"
+    done
+}
+
+remove_policy_rule() {
+    local mark="$1" table="$2" priority="$3"
+    while ip rule del fwmark "$mark" table "$table" priority "$priority" 2>/dev/null; do :; done
+}
+
+remove_state() {
+    local index client_if client_subnet dns_address
+    for index in "${!CLIENT_IFS[@]}"; do
+        client_if="${CLIENT_IFS[$index]}"
+        client_subnet="${CLIENT_SUBNETS[$index]}"
+        dns_address="${CLIENT_DNS_ADDRESSES[$index]}"
+        delete_all mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
+        delete_all nat POSTROUTING -s "$client_subnet" -o "$EXIT_IF" -j MASQUERADE
+        delete_all nat POSTROUTING -s "$client_subnet" -o "$WAN_IF" -j MASQUERADE
+        delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p udp --dport 53 -j DNAT --to-destination "$dns_address:53"
+        delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p tcp --dport 53 -j DNAT --to-destination "$dns_address:53"
+        delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+        delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable
+        delete_all mangle FORWARD -i "$client_if" -s "$client_subnet" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        delete_all mangle FORWARD -o "$client_if" -d "$client_subnet" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
+    done
+    remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
+    remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
+    ip route flush table "$EXIT_TABLE" 2>/dev/null || true
+    ip route flush table "$RU_TABLE" 2>/dev/null || true
+    iptables -w 10 -t mangle -F "$CHAIN" 2>/dev/null || true
+    iptables -w 10 -t mangle -X "$CHAIN" 2>/dev/null || true
+}
+
+if [[ "${1:-apply}" == remove ]]; then
+    remove_state
+    exit 0
+fi
+
+for command in ip iptables iptables-restore ipset flock; do
+    command -v "$command" >/dev/null 2>&1 || {
+        echo "Не найдена обязательная команда: $command" >&2
+        exit 1
+    }
+done
+
+for client_if in "${CLIENT_IFS[@]}"; do
+    [[ "$client_if" != "${CLIENT_IFS[0]}" ]] || ip link show "$client_if" >/dev/null
+done
+ip link show "$EXIT_IF" >/dev/null
+
+ipset create force_exit hash:ip family inet timeout 86400 maxelem 262144 -exist
+ipset create force_ru hash:ip family inet timeout 86400 maxelem 262144 -exist
+ipset create force_entry_bank hash:ip family inet timeout 86400 maxelem 262144 -exist
+ipset create ru hash:net family inet maxelem 65536 -exist
+ipset create ru_tmp hash:net family inet maxelem 65536 -exist
+ipset create ru_direct_tcp_ports bitmap:port range 1-65535 -exist
+{
+    printf 'create ru_direct_tcp_ports bitmap:port range 1-65535 -exist\n'
+    printf 'flush ru_direct_tcp_ports\n'
+    for direct_port in "${DIRECT_PORTS[@]}"; do
+        printf 'add ru_direct_tcp_ports %s\n' "$direct_port"
+    done
+} | ipset restore -exist
+
+if [[ -s "$RU_CACHE" ]]; then
+    {
+        printf 'create ru hash:net family inet maxelem 65536 -exist\n'
+        printf 'flush ru\n'
+        sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$RU_CACHE" |
+            grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$' |
+            sed 's/^/add ru /'
+    } | ipset restore -exist
+fi
+
+ip route replace default dev "$EXIT_IF" table "$EXIT_TABLE"
+remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
+ip rule add fwmark "$EXIT_MARK" table "$EXIT_TABLE" priority "$EXIT_PRIORITY"
+
+proxy_ready=false
+if ip link show "$PROXY_IF" >/dev/null 2>&1 && [[ ! -e "$PROXY_DISABLED_FLAG" ]] && [[ ! -e "$PROXY_MANUAL_DISABLED_FLAG" ]]; then
+    ip route replace default dev "$PROXY_IF" table "$RU_TABLE"
+    remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
+    ip rule add fwmark "$RU_MARK" table "$RU_TABLE" priority "$RU_PRIORITY"
+    proxy_ready=true
+else
+    remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
+    ip route flush table "$RU_TABLE" 2>/dev/null || true
+fi
+
+{
+    printf '*mangle\n:%s - [0:0]\n-F %s\n' "$CHAIN" "$CHAIN"
+    printf '%s\n' "-A $CHAIN -m set --match-set force_entry_bank dst -j ACCEPT"
+    printf '%s\n' "-A $CHAIN -m set --match-set force_exit dst -j MARK --set-xmark $EXIT_MARK/0xffffffff"
+    printf '%s\n' "-A $CHAIN -m set --match-set force_exit dst -j RETURN"
+    printf '%s\n' "-A $CHAIN -p tcp -m set --match-set force_ru dst -m set --match-set ru_direct_tcp_ports dst -j RETURN"
+    printf '%s\n' "-A $CHAIN -p tcp -m set --match-set ru dst -m set --match-set ru_direct_tcp_ports dst -j RETURN"
+    if [[ "$proxy_ready" == true && "$PROXY_UDP_MODE" == direct ]]; then
+        printf '%s\n' "-A $CHAIN -p udp -m set --match-set force_ru dst -j RETURN"
+        printf '%s\n' "-A $CHAIN -p udp -m set --match-set ru dst -j RETURN"
+    fi
+    if [[ "$proxy_ready" == true ]]; then
+        printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j MARK --set-xmark $RU_MARK/0xffffffff"
+        printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j RETURN"
+        printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j MARK --set-xmark $RU_MARK/0xffffffff"
+        printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j RETURN"
+    else
+        printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j RETURN"
+        printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j RETURN"
+    fi
+    printf '%s\n' "-A $CHAIN -j MARK --set-xmark $EXIT_MARK/0xffffffff"
+    printf '%s\n' "-A $CHAIN -j RETURN" 'COMMIT'
+} >"$restore_file"
+iptables-restore -w 10 --noflush <"$restore_file"
+
+for index in "${!CLIENT_IFS[@]}"; do
+    client_if="${CLIENT_IFS[$index]}"
+    client_subnet="${CLIENT_SUBNETS[$index]}"
+    dns_address="${CLIENT_DNS_ADDRESSES[$index]}"
+    if ! ip link show "$client_if" >/dev/null 2>&1; then
+        # Неактивные дополнительные интерфейсы должны оставлять после себя
+        # чистое состояние без сброса общих policy-routing таблиц.
+        delete_all mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
+        for out_if in "$EXIT_IF" "$WAN_IF"; do
+            delete_all nat POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE
+        done
+        for proto in udp tcp; do
+            reject_args=()
+            if [[ "$proto" == tcp ]]; then reject_args=(--reject-with tcp-reset); else reject_args=(--reject-with icmp-port-unreachable); fi
+            delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p "$proto" --dport 853 -j REJECT "${reject_args[@]}"
+            delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p "$proto" --dport 53 -j DNAT --to-destination "$dns_address:53"
+        done
+        for direction in in out; do
+            if [[ "$direction" == in ]]; then mss_args=(-i "$client_if" -s "$client_subnet"); else mss_args=(-o "$client_if" -d "$client_subnet"); fi
+            delete_all mangle FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        done
+        delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
+        continue
+    fi
+
+    delete_all mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
+    iptables -w 10 -t mangle -A PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
+
+    for out_if in "$EXIT_IF" "$WAN_IF"; do
+        if ! iptables -w 10 -t nat -C POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE 2>/dev/null; then
+            iptables -w 10 -t nat -A POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE
+        fi
+    done
+
+    for proto in udp tcp; do
+        reject_args=()
+        if [[ "$proto" == tcp ]]; then reject_args=(--reject-with tcp-reset); else reject_args=(--reject-with icmp-port-unreachable); fi
+        delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p "$proto" --dport 853 -j REJECT "${reject_args[@]}"
+        iptables -w 10 -I FORWARD 1 -i "$client_if" -s "$client_subnet" -p "$proto" --dport 853 -j REJECT "${reject_args[@]}"
+        delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p "$proto" --dport 53 -j DNAT --to-destination "$dns_address:53"
+        iptables -w 10 -t nat -I PREROUTING 1 -i "$client_if" -s "$client_subnet" -p "$proto" --dport 53 -j DNAT --to-destination "$dns_address:53"
+    done
+
+    for direction in in out; do
+        if [[ "$direction" == in ]]; then mss_args=(-i "$client_if" -s "$client_subnet"); else mss_args=(-o "$client_if" -d "$client_subnet"); fi
+        delete_all mangle FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        iptables -w 10 -t mangle -A FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    done
+
+    delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
+    iptables -w 10 -I FORWARD 1 -i "$client_if" -o "$client_if" -j DROP
+done

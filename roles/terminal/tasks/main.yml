@@ -1,0 +1,270 @@
+---
+- name: Подготовка безопасной сводки текущей конфигурации KalimeraWG
+  ansible.builtin.set_fact:
+    terminal_summary_entry_host: >-
+      {{ hostvars[groups['entry'][0]].entry_public_endpoint |
+         default(hostvars[groups['entry'][0]].ansible_host) }}
+    terminal_summary_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
+    terminal_summary_entry_user: "{{ hostvars[groups['entry'][0]].ansible_user | default('root') }}"
+    terminal_summary_exit_user: "{{ hostvars[groups['exit'][0]].ansible_user | default('root') }}"
+    terminal_summary_entry_ssh_port: >-
+      {{ hostvars[groups['entry'][0]].ssh_listen_port |
+         default(hostvars[groups['entry'][0]].ansible_port | default(22)) }}
+    terminal_summary_exit_ssh_port: >-
+      {{ hostvars[groups['exit'][0]].ssh_listen_port |
+         default(hostvars[groups['exit'][0]].ansible_port | default(22)) }}
+    terminal_summary_client_port: >-
+      {{ hostvars[groups['entry'][0]].entry_awg0_listen_port | default(443) }}
+    terminal_summary_legacy_port: >-
+      {{ hostvars[groups['entry'][0]].entry_legacy_client_listen_port | default(39744) }}
+    terminal_summary_mobile_port: >-
+      {{ hostvars[groups['entry'][0]].entry_mobile_client_listen_port | default(8443) }}
+    terminal_summary_entry_transit_port: >-
+      {{ hostvars[groups['entry'][0]].security_interserver_listen_port | default(39745) }}
+    terminal_summary_exit_transit_port: >-
+      {{ hostvars[groups['exit'][0]].security_interserver_listen_port | default(443) }}
+    terminal_summary_legacy_available: >-
+      {{ hostvars[groups['entry'][0]].entry_legacy_client_available | default(false) | bool }}
+    terminal_summary_mobile_available: >-
+      {{ hostvars[groups['entry'][0]].entry_mobile_client_available | default(false) | bool }}
+    terminal_summary_proxy_configured: >-
+      {{ hostvars[groups['entry'][0]].entry_ru_proxy_enabled | default(false) | bool }}
+    terminal_summary_entry_client_interface: >-
+      {{ hostvars[groups['entry'][0]].entry_client_interface | default('awg0') }}
+    terminal_summary_entry_transit_interface: >-
+      {{ hostvars[groups['entry'][0]].entry_exit_interface | default('awg3') }}
+    terminal_summary_legacy_interface: >-
+      {{ hostvars[groups['entry'][0]].entry_legacy_client_interface | default('awg-old') }}
+    terminal_summary_mobile_interface: >-
+      {{ hostvars[groups['entry'][0]].entry_mobile_client_interface | default('awg-mobile') }}
+    terminal_summary_exit_transit_interface: >-
+      {{ hostvars[groups['exit'][0]].exit_awg_interface | default('awg3') }}
+  when: terminal_enabled | bool
+
+- name: Установка пакетов интерактивного терминала
+  ansible.builtin.apt:
+    name:
+      - bash-completion
+      - gawk
+      - git
+      - less
+      - make
+    state: present
+    lock_timeout: 600
+  when: terminal_enabled | bool
+
+- name: Создание каталога резервных копий терминала
+  ansible.builtin.file:
+    path: "{{ terminal_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: terminal_enabled | bool
+
+- name: Проверка исходной резервной копии bash.bashrc
+  ansible.builtin.stat:
+    path: "{{ terminal_backup_dir }}/bash.bashrc.before-kalimera"
+  register: terminal_bashrc_backup
+  when: terminal_enabled | bool
+
+- name: Сохранение исходного bash.bashrc в разрешённом каталоге
+  ansible.builtin.copy:
+    src: /etc/bash.bashrc
+    dest: "{{ terminal_backup_dir }}/bash.bashrc.before-kalimera"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - terminal_enabled | bool
+    - not terminal_bashrc_backup.stat.exists
+
+- name: Проверка исходной резервной копии root .bashrc
+  ansible.builtin.stat:
+    path: "{{ terminal_backup_dir }}/root.bashrc.before-kalimera"
+  register: terminal_root_bashrc_backup
+  when: terminal_enabled | bool
+
+- name: Проверка существующего root .bashrc
+  ansible.builtin.stat:
+    path: /root/.bashrc
+  register: terminal_root_bashrc
+  when: terminal_enabled | bool
+
+- name: Сохранение исходного root .bashrc в разрешённом каталоге
+  ansible.builtin.copy:
+    src: /root/.bashrc
+    dest: "{{ terminal_backup_dir }}/root.bashrc.before-kalimera"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - terminal_enabled | bool
+    - terminal_root_bashrc.stat.exists
+    - not terminal_root_bashrc_backup.stat.exists
+
+- name: Создание каталога исходников ble.sh
+  ansible.builtin.file:
+    path: "{{ terminal_blesh_source_dir | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Получение закреплённой версии ble.sh
+  ansible.builtin.git:
+    repo: "{{ terminal_blesh_repository }}"
+    dest: "{{ terminal_blesh_source_dir }}"
+    version: "{{ terminal_blesh_revision }}"
+    recursive: true
+    update: false
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Создание каталога конфигурации терминала
+  ansible.builtin.file:
+    path: /etc/kalimera
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: terminal_enabled | bool
+
+- name: Чтение установленной ревизии ble.sh
+  ansible.builtin.slurp:
+    src: "{{ terminal_blesh_install_dir }}/.kalimera-revision"
+  register: terminal_blesh_revision_file
+  failed_when: false
+  changed_when: false
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Установка закреплённой версии ble.sh
+  ansible.builtin.command:
+    argv:
+      - make
+      - -C
+      - "{{ terminal_blesh_source_dir }}"
+      - install
+      - PREFIX=/usr/local
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+    - >-
+      (terminal_blesh_revision_file.content | default('') | b64decode | trim)
+      != terminal_blesh_revision
+
+- name: Запись установленной ревизии ble.sh
+  ansible.builtin.copy:
+    dest: "{{ terminal_blesh_install_dir }}/.kalimera-revision"
+    content: "{{ terminal_blesh_revision }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Установка Kali-подобного приглашения Bash
+  ansible.builtin.template:
+    src: kalimera-prompt.sh.j2
+    dest: /etc/profile.d/kalimera-prompt.sh
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/bash -n %s
+  when: terminal_enabled | bool
+
+- name: Установка цветной справки KalimeraWG
+  ansible.builtin.template:
+    src: kalimera-help.sh.j2
+    dest: /usr/local/sbin/kalimera-help
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
+  when: terminal_enabled | bool
+
+- name: Установка проверяемой сводки конфигурации KalimeraWG
+  ansible.builtin.template:
+    src: kalimera-status.py.j2
+    dest: /usr/local/sbin/kalimera-status
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/python3 -m py_compile %s
+  when: terminal_enabled | bool
+
+- name: Установка цветных инструментов Bash
+  ansible.builtin.template:
+    src: kalimera-shell-tools.sh.j2
+    dest: /etc/profile.d/kalimera-shell-tools.sh
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/bash -n %s
+  when: terminal_enabled | bool
+
+- name: Установка цветовой схемы ble.sh
+  ansible.builtin.template:
+    src: kalimera-blesh-init.sh.j2
+    dest: /etc/kalimera/blesh-init.sh
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/bash -n %s
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Установка безопасного загрузчика ble.sh
+  ansible.builtin.template:
+    src: blesh.sh.j2
+    dest: /etc/blesh.sh
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/bin/bash -n %s
+  when:
+    - terminal_enabled | bool
+    - terminal_blesh_enabled | bool
+
+- name: Подключение оформления в интерактивных сеансах Bash
+  ansible.builtin.blockinfile:
+    path: /etc/bash.bashrc
+    marker: "# {mark} KALIMERA MANAGED TERMINAL"
+    insertafter: EOF
+    block: |
+      # Оформление загружается только для интерактивного Bash.
+      if [[ $- == *i* ]]; then
+          source /etc/profile.d/kalimera-shell-tools.sh
+          source /etc/profile.d/kalimera-prompt.sh
+          {% if terminal_blesh_enabled | bool %}
+          source /etc/blesh.sh
+          {% endif %}
+      fi
+  when: terminal_enabled | bool
+
+- name: Подключение оформления в конце root .bashrc
+  ansible.builtin.blockinfile:
+    path: /root/.bashrc
+    create: true
+    marker: "# {mark} KALIMERA ROOT TERMINAL"
+    insertafter: EOF
+    block: |
+      # Повторная загрузка в конце защищает prompt от настроек провайдера.
+      if [[ $- == *i* ]]; then
+          source /etc/profile.d/kalimera-shell-tools.sh
+          source /etc/profile.d/kalimera-prompt.sh
+          {% if terminal_blesh_enabled | bool %}
+          source /etc/blesh.sh
+          {% endif %}
+      fi
+  when: terminal_enabled | bool

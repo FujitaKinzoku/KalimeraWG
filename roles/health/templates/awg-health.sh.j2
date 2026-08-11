@@ -1,0 +1,345 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() { echo 'Использование: awg-health [--strict]'; }
+strict=false
+case "${1:-}" in
+    '') ;;
+    --strict) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; strict=true ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+failures=0
+
+check() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        printf 'OK   %s\n' "$label"
+    else
+        printf 'FAIL %s\n' "$label"
+        failures=$((failures + 1))
+    fi
+}
+
+check_value() {
+    local label="$1" actual="$2" expected="$3"
+    if [[ "$actual" == "$expected" ]]; then
+        printf 'OK   %s\n' "$label"
+    else
+        printf 'FAIL %s (ожидалось %s, получено %s)\n' "$label" "$expected" "$actual"
+        failures=$((failures + 1))
+    fi
+}
+
+has_rule() {
+    local mark="$1" table="$2" priority="$3"
+    ip -4 rule show | grep -Eq "^${priority}:.*fwmark ${mark}.*lookup ${table}"
+}
+
+rule_absent() {
+    ! has_rule "$@"
+}
+
+service_inactive() {
+    ! systemctl is-active --quiet "$1"
+}
+
+handshake_recent() {
+    local interface="$1" max_age="$2" tool="${3:-awg}" latest now
+    latest="$("$tool" show "$interface" latest-handshakes |
+        awk '{print $2}' | sort -nr | head -n 1)"
+    now="$(date +%s)"
+    [[ "$latest" =~ ^[0-9]+$ ]] &&
+        (( latest > 0 && now >= latest && now - latest <= max_age ))
+}
+
+has_default_route() {
+    local table="$1" interface="$2"
+    ip -4 route show table "$table" | grep -Eq "^default .*dev ${interface}( |$)"
+}
+
+ufw_active() {
+    ufw status | grep -Eq '^Status: active$'
+}
+
+ufw_matches_managed_snapshot() {
+    local marker={{ security_ufw_policy_marker | quote }} expected actual status
+    [[ -r "$marker" ]] || return 1
+    expected="$(cut -d '|' -f 2 "$marker")"
+    status="$(ufw status numbered)"
+    actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
+    [[ -n "$expected" && "$actual" == "$expected" ]]
+}
+
+interface_mtu_is() {
+    local interface="$1" expected="$2" actual
+    actual="$(ip -o link show dev "$interface" | sed -n 's/.* mtu \([0-9][0-9]*\).*/\1/p')"
+    [[ "$actual" == "$expected" ]]
+}
+
+aaaa_filtered() {
+    [[ -z "$(dig +short +time=3 +tries=1 @{{ entry_client_listen_address | default('127.0.0.1') }} example.com AAAA)" ]]
+}
+
+ufw_interserver_restricted() {
+    local interface="$1" peer="$2" port="$3"
+    iptables -w 10 -C ufw-user-input -i "$interface" -p udp \
+        -s "${peer}/32" --dport "$port" -j ACCEPT
+}
+
+ufw_interserver_has_no_broad_allow() {
+    local interface="$1" peer="$2" port="$3" rule
+    while IFS= read -r rule; do
+        [[ "$rule" == *"-s ${peer}/32"* ]] || return 1
+    done < <(
+        iptables -w 10 -S ufw-user-input |
+            grep -F -- "-i ${interface}" |
+            grep -F -- '-p udp' |
+            grep -F -- "--dport ${port}" |
+            grep -F -- '-j ACCEPT' || true
+    )
+}
+
+route_uses_interface() {
+    local destination="$1" mark="$2" interface="$3"
+    ip -4 route get "$destination" mark "$mark" | grep -Eq " dev ${interface}( |$)"
+}
+
+mail_port_25_absent() {
+    ! ipset test ru_direct_tcp_ports 25 >/dev/null 2>&1
+}
+
+direct_bypass_absent() {
+    [[ "$(ipset list ru_direct_tcp_ports 2>/dev/null | sed -n 's/^Number of entries: //p')" == 0 ]]
+}
+
+direct_port_bypasses_proxy() {
+    local set_name="$1" port="$2"
+    ipset test ru_direct_tcp_ports "$port" >/dev/null 2>&1 &&
+    iptables -w 10 -t mangle -C AWG_RU_PROXY -p tcp \
+        -m set --match-set "$set_name" dst \
+        -m set --match-set ru_direct_tcp_ports dst -j RETURN
+}
+
+udp_ru_bypasses_proxy() {
+    local set_name="$1"
+    iptables -w 10 -t mangle -C AWG_RU_PROXY -p udp \
+        -m set --match-set "$set_name" dst -j RETURN
+}
+
+udp_ru_bypass_absent() {
+    ! iptables -w 10 -t mangle -S AWG_RU_PROXY |
+        grep -Eq -- '-p udp .*--match-set (force_ru|ru) dst .* -j RETURN'
+}
+
+printf 'Проверка AWG: {{ awg_node_role }}\n'
+check 'запуск от root' test "$(id -u)" -eq 0
+check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+check 'модуль AmneziaWG' modprobe -n amneziawg
+check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
+check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
+check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
+check 'UFW активен' ufw_active
+check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+{% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
+check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
+    ufw_interserver_restricted \
+    {{ (entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface) | quote }} \
+    {{ security_interserver_peer_ipv4 | quote }} \
+    {{ security_interserver_listen_port | quote }}
+check 'UFW не разрешает межсерверный AWG для всех адресов' \
+    ufw_interserver_has_no_broad_allow \
+    {{ (entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface) | quote }} \
+    {{ security_interserver_peer_ipv4 | quote }} \
+    {{ security_interserver_listen_port | quote }}
+{% endif %}
+{% if awg_enable_fail2ban | bool %}
+check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+{% else %}
+printf 'OK   включение Fail2Ban намеренно отложено\n'
+{% endif %}
+check 'SSH активен' systemctl is-active --quiet ssh.service
+check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
+{% if awg_telegram_monitor_enabled | bool %}
+if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
+    printf 'OK   запуск мониторинга Telegram отложен до финальной проверки\n'
+else
+    check 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
+fi
+{% endif %}
+
+{% if awg_node_role == 'entry' %}
+check 'служба клиентского AWG' systemctl is-active --quiet awg-quick@{{ entry_client_interface }}.service
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'служба AWG 3+ до EXIT сервера' systemctl is-active --quiet {{ awg3_transit_service_name | quote }}
+{% else %}
+check 'служба AWG до EXIT сервера' systemctl is-active --quiet awg-quick@{{ entry_exit_interface }}.service
+{% endif %}
+check 'клиентский интерфейс AWG' ip link show {{ entry_client_interface | quote }}
+check 'MTU клиентского интерфейса согласован с каскадом' interface_mtu_is {{ entry_client_interface | quote }} {{ entry_awg_client_mtu }}
+check 'интерфейс AWG до EXIT сервера' ip link show {{ entry_exit_interface | quote }}
+check 'состояние клиентского AWG доступно' awg show {{ entry_client_interface | quote }}
+{% if entry_legacy_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
+    check 'служба совместимого клиентского AWG' systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service
+    check 'совместимый клиентский интерфейс AWG' ip link show {{ entry_legacy_client_interface | quote }}
+    check 'состояние совместимого AWG доступно' awg show {{ entry_legacy_client_interface | quote }}
+elif systemctl is-failed --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
+    check 'служба совместимого AWG не завершилась с ошибкой' false
+else
+    printf 'OK   совместимый интерфейс AWG намеренно неактивен\n'
+fi
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+    check 'служба мобильного AWG' systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service
+    check 'мобильный интерфейс AWG' ip link show {{ entry_mobile_client_interface | quote }}
+    check 'состояние мобильного AWG доступно' awg show {{ entry_mobile_client_interface | quote }}
+    check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu }}
+    check 'внешний UDP/8443 мобильного AWG открыт напрямую' {{ entry_mobile_firewall_path | quote }} check
+elif systemctl is-failed --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+    check 'служба мобильного AWG не завершилась с ошибкой' false
+else
+    printf 'OK   мобильный интерфейс AWG намеренно неактивен\n'
+    check 'внешний UDP/8443 неактивного мобильного AWG закрыт' {{ entry_mobile_firewall_path | quote }} check-absent
+fi
+check 'внешний UDP/53 не перехватывается мобильным AWG' {{ entry_mobile_firewall_path | quote }} check-dns-clean
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'состояние AWG 3+ до EXIT сервера доступно' {{ awg3_tools_binary_path | quote }} show {{ entry_exit_interface | quote }}
+{% else %}
+check 'состояние AWG до EXIT сервера доступно' awg show {{ entry_exit_interface | quote }}
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
+check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu }}
+{% else %}
+check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
+{% endif %}
+check 'согласование локальных VPN-пиров' systemctl is-active --quiet awg-local-peer-apply.service
+check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
+check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
+check 'служба Unbound' systemctl is-active --quiet unbound.service
+check 'синтаксис dnsmasq' dnsmasq --test
+check 'синтаксис Unbound' unbound-checkconf
+check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port }} example.com A
+check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
+check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
+{% if entry_legacy_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
+    check 'DNS совместимых клиентов по UDP' dig +time=3 +tries=1 @{{ entry_legacy_client_listen_address }} example.com A
+fi
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+    check 'DNS мобильных клиентов по UDP' dig +time=3 +tries=1 @{{ entry_mobile_client_listen_address }} example.com A
+fi
+{% endif %}
+check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
+check 'маршрут по умолчанию в таблице 100' has_default_route {{ entry_exit_table }} {{ entry_exit_interface | quote }}
+check 'mark 0x1 направляется через EXIT сервер' route_uses_interface 8.8.8.8 {{ entry_exit_mark | quote }} {{ entry_exit_interface | quote }}
+check 'ipset force_exit' ipset list force_exit
+check 'ipset force_ru' ipset list force_ru
+check 'ipset российских сетей' ipset list ru
+check 'цепочка маршрутизации ENTRY сервера' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -j AWG_RU_PROXY
+{% if entry_legacy_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
+    check 'цепочка маршрутизации совместимого интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_legacy_client_interface | quote }} -s {{ entry_legacy_client_subnet | quote }} -j AWG_RU_PROXY
+fi
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+    check 'цепочка маршрутизации мобильного интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -j AWG_RU_PROXY
+    check 'принудительный DNS мобильного интерфейса' iptables -w 10 -t nat -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_mobile_client_listen_address ~ ':53') | quote }}
+fi
+{% endif %}
+check 'принудительное перенаправление DNS UDP' iptables -w 10 -t nat -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_client_listen_address ~ ':53') | quote }}
+direct_ports_present=false
+while IFS= read -r direct_port; do
+    [[ -z "$direct_port" ]] && continue
+    direct_ports_present=true
+    check "прямой порт $direct_port force_ru обходит прокси" direct_port_bypasses_proxy force_ru "$direct_port"
+    check "прямой российский порт $direct_port обходит прокси" direct_port_bypasses_proxy ru "$direct_port"
+done <{{ entry_ru_direct_tcp_ports_file | quote }}
+if [[ "$direct_ports_present" == false ]]; then
+    check 'политика прямых российских портов пуста' direct_bypass_absent
+else
+    printf 'OK   все прямые российские TCP-порты применены без ограничения multiport\n'
+fi
+check 'почтовый порт 25 не обходится' mail_port_25_absent
+check 'исходящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+check 'входящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -o {{ entry_client_interface | quote }} -d {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+{% if entry_ru_proxy_enabled | bool %}
+{% if entry_ru_proxy_manual_disabled_flag is defined %}
+if [[ -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
+    check 'sing-box вручную отключён' service_inactive {{ sing_box_service_name | quote }}
+    check 'watchdog российского прокси вручную отключён' service_inactive {{ entry_ru_proxy_watch_timer_name | quote }}
+    check 'правило policy routing для mark 0x2 отсутствует' rule_absent {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
+    check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
+else
+{% endif %}
+check 'служба sing-box' systemctl is-active --quiet {{ sing_box_service_name | quote }}
+check 'российский TUN-интерфейс' ip link show {{ entry_ru_proxy_interface | quote }}
+check 'таймер watchdog российского прокси' systemctl is-active --quiet {{ entry_ru_proxy_watch_timer_name | quote }}
+if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
+    check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
+    check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
+    check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
+    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port }} yandex.ru A
+    proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
+    if [[ "$proxy_udp_mode" == proxy ]]; then
+        check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
+    else
+        check 'force_ru UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy force_ru
+        check 'российский UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy ru
+    fi
+else
+    printf 'OK   активен fail-open российского прокси\n'
+fi
+{% if entry_ru_proxy_manual_disabled_flag is defined %}
+fi
+{% endif %}
+{% else %}
+check 'sing-box намеренно отключён' service_inactive {{ sing_box_service_name | quote }}
+check 'watchdog российского прокси намеренно отключён' service_inactive {{ entry_ru_proxy_watch_timer_name | quote }}
+check 'правило policy routing для mark 0x2 отсутствует' rule_absent {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
+check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
+{% endif %}
+{% elif awg_node_role == 'exit' %}
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'служба AWG 3+ EXIT сервера' systemctl is-active --quiet {{ awg3_transit_service_name | quote }}
+{% else %}
+check 'служба AWG EXIT сервера' systemctl is-active --quiet awg-quick@{{ exit_awg_interface }}.service
+{% endif %}
+check 'интерфейс AWG EXIT сервера' ip link show {{ exit_awg_interface | quote }}
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'состояние AWG 3+ EXIT сервера доступно' {{ awg3_tools_binary_path | quote }} show {{ exit_awg_interface | quote }}
+{% else %}
+check 'состояние AWG EXIT сервера доступно' awg show {{ exit_awg_interface | quote }}
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
+check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu }}
+{% else %}
+check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
+{% endif %}
+check 'ограниченный NAT EXIT сервера' iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
+check 'изоляция клиентов EXIT сервера' iptables -w 10 -C FORWARD -i {{ exit_awg_interface | quote }} -o {{ exit_awg_interface | quote }} -j DROP
+{% if awg3_transit_enabled | default(false) | bool %}
+check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+{% else %}
+check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
+check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
+{% endif %}
+{% endif %}
+
+if [[ "$failures" -eq 0 ]]; then
+    printf 'GOOD: все проверки пройдены\n'
+    exit 0
+fi
+
+printf 'BAD: ошибок проверки: %d\n' "$failures"
+[[ "$strict" == true ]] && exit 1
+exit 0

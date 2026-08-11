@@ -1,0 +1,12 @@
+[Unit]
+Description=Периодическое Telegram-уведомление о состоянии AWG
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec={{ awg_telegram_monitor_interval }}
+AccuracySec=5s
+Persistent=true
+Unit={{ awg_telegram_monitor_service_name }}
+
+[Install]
+WantedBy=timers.target

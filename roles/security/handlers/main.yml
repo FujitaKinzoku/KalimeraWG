@@ -1,0 +1,23 @@
+---
+- name: "Перезагрузка: безопасность — этап 1"
+  ansible.builtin.command: /usr/sbin/sysctl --system
+  changed_when: true
+  listen: Перезагрузить sysctl
+
+- name: "Обновление: безопасность — этап 2"
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Безопасно перезагрузить SSH
+
+- name: "Перезапуск: безопасность — этап 3"
+  ansible.builtin.systemd_service:
+    name: ssh.socket
+    state: restarted
+  when: security_ssh_socket_active | default(false) | bool
+  listen: Безопасно перезагрузить SSH
+
+- name: "Перезагрузка: безопасность — этап 4"
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    state: reloaded
+  listen: Безопасно перезагрузить SSH

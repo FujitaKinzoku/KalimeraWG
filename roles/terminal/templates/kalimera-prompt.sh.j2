@@ -1,0 +1,73 @@
+# Управляемое KalimeraWG приглашение Bash. Не редактировать на сервере.
+[[ $- == *i* ]] || return 0
+KALIMERA_PROMPT_LOADED=1
+KALIMERA_NODE_ROLE={{ 'ENTRY' if 'entry' in group_names else ('EXIT' if 'exit' in group_names else 'SERVER') }}
+
+__kalimera_exit_description() {
+    case "$1" in
+        1) printf '%s' 'команда завершилась с общей ошибкой' ;;
+        2) printf '%s' 'ошибка аргументов или синтаксиса' ;;
+        126) printf '%s' 'файл найден, но не может быть выполнен' ;;
+        127) printf '%s' 'команда не найдена' ;;
+        130) printf '%s' 'выполнение прервано Ctrl+C' ;;
+        137) printf '%s' 'процесс принудительно остановлен SIGKILL' ;;
+        143) printf '%s' 'процесс остановлен SIGTERM' ;;
+        255) printf '%s' 'ошибка соединения или аутентификации' ;;
+        *) printf 'команда завершилась с кодом %s' "$1" ;;
+    esac
+}
+
+__kalimera_prompt() {
+    local previous_status=$?
+    local color=0
+    local top='┌' bottom='└' line='─' kali='㉿'
+    local reset='' frame='' identity='' path_color='' status_color=''
+    local prompt_char='$'
+
+    if [[ ${NO_COLOR:-} == '' && ${TERM:-dumb} != dumb ]] &&
+       command -v tput >/dev/null 2>&1 &&
+       (( $(tput colors 2>/dev/null || printf 0) >= 8 )); then
+        color=1
+    fi
+    if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} != *UTF-8* &&
+          ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} != *utf8* ]]; then
+        top='+' bottom='+' line='-' kali='@'
+    fi
+
+    if (( color )); then
+        reset='\[\e[0m\]'
+        path_color='\[\e[1;37m\]'
+        status_color='\[\e[1;31m\]'
+        if (( EUID == 0 )); then
+            frame='\[\e[1;34m\]'
+            identity='\[\e[1;31m\]'
+        else
+            frame='\[\e[1;32m\]'
+            identity='\[\e[1;36m\]'
+        fi
+    fi
+    (( EUID == 0 )) && prompt_char='#'
+
+    if (( previous_status != 0 )); then
+        printf '\e[1;31m[ошибка %d: %s]\e[0m\n' \
+            "$previous_status" "$(__kalimera_exit_description "$previous_status")"
+    fi
+
+    PS1="\[\e]0;\u@\h: \w\a\]${frame}${top}${line}(${identity}\u${kali}\h${frame})-[${identity}${KALIMERA_NODE_ROLE}${frame}]-[${path_color}\w${frame}]${reset}\n${frame}${bottom}${line}${status_color}${prompt_char}${reset} "
+}
+
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -q '^declare -a'; then
+    __kalimera_prompt_found=0
+    for __kalimera_prompt_item in "${PROMPT_COMMAND[@]}"; do
+        [[ $__kalimera_prompt_item == __kalimera_prompt ]] &&
+            __kalimera_prompt_found=1
+    done
+    (( __kalimera_prompt_found )) ||
+        PROMPT_COMMAND=(__kalimera_prompt "${PROMPT_COMMAND[@]}")
+    unset __kalimera_prompt_found __kalimera_prompt_item
+else
+    case ";${PROMPT_COMMAND:-};" in
+        *';__kalimera_prompt;'*) ;;
+        *) PROMPT_COMMAND="__kalimera_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+    esac
+fi

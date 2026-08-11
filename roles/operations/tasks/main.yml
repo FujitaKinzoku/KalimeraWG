@@ -1,0 +1,408 @@
+---
+- name: "Проверка: администрирование — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_server_audit_calendar | length > 0
+      - awg_telegram_monitor_interval is match('^[1-9][0-9]*s$')
+      - awg_maintenance_calendar | length > 0
+    fail_msg: "Для административных таймеров требуются проверенные интервалы systemd"
+
+- name: "Установка: администрирование — этап 2"
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    lock_timeout: 600
+  when: awg_unattended_security_updates | bool
+
+- name: "Настройка: администрирование — этап 3"
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+  when: awg_unattended_security_updates | bool
+
+- name: "Запрет: администрирование — этап 4"
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52awg-maintenance-policy
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Package-Blacklist {
+        "amneziawg";
+        "amneziawg-dkms";
+        "amneziawg-tools";
+        "sing-box";
+      };
+  when: awg_unattended_security_updates | bool
+
+- name: "Установка: администрирование — этап 5"
+  ansible.builtin.template:
+    src: server-audit.sh.j2
+    dest: "{{ awg_server_audit_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: "Установка: администрирование — этап 6"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/usr/local/sbin/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - {src: awg-kernel-guard.sh.j2, dest: awg-kernel-guard}
+    - {src: maintenance.sh.j2, dest: maintenance}
+    - {src: update-all.sh.j2, dest: update-all}
+    - {src: f2b-reset.sh.j2, dest: f2b-reset}
+
+- name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
+  ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
+  changed_when: false
+
+- name: "Установка: администрирование — этап 7"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - awg-maintenance.service
+    - awg-maintenance.timer
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Создание: администрирование — этап 8"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ awg_domain_policy_dir }}"
+    - "{{ awg_client_output_dir }}"
+    - "{{ awg_local_peer_dir }}"
+    - "{{ awg_legacy_local_peer_dir }}"
+    - "{{ awg_mobile_local_peer_dir }}"
+  when: awg_node_role == 'entry'
+
+- name: "Установка: администрирование — этап 9"
+  ansible.builtin.copy:
+    dest: "{{ awg_domain_policy_dir }}/{{ item.name }}"
+    content: ""
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  loop:
+    - {name: ru-domain}
+    - {name: se-domain}
+    - {name: entry-domain}
+  when: awg_node_role == 'entry'
+
+- name: "Установка: администрирование — этап 10"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/usr/local/sbin/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - {src: domain-admin.sh.j2, dest: awg-domain-admin}
+    - {src: ru-proxy.sh.j2, dest: ru-proxy}
+    - {src: ru-proxy-set.sh.j2, dest: ru-proxy-set}
+    - {src: dot-switch.sh.j2, dest: dot-switch}
+    - {src: doh-switch.sh.j2, dest: doh-switch}
+    - {src: dns-status.sh.j2, dest: dns-status}
+    - {src: ru-direct-ports.sh.j2, dest: ru-direct-ports}
+    - {src: vpn-user.sh.j2, dest: vpn-user}
+    - {src: awg-old.sh.j2, dest: awg-old}
+    - {src: awg-mobile.sh.j2, dest: awg-mobile}
+    - {src: awg-local-peer-apply.sh.j2, dest: awg-local-peer-apply}
+    - {src: awg-dns-policy.sh.j2, dest: awg-dns-policy}
+  when: awg_node_role == 'entry'
+
+- name: "Установка проверки возможностей RU-прокси"
+  ansible.builtin.copy:
+    src: ru-proxy-capability.py
+    dest: "{{ entry_ru_proxy_capability_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: awg_node_role == 'entry'
+
+- name: "Проверка наличия ранее подтверждённого режима RU UDP"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_udp_mode_path }}"
+  register: operations_ru_proxy_udp_existing_state
+  when:
+    - awg_node_role == 'entry'
+    - entry_ru_proxy_enabled | bool
+
+- name: "Автоматическая проверка UDP через выбранный SOCKS5"
+  ansible.builtin.command:
+    argv:
+      - "{{ entry_ru_proxy_capability_path }}"
+      - --config
+      - "{{ sing_box_config_path }}"
+      - --state
+      - "{{ entry_ru_proxy_udp_mode_path }}"
+      - --update-state
+  register: operations_ru_proxy_capability
+  changed_when: "'Режим UDP изменён' in operations_ru_proxy_capability.stdout"
+  failed_when: >-
+    operations_ru_proxy_capability.rc not in [0, 2] or
+    (operations_ru_proxy_capability.rc == 2 and
+     not operations_ru_proxy_udp_existing_state.stat.exists)
+  when:
+    - awg_node_role == 'entry'
+    - entry_ru_proxy_enabled | bool
+
+- name: "Безопасный fail-open при временной недоступности ранее проверенного SOCKS5"
+  ansible.builtin.debug:
+    msg: >-
+      Ранее настроенный SOCKS5 временно не ответил. Сохранён прежний режим RU UDP;
+      watchdog применит fail-open через ENTRY, если прокси остаётся недоступным.
+  when:
+    - awg_node_role == 'entry'
+    - entry_ru_proxy_enabled | bool
+    - operations_ru_proxy_capability.rc | default(0) == 2
+
+- name: "Выбор прямого RU UDP при установке без прокси"
+  ansible.builtin.copy:
+    dest: "{{ entry_ru_proxy_udp_mode_path }}"
+    content: "direct\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - awg_node_role == 'entry'
+    - not entry_ru_proxy_enabled | bool
+
+- name: "Повторное применение маршрутизации после проверки SOCKS5"
+  ansible.builtin.command:
+    argv: ["{{ entry_routing_script_path }}", apply]
+  changed_when: false
+  when: awg_node_role == 'entry'
+
+- name: "Установка: администрирование — этап 11"
+  ansible.builtin.template:
+    src: awg-local-peer-apply.service.j2
+    dest: /etc/systemd/system/awg-local-peer-apply.service
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg_node_role == 'entry'
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Создание каталогов восстановления состояния AWG-интерфейсов"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/awg-quick@{{ item }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ entry_client_interface }}"
+    - "{{ entry_legacy_client_interface }}"
+    - "{{ entry_mobile_client_interface }}"
+  when: awg_node_role == 'entry'
+
+- name: "Связывание запуска клиентских интерфейсов с восстановлением peers и маршрутов"
+  ansible.builtin.template:
+    src: awg-interface-reconcile.conf.j2
+    dest: "/etc/systemd/system/awg-quick@{{ item }}.service.d/50-awg-reconcile.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - "{{ entry_client_interface }}"
+    - "{{ entry_legacy_client_interface }}"
+    - "{{ entry_mobile_client_interface }}"
+  when: awg_node_role == 'entry'
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Установка: администрирование — этап 12"
+  ansible.builtin.file:
+    src: /usr/local/sbin/awg-domain-admin
+    dest: "/usr/local/sbin/{{ item }}"
+    state: link
+    force: true
+  loop: [ru-domain, se-domain, entry-domain]
+  when: awg_node_role == 'entry'
+
+- name: "Синхронизация: администрирование — этап 13"
+  ansible.builtin.command:
+    argv: ["{{ awg_dns_policy_path }}"]
+  register: operations_dns_policy
+  changed_when: operations_dns_policy.stdout | length > 0
+  when: awg_node_role == 'entry'
+
+- name: "Установка: администрирование — этап 14"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - src: server-audit.service.j2
+      dest: "{{ awg_server_audit_service_name }}"
+    - src: server-audit.timer.j2
+      dest: "{{ awg_server_audit_timer_name }}"
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Защищённая проверка формата параметров Telegram"
+  ansible.builtin.set_fact:
+    operations_telegram_credentials_valid: >-
+      {{
+        (vault_telegram_bot_token | default('') | string) is
+          match('^[0-9]{6,20}:[A-Za-z0-9_-]{20,}$') and
+        (vault_telegram_chat_id | default('') | string) is
+          match('^-?[1-9][0-9]{0,19}$')
+      }}
+  when: awg_telegram_monitor_enabled | bool
+  no_log: true
+
+- name: "Проверка: администрирование — этап 15"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - operations_telegram_credentials_valid | default(false) | bool
+    fail_msg: >-
+      Telegram настроен некорректно: укажите полный токен BotFather вместе с
+      двоеточием и отдельный числовой chat ID в зашифрованном Vault.
+  when: awg_telegram_monitor_enabled | bool
+
+- name: "Создание: администрирование — этап 16"
+  ansible.builtin.file:
+    path: "{{ awg_telegram_monitor_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: awg_telegram_monitor_enabled | bool
+
+- name: "Установка: администрирование — этап 17"
+  ansible.builtin.template:
+    src: telegram-monitor.env.j2
+    dest: "{{ awg_telegram_monitor_env_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: awg_telegram_monitor_enabled | bool
+  no_log: true
+
+- name: "Установка: администрирование — этап 18"
+  ansible.builtin.template:
+    src: telegram-monitor.sh.j2
+    dest: "{{ awg_telegram_monitor_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: "Установка команды безопасной проверки Telegram"
+  ansible.builtin.file:
+    src: "{{ awg_telegram_monitor_path }}"
+    dest: /usr/local/sbin/telegram-test
+    state: link
+    force: true
+  when: awg_telegram_monitor_enabled | bool
+
+- name: "Установка: администрирование — этап 19"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - src: telegram-monitor.service.j2
+      dest: "{{ awg_telegram_monitor_service_name }}"
+    - src: telegram-monitor.timer.j2
+      dest: "{{ awg_telegram_monitor_timer_name }}"
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Применение: администрирование — этап 20"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Включение: администрирование — этап 21"
+  ansible.builtin.systemd_service:
+    name: awg-local-peer-apply.service
+    enabled: true
+    state: started
+  when: awg_node_role == 'entry'
+
+- name: "Согласование: администрирование — этап 22"
+  ansible.builtin.command:
+    argv: ["{{ awg_local_peer_apply_path }}"]
+  changed_when: false
+  no_log: true
+  when: awg_node_role == 'entry'
+
+- name: "Включение: администрирование — этап 23"
+  ansible.builtin.systemd_service:
+    name: "{{ awg_server_audit_timer_name }}"
+    enabled: true
+    state: started
+
+- name: "Очистка: администрирование — этап 24"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, "{{ awg_server_audit_service_name }}"]
+  changed_when: false
+  failed_when: false
+
+- name: "Включение: администрирование — этап 25"
+  ansible.builtin.systemd_service:
+    name: awg-maintenance.timer
+    enabled: true
+    state: started
+
+- name: "Включение: администрирование — этап 26"
+  ansible.builtin.systemd_service:
+    name: "{{ awg_telegram_monitor_timer_name }}"
+    enabled: >-
+      {{
+        (awg_telegram_monitor_enabled | bool) and
+        (awg_telegram_monitor_start_immediately | bool)
+      }}
+    state: >-
+      {{
+        ((awg_telegram_monitor_enabled | bool) and
+         (awg_telegram_monitor_start_immediately | bool)) |
+        ternary('started', 'stopped')
+      }}
+
+- name: Отметка отложенного запуска Telegram-мониторинга
+  ansible.builtin.copy:
+    dest: "{{ awg_telegram_monitor_deferred_flag }}"
+    content: ""
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - awg_telegram_monitor_enabled | bool
+    - not awg_telegram_monitor_start_immediately | bool
+
+- name: Удаление отметки отложенного Telegram-мониторинга
+  ansible.builtin.file:
+    path: "{{ awg_telegram_monitor_deferred_flag }}"
+    state: absent
+  when: >-
+    not (awg_telegram_monitor_enabled | bool) or
+    (awg_telegram_monitor_start_immediately | bool)
+
+- name: "Удаление: администрирование — этап 27"
+  ansible.builtin.file:
+    path: "{{ awg_telegram_monitor_env_path }}"
+    state: absent
+  when: not awg_telegram_monitor_enabled | bool
+  no_log: true

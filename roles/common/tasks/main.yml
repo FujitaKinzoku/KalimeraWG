@@ -1,0 +1,16 @@
+---
+- name: "Установка: базовая система — этап 1"
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 600
+
+- name: "Создание: базовая система — этап 2"
+  ansible.builtin.file:
+    path: "{{ awg_backup_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"

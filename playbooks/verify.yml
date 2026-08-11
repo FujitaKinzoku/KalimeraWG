@@ -1,0 +1,20 @@
+---
+- name: Проверка развёрнутой AWG-инфраструктуры без раскрытия секретов
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Запуск строгой проверки состояния сервера
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/awg-health
+          - --strict
+      register: awg_health_result
+      changed_when: false
+      retries: 36
+      delay: 5
+      until: awg_health_result.rc == 0
+
+    - name: Вывод результата проверки без секретных данных
+      ansible.builtin.debug:
+        var: awg_health_result.stdout_lines

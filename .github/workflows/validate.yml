@@ -1,0 +1,80 @@
+---
+name: Проверка
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ansible:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка инструментов проверки
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          pip install -r requirements.txt yamllint==1.37.1
+
+      - name: Установка коллекций Ansible
+        run: ansible-galaxy collection install -r requirements.yml
+
+      - name: Поиск потенциальных секретов в репозитории
+        run: bash scripts/check-secrets.sh
+
+      - name: Проверка YAML
+        run: >-
+          yamllint -d
+          '{extends: default, rules: {line-length: disable, truthy: disable}}'
+          .
+
+      - name: Проверка синтаксиса Ansible
+        run: |
+          ansible-playbook --syntax-check playbooks/audit.yml
+          ansible-playbook --syntax-check playbooks/site.yml
+          ansible-playbook --syntax-check playbooks/entry.yml
+          ansible-playbook --syntax-check playbooks/exit.yml
+          ansible-playbook --syntax-check playbooks/verify.yml
+          ansible-playbook --syntax-check playbooks/rollback-entry.yml
+          ansible-playbook --syntax-check playbooks/rollback-exit.yml
+          ansible-playbook --syntax-check playbooks/test-failover.yml
+          ansible-playbook --syntax-check playbooks/test-prepare-rollback.yml
+          ansible-playbook --syntax-check playbooks/cleanup.yml
+
+      - name: Проверка загрузки переменных относительно каталога inventory
+        run: |
+          cp -R inventory/example /tmp/awg-inventory-layout
+          printf '%s\n' 'inventory_layout_probe: loaded' > /tmp/awg-inventory-layout/group_vars/all/vault.yml
+          ansible-inventory -i /tmp/awg-inventory-layout/hosts.yml \
+            --host entry.example.invalid | \
+            python -c 'import json,sys; d=json.load(sys.stdin); assert d["inventory_layout_probe"] == "loaded" and d["awg_package_version_mode"] == "candidate"'
+
+      - name: Проверка Python-утилит
+        run: |
+          python -m compileall -q scripts tests
+          python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Проверка фильтров Ansible на управляющем узле
+        run: ansible-playbook tests/check-ansible-filters.yml
+
+      - name: Проверка shell-шаблонов
+        run: >-
+          find roles scripts -type f
+          -name '*.sh'
+          -print0 | xargs -0 shellcheck
+
+      - name: Формирование и проверка управляемых shell-программ
+        run: ansible-playbook tests/render-shell.yml
+
+      - name: Проверка конфигурации закреплённой версией sing-box
+        run: ansible-playbook tests/check-sing-box.yml

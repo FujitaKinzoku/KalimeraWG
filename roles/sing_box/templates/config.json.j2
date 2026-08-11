@@ -1,0 +1,89 @@
+{% set dns_override = sing_box_runtime_dns_override | default({}) %}
+{% set doh_server = dns_override.server | default(entry_dns_doh_server) %}
+{% set doh_port = dns_override.server_port | default(443) %}
+{% set doh_path = dns_override.path | default(entry_dns_doh_path) %}
+{% set doh_tls_name = dns_override.tls_name | default(entry_dns_doh_tls_name) %}
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "ru-tun",
+      "interface_name": "{{ entry_ru_proxy_interface }}",
+      "address": ["{{ entry_ru_tun_address }}"],
+      "mtu": {{ entry_ru_tun_mtu }},
+      "auto_route": false,
+      "strict_route": false,
+      "stack": "{{ entry_ru_tun_stack }}",
+      "endpoint_independent_nat": {{ entry_ru_endpoint_independent_nat | bool | to_json }}
+    },
+    {
+      "type": "direct",
+      "tag": "dns-in",
+      "listen": "127.0.0.1",
+      "listen_port": {{ entry_dns_ru_port }},
+      "override_address": "{{ doh_server }}",
+      "override_port": 53
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "socks",
+      "tag": "ru-socks",
+{% set proxy_override = sing_box_runtime_proxy_override | default({}) %}
+{% set proxy_server = proxy_override.server | default(entry_proxy_server | default(entry_soax_server)) %}
+{% set proxy_port = proxy_override.server_port | default(entry_proxy_port | default(entry_soax_port)) %}
+      "server": {{ proxy_server | to_json }},
+      "server_port": {{ proxy_port }},
+      "version": "5",
+{% set proxy_username = proxy_override.username | default(vault_proxy_username | default(vault_soax_username | default(''))) %}
+{% set proxy_password = proxy_override.password | default(vault_proxy_password | default(vault_soax_password | default(''))) %}
+{% if proxy_username | length > 0 %}
+      "username": {{ proxy_username | to_json }},
+      "password": {{ proxy_password | to_json }},
+{% endif %}
+      "domain_resolver": {
+        "server": "bootstrap-unbound",
+        "strategy": "ipv4_only"
+      }
+    }
+  ],
+  "route": {
+    "final": "ru-socks",
+    "default_interface": "{{ entry_wan_interface }}",
+    "rules": [
+      {
+        "inbound": ["dns-in"],
+        "action": "hijack-dns"
+      }
+    ]
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "bootstrap-unbound",
+        "server": "127.0.0.1",
+        "server_port": {{ entry_dns_default_port }}
+      },
+      {
+        "type": "https",
+        "tag": "yandex-doh-ru",
+        "server": "{{ doh_server }}",
+        "server_port": {{ doh_port }},
+        "path": "{{ doh_path }}",
+        "detour": "ru-socks",
+        "tls": {
+          "enabled": true,
+          "server_name": "{{ doh_tls_name }}"
+        }
+      }
+    ],
+    "final": "yandex-doh-ru",
+    "strategy": "ipv4_only",
+    "disable_cache": false
+  }
+}

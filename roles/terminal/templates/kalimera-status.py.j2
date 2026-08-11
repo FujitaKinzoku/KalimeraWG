@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Безопасная цветная сводка фактического состояния узла KalimeraWG."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import shutil
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+
+CONFIG = {
+    "role": {{ awg_node_role | to_json }},
+    "entry_host": {{ terminal_summary_entry_host | to_json }},
+    "exit_host": {{ terminal_summary_exit_host | to_json }},
+    "entry_user": {{ terminal_summary_entry_user | to_json }},
+    "exit_user": {{ terminal_summary_exit_user | to_json }},
+    "entry_ssh_port": {{ terminal_summary_entry_ssh_port | int | to_json }},
+    "exit_ssh_port": {{ terminal_summary_exit_ssh_port | int | to_json }},
+    "client_port": {{ terminal_summary_client_port | int | to_json }},
+    "legacy_port": {{ terminal_summary_legacy_port | int | to_json }},
+    "mobile_port": {{ terminal_summary_mobile_port | int | to_json }},
+    "entry_transit_port": {{ terminal_summary_entry_transit_port | int | to_json }},
+    "exit_transit_port": {{ terminal_summary_exit_transit_port | int | to_json }},
+    "legacy_available": {{ 'True' if terminal_summary_legacy_available | bool else 'False' }},
+    "mobile_available": {{ 'True' if terminal_summary_mobile_available | bool else 'False' }},
+    "proxy_configured": {{ 'True' if terminal_summary_proxy_configured | bool else 'False' }},
+    "entry_client_interface": {{ terminal_summary_entry_client_interface | to_json }},
+    "entry_transit_interface": {{ terminal_summary_entry_transit_interface | to_json }},
+    "legacy_interface": {{ terminal_summary_legacy_interface | to_json }},
+    "mobile_interface": {{ terminal_summary_mobile_interface | to_json }},
+    "exit_transit_interface": {{ terminal_summary_exit_transit_interface | to_json }},
+    "proxy_disabled_flag": {{ entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled') | to_json }},
+    "proxy_manual_flag": {{ entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off') | to_json }},
+    "default_dot": "194.242.2.2@853#dns.mullvad.net",
+    "default_doh_server": {{ entry_dns_doh_server | default('77.88.8.8') | to_json }},
+    "default_doh_tls": {{ entry_dns_doh_tls_name | default('common.dot.dns.yandex.net') | to_json }},
+    "default_doh_path": {{ entry_dns_doh_path | default('/dns-query') | to_json }},
+}
+
+RESET = "\033[0m"
+BLUE = "\033[1;34m"
+CYAN = "\033[1;36m"
+GREEN = "\033[1;32m"
+YELLOW = "\033[1;33m"
+WHITE = "\033[1;37m"
+DIM = "\033[2m"
+
+
+def colour_enabled() -> bool:
+    return (
+        sys.stdout.isatty()
+        and not os.environ.get("NO_COLOR")
+        and os.environ.get("TERM", "dumb") != "dumb"
+    )
+
+
+USE_COLOUR = colour_enabled()
+
+
+def paint(value: str, colour: str) -> str:
+    return f"{colour}{value}{RESET}" if USE_COLOUR else value
+
+
+def run(argv: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str] | None:
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        stdout, stderr = process.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+        return None
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
+def service_active(unit: str) -> bool:
+    result = run(["systemctl", "is-active", "--quiet", unit])
+    return result is not None and result.returncode == 0
+
+
+def interface_mtu(interface: str) -> int | None:
+    value = Path(f"/sys/class/net/{interface}/mtu")
+    try:
+        return int(value.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def mtu_state() -> dict[str, int]:
+    result: dict[str, int] = {}
+    path = Path("/var/lib/awg-iac/mtu.yml")
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(r"\s*([a-z_]+):\s*([0-9]+)\s*", line)
+            if match:
+                result[match.group(1)] = int(match.group(2))
+    except OSError:
+        pass
+    return result
+
+
+def current_dot() -> str:
+    path = Path("/etc/unbound/unbound.conf.d/90-awg-dot.conf")
+    try:
+        values = re.findall(
+            r"^\s*forward-addr:\s*([^\s#]+(?:@\d+)?(?:#[^\s]+)?)",
+            path.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        return ", ".join(values) if values else CONFIG["default_dot"]
+    except OSError:
+        return CONFIG["default_dot"]
+
+
+def current_doh() -> str:
+    path = Path("/etc/sing-box/config.json")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        servers = data.get("dns", {}).get("servers", [])
+        server = next(item for item in servers if item.get("tag") == "yandex-doh-ru")
+        address = str(server.get("server", CONFIG["default_doh_server"]))
+        endpoint = server.get("tls", {}).get("server_name", CONFIG["default_doh_tls"])
+        path_value = server.get("path", CONFIG["default_doh_path"])
+        return f"{address}{path_value} (TLS: {endpoint})"
+    except (OSError, ValueError, TypeError, StopIteration):
+        return (
+            f"{CONFIG['default_doh_server']}{CONFIG['default_doh_path']} "
+            f"(TLS: {CONFIG['default_doh_tls']})"
+        )
+
+
+def audit_state() -> tuple[str, str]:
+    result = run(["/usr/local/sbin/server-audit", "--quiet"], timeout=12)
+    if result is None:
+        return "WARN", "полная проверка недоступна или превысила 12 секунд"
+    if result.returncode == 0:
+        return "OK", "server-audit: все проверки пройдены"
+    return "FAIL", f"server-audit: обнаружены ошибки (код {result.returncode})"
+
+
+def ssh_key_only() -> bool:
+    result = run(["sshd", "-T"], timeout=4)
+    if result is None or result.returncode != 0:
+        return False
+    settings = dict(
+        line.split(None, 1) for line in result.stdout.splitlines() if " " in line
+    )
+    return (
+        settings.get("pubkeyauthentication") == "yes"
+        and settings.get("passwordauthentication") == "no"
+        and settings.get("kbdinteractiveauthentication") == "no"
+    )
+
+
+def state_word(active: bool, available: bool = True) -> str:
+    if not available:
+        return "не предусмотрен текущей конфигурацией"
+    return "включён" if active else "выключен до создания совместимого клиента"
+
+
+def format_mtu(value: int | None) -> str:
+    return str(value) if value is not None else "не определён"
+
+
+def proxy_route() -> tuple[str, str]:
+    if not CONFIG["proxy_configured"]:
+        return "VPN-клиент → ENTRY → Интернет", "SOCKS5 не настроен"
+    manual = Path(CONFIG["proxy_manual_flag"]).exists()
+    fail_open = Path(CONFIG["proxy_disabled_flag"]).exists()
+    active = service_active("sing-box.service") and not manual and not fail_open
+    if active:
+        return (
+            "VPN-клиент → ENTRY → SOCKS5/TUN → Интернет",
+            "DoH через активный RU-прокси",
+        )
+    reason = "ручное отключение" if manual else "автоматический fail-open"
+    return f"VPN-клиент → ENTRY → Интернет ({reason})", "RU DoH настроен, прокси сейчас неактивен"
+
+
+def panel(title: str, rows: list[tuple[str, str, str]]) -> None:
+    terminal_width = shutil.get_terminal_size((88, 24)).columns
+    width = max(44, min(96, terminal_width - 2))
+    inner = width - 2
+    label_width = min(28, max(len(label) for label, _, _ in rows))
+    value_width = max(12, width - label_width - 7)
+    heading = f" {title} "
+    top = "┌" + heading + "─" * max(0, inner - len(heading)) + "┐"
+    print(paint(top, BLUE))
+    for label, value, level in rows:
+        prefix = "✓ " if level == "OK" else ("! " if level in {"WARN", "FAIL"} else "")
+        wrapped = textwrap.wrap(
+            prefix + value,
+            width=value_width,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [""]
+        for index, part in enumerate(wrapped):
+            shown_label = label if index == 0 else ""
+            label_text = f"{shown_label:<{label_width}}"
+            value_text = f"{part:<{value_width}}"
+            value_colour = GREEN if level == "OK" else (YELLOW if level in {"WARN", "FAIL"} else WHITE)
+            print(
+                paint("│ ", BLUE)
+                + paint(label_text, CYAN)
+                + paint(" │ ", BLUE)
+                + paint(value_text, value_colour)
+                + paint(" │", BLUE)
+            )
+    print(paint("└" + "─" * inner + "┘", BLUE))
+
+
+def command_panels() -> None:
+    panel(
+        "СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ",
+        [
+            ("kalimera-status", "текущие подключения, DNS, MTU и защита", "INFO"),
+            ("awg-health --strict", "строгая проверка AWG, маршрутов, DNS и UFW", "INFO"),
+            ("server-audit", "AWG, диск, systemd, UFW и Fail2Ban", "INFO"),
+            ("maintenance", "проверка обновлений без их установки", "INFO"),
+            ("update-all", "установка обновлений и подготовка DKMS", "INFO"),
+        ],
+    )
+    if CONFIG["role"] == "entry":
+        panel(
+            "VPN-КЛИЕНТЫ",
+            [
+                ("vpn-user list", "пользователи и последний handshake", "INFO"),
+                ("vpn-user ИМЯ ПРОФИЛЬ", "создать performance, balanced, masking, mobile или old", "INFO"),
+                ("vpn-user delete ИМЯ", "отозвать peer и удалить рабочий конфиг", "INFO"),
+                ("awg-mobile status", "состояние мобильного интерфейса UDP/8443", "INFO"),
+                ("awg-old status", "состояние legacy-интерфейса", "INFO"),
+            ],
+        )
+        panel(
+            "DNS И ДОМЕННЫЕ ПОЛИТИКИ",
+            [
+                ("dns-status", "активные DoT/DoH, источники и тесты DNS", "INFO"),
+                ("dot-switch status", "просмотр или смена основного DNS-over-TLS", "INFO"),
+                ("doh-switch status", "просмотр или смена RU DNS-over-HTTPS", "INFO"),
+                ("ru-domain list", "домены российского маршрута", "INFO"),
+                ("se-domain list", "домены принудительного маршрута через EXIT", "INFO"),
+                ("entry-domain list", "домены прямого выхода через ENTRY", "INFO"),
+            ],
+        )
+        panel(
+            "RU-ПРОКСИ И МАРШРУТИЗАЦИЯ",
+            [
+                ("ru-proxy status|on|off", "состояние и переключение SOCKS5/fail-open", "INFO"),
+                ("ru-proxy-set", "замена SOCKS5 с проверкой и автоматическим откатом", "INFO"),
+                ("ru-direct-ports list", "TCP-порты RU, обходящие SOCKS5", "INFO"),
+            ],
+        )
+    panel(
+        "БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ",
+        [
+            ("fail2ban-client status sshd", "состояние защиты SSH", "INFO"),
+            ("f2b-reset status|IP|--all", "просмотр или явное снятие блокировок", "INFO"),
+            ("telegram-test", "безопасная проверка доставки Telegram", "INFO"),
+            ("КОМАНДА --help", "точный синтаксис выбранной команды", "INFO"),
+        ],
+    )
+
+
+def main() -> int:
+    with_commands = False
+    if len(sys.argv) > 1:
+        if len(sys.argv) == 2 and sys.argv[1] in {"-h", "--help"}:
+            print("Использование: kalimera-status [--with-commands]")
+            return 0
+        if len(sys.argv) == 2 and sys.argv[1] == "--with-commands":
+            with_commands = True
+        else:
+            print("Использование: kalimera-status [--with-commands]", file=sys.stderr)
+            return 2
+
+    role = CONFIG["role"].upper()
+    panel(
+        f"KALIMERAWG · ТЕКУЩАЯ КОНФИГУРАЦИЯ · {role} СЕРВЕР",
+        [
+            ("Состояние", "адреса, режимы и MTU считываются из установленной системы", "OK"),
+            ("Безопасность", "закрытые ключи, PSK, пароли и токены не выводятся", "INFO"),
+        ],
+    )
+
+    old_active = service_active(f"awg-quick@{CONFIG['legacy_interface']}.service")
+    mobile_active = service_active(f"awg-quick@{CONFIG['mobile_interface']}.service")
+    if CONFIG["role"] == "entry":
+        old_text = state_word(old_active, CONFIG["legacy_available"])
+        mobile_text = f"QUIC-профиль; {state_word(mobile_active, CONFIG['mobile_available'])}"
+        old_level = "OK" if old_active else "INFO"
+        mobile_level = "OK" if mobile_active else "INFO"
+    else:
+        old_text = (
+            "предусмотрен; фактическое состояние проверяется на ENTRY"
+            if CONFIG["legacy_available"]
+            else "не предусмотрен текущей конфигурацией"
+        )
+        mobile_text = (
+            "QUIC-профиль предусмотрен; фактическое состояние проверяется на ENTRY"
+            if CONFIG["mobile_available"]
+            else "не предусмотрен текущей конфигурацией"
+        )
+        old_level = "INFO"
+        mobile_level = "INFO"
+    local_transit = (
+        CONFIG["entry_transit_interface"]
+        if CONFIG["role"] == "entry"
+        else CONFIG["exit_transit_interface"]
+    )
+    transit_active = interface_mtu(local_transit) is not None
+
+    panel(
+        "ПОДКЛЮЧЕНИЯ",
+        [
+            ("SSH ENTRY", f"{CONFIG['entry_user']}@{CONFIG['entry_host']}:{CONFIG['entry_ssh_port']}", "INFO"),
+            ("SSH EXIT", f"{CONFIG['exit_user']}@{CONFIG['exit_host']}:{CONFIG['exit_ssh_port']}", "INFO"),
+            ("VPN-клиенты", f"{CONFIG['entry_host']}:{CONFIG['client_port']}/UDP", "INFO"),
+            ("Старые клиенты", f"{CONFIG['entry_host']}:{CONFIG['legacy_port']}/UDP; {old_text}", old_level),
+            ("Мобильные клиенты", f"{CONFIG['entry_host']}:{CONFIG['mobile_port']}/UDP; {mobile_text}", mobile_level),
+            ("Канал ENTRY–EXIT", f"{CONFIG['exit_host']}:{CONFIG['exit_transit_port']} · AWG 3+ userspace; {'активен' if transit_active else 'не обнаружен'}", "OK" if transit_active else "FAIL"),
+        ],
+    )
+
+    if CONFIG["role"] == "entry":
+        ru_route, doh_note = proxy_route()
+        panel(
+            "СХЕМА РАБОТЫ И DNS",
+            [
+                ("Основной маршрут", "VPN-клиент → ENTRY → EXIT → Интернет", "INFO"),
+                ("RU-трафик", ru_route, "INFO"),
+                ("RU DNS", f"{doh_note}: {current_doh()}", "INFO"),
+                ("Основной DNS", f"Unbound DoT: {current_dot()}", "INFO"),
+            ],
+        )
+    else:
+        panel(
+            "СХЕМА РАБОТЫ И DNS",
+            [
+                ("Транзит", "ENTRY → EXIT → Интернет", "INFO"),
+                ("RU-трафик", "SOCKS5/TUN управляется и проверяется на ENTRY сервере", "INFO"),
+                ("DNS", "DoT/DoH управляются и проверяются на ENTRY сервере", "INFO"),
+            ],
+        )
+
+    saved_mtu = mtu_state()
+    transit_mtu = interface_mtu(local_transit) or saved_mtu.get("transit_mtu")
+    client_mtu = interface_mtu(CONFIG["entry_client_interface"]) or saved_mtu.get("client_mtu")
+    old_mtu = interface_mtu(CONFIG["legacy_interface"]) or min(transit_mtu or 1280, 1280)
+    mobile_mtu = interface_mtu(CONFIG["mobile_interface"]) or saved_mtu.get("mobile_client_mtu")
+    panel(
+        "АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU",
+        [
+            ("Внешний PMTU", format_mtu(saved_mtu.get("shared_outer_pmtu")), "INFO"),
+            ("MTU AWG 3+", format_mtu(transit_mtu), "OK" if transit_mtu else "WARN"),
+            ("MTU клиентов", format_mtu(client_mtu), "OK" if client_mtu else "WARN"),
+            ("MTU old-клиентов", format_mtu(old_mtu), "OK" if old_active else "INFO"),
+            ("MTU mobile-клиентов", format_mtu(mobile_mtu), "OK" if mobile_active else "INFO"),
+        ],
+    )
+
+    ufw_active = run(["ufw", "status"], timeout=4)
+    ufw_ok = ufw_active is not None and "Status: active" in ufw_active.stdout
+    fail2ban_ok = service_active("fail2ban.service")
+    ssh_ok = ssh_key_only()
+    audit_level, audit_text = audit_state()
+    entry_policy = (
+        f"TCP/{CONFIG['entry_ssh_port']} SSH; UDP/{CONFIG['client_port']} клиенты; "
+        f"UDP/{CONFIG['mobile_port']} mobile при включении; UDP/{CONFIG['entry_transit_port']} "
+        f"только от {CONFIG['exit_host']}"
+    )
+    exit_policy = (
+        f"TCP/{CONFIG['exit_ssh_port']} SSH; UDP/{CONFIG['exit_transit_port']} "
+        f"только от {CONFIG['entry_host']}"
+    )
+    panel(
+        "ЗАЩИТА ВНЕШНИХ ИНТЕРФЕЙСОВ",
+        [
+            ("UFW ENTRY", entry_policy, "INFO"),
+            ("UFW EXIT", exit_policy, "INFO"),
+            ("Локальный UFW", "активен" if ufw_ok else "неактивен или недоступен", "OK" if ufw_ok else "FAIL"),
+            ("Доступ SSH", "только по публичному ключу" if ssh_ok else "политика key-only не подтверждена", "OK" if ssh_ok else "WARN"),
+            ("Fail2Ban", "активен" if fail2ban_ok else "неактивен", "OK" if fail2ban_ok else "FAIL"),
+            ("Полная проверка", audit_text, audit_level),
+        ],
+    )
+    if with_commands:
+        command_panels()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

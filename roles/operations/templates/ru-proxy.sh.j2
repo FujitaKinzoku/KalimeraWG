@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+flag={{ entry_ru_proxy_disabled_flag | quote }}
+manual_flag={{ entry_ru_proxy_manual_disabled_flag | quote }}
+routing={{ entry_routing_script_path | quote }}
+capability={{ entry_ru_proxy_capability_path | quote }}
+state_dir={{ entry_ru_proxy_watch_state_dir | quote }}
+probe_url={{ entry_ru_proxy_probe_url | quote }}
+expected_ip={{ entry_ru_proxy_expected_ip | default('') | quote }}
+proxy_if={{ entry_ru_proxy_interface | quote }}
+connect_timeout={{ entry_ru_proxy_connect_timeout }}
+max_probe_time={{ entry_ru_proxy_max_probe_time }}
+
+probe_proxy() {
+    local probe_ip
+    probe_ip="$(curl --fail --silent --show-error --ipv4 \
+        --interface "$proxy_if" \
+        --connect-timeout "$connect_timeout" \
+        --max-time "$max_probe_time" \
+        "$probe_url" 2>/dev/null || true)"
+    [[ "$probe_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && \
+        { [[ -z "$expected_ip" ]] || [[ "$probe_ip" == "$expected_ip" ]]; }
+}
+
+reset_watchdog_counters() {
+    install -d -m 0755 "$state_dir"
+    printf '0\n' >"$state_dir/success.count"
+    printf '0\n' >"$state_dir/failure.count"
+}
+
+case "${1:-status}" in
+  status)
+    [[ $# -le 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }
+    printf 'sing-box: %s\n' "$(systemctl is-active sing-box.service 2>/dev/null || true)"
+    printf 'watchdog: %s\n' "$(systemctl is-active {{ entry_ru_proxy_watch_timer_name | quote }} 2>/dev/null || true)"
+    if [[ -e "$flag" || -e "$manual_flag" ]]; then
+        echo 'Маршрутизация через RU-прокси: ВЫКЛЮЧЕНА (напрямую через ENTRY)'
+        [[ ! -e "$manual_flag" ]] || echo 'Причина: ручное отключение'
+        [[ ! -e "$flag" ]] || echo 'Причина: автоматический fail-open'
+    else
+        echo 'Маршрутизация через RU-прокси: ВКЛЮЧЕНА'
+    fi
+    [[ -e {{ sing_box_runtime_override_path | quote }} ]] && echo 'Источник настроек: локальное переопределение ru-proxy-set' || echo 'Источник настроек: зашифрованный inventory'
+    ;;
+  off)
+    [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }
+    systemctl disable --now {{ entry_ru_proxy_watch_timer_name | quote }} >/dev/null
+    install -d -m 0755 "$(dirname "$manual_flag")"
+    install -m 0644 /dev/null "$manual_flag"
+    systemctl stop sing-box.service
+    "$routing" apply
+    {{ awg_dns_policy_path | quote }}
+    echo 'RU-трафик теперь выходит напрямую через ENTRY.'
+    ;;
+  on)
+    [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }
+{% if entry_ru_proxy_enabled | bool %}
+    "$capability" --config {{ sing_box_config_path | quote }} \
+        --state {{ entry_ru_proxy_udp_mode_path | quote }} --update-state \
+        --tcp-probe-url "$probe_url" --expected-ip "$expected_ip"
+    systemctl enable --now sing-box.service
+    systemctl stop {{ entry_ru_proxy_watch_timer_name | quote }} {{ entry_ru_proxy_watch_service_name | quote }} >/dev/null 2>&1 || true
+    reset_watchdog_counters
+    rm -f "$flag" "$manual_flag"
+    "$routing" apply
+    {{ awg_dns_policy_path | quote }}
+    if probe_proxy; then
+        systemctl enable --now {{ entry_ru_proxy_watch_timer_name | quote }} >/dev/null
+        echo 'RU-прокси включён; сквозная проверка TCP/HTTPS пройдена.'
+    else
+        install -m 0644 /dev/null "$flag"
+        "$routing" apply
+        {{ awg_dns_policy_path | quote }}
+        systemctl enable --now {{ entry_ru_proxy_watch_timer_name | quote }} >/dev/null
+        echo 'RU-прокси не включён: сквозная проверка TCP/HTTPS завершилась ошибкой. Активирован fail-open через ENTRY.' >&2
+        exit 1
+    fi
+{% else %}
+    echo 'Учётные данные или конфигурация прокси не были выбраны во время deploy.' >&2; exit 1
+{% endif %}
+    ;;
+  --help|-h) [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }; echo 'Использование: ru-proxy {on|off|status}' ;;
+  *) echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2 ;;
+esac

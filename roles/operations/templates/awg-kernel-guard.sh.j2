@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { echo 'Использование: awg-kernel-guard' >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { echo 'Использование: awg-kernel-guard' >&2; exit 2; }; echo 'Использование: awg-kernel-guard'; exit 0 ;;
+    *) echo 'Использование: awg-kernel-guard' >&2; exit 2 ;;
+esac
+
+[[ $EUID -eq 0 ]] || {
+    echo 'Запустите проверку ядер от root.' >&2
+    exit 1
+}
+
+dkms_state="$(dkms status 2>/dev/null || true)"
+if ! grep -Eq '^amneziawg/' <<<"$dkms_state"; then
+    echo 'Модуль AmneziaWG не зарегистрирован в DKMS; автоматическая подготовка нового ядра невозможна.' >&2
+    exit 1
+fi
+unset dkms_state
+
+declare -a kernels=()
+running_kernel="$(uname -r)"
+kernels+=("$running_kernel")
+
+boot_image="$(readlink -f /vmlinuz 2>/dev/null || true)"
+if [[ -n "$boot_image" && "${boot_image##*/}" == vmlinuz-* ]]; then
+    kernels+=("${boot_image##*/vmlinuz-}")
+elif compgen -G '/boot/vmlinuz-*' >/dev/null; then
+    boot_kernel="$({
+        for image in /boot/vmlinuz-*; do
+            printf '%s\n' "${image##*/vmlinuz-}"
+        done
+    } | sort -V | tail -n 1)"
+    [[ -z "$boot_kernel" ]] || kernels+=("$boot_kernel")
+fi
+
+mapfile -t kernels < <(printf '%s\n' "${kernels[@]}" | awk 'NF && !seen[$0]++')
+
+for kernel_release in "${kernels[@]}"; do
+    modules_dir="/lib/modules/$kernel_release"
+    [[ -d "$modules_dir" ]] || {
+        echo "Каталог модулей ядра $kernel_release отсутствует." >&2
+        exit 1
+    }
+
+    if [[ ! -e "$modules_dir/build" ]]; then
+        package="linux-headers-$kernel_release"
+        if ! apt-cache show "$package" >/dev/null 2>&1; then
+            echo "В подключённых репозиториях отсутствует $package." >&2
+            exit 1
+        fi
+        apt-get -o DPkg::Lock::Timeout=600 -y install "$package"
+    fi
+
+    dkms autoinstall -k "$kernel_release"
+    depmod -a "$kernel_release"
+    if ! modinfo -k "$kernel_release" amneziawg >/dev/null 2>&1; then
+        echo "Модуль AmneziaWG не собран для ядра $kernel_release." >&2
+        exit 1
+    fi
+done
+
+modprobe amneziawg
+printf 'AmneziaWG готов для текущего и следующего загрузочного ядра.\n'

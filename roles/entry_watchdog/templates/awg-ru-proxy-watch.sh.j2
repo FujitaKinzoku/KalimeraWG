@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly PROXY_IF={{ entry_ru_proxy_interface | quote }}
+readonly PROBE_URL={{ entry_ru_proxy_probe_url | quote }}
+readonly EXPECTED_IP={{ entry_ru_proxy_expected_ip | default('') | quote }}
+readonly CONNECT_TIMEOUT={{ entry_ru_proxy_connect_timeout }}
+readonly MAX_TIME={{ entry_ru_proxy_max_probe_time }}
+readonly FAIL_THRESHOLD={{ entry_ru_proxy_fail_threshold }}
+readonly SUCCESS_THRESHOLD={{ entry_ru_proxy_success_threshold }}
+readonly STATE_DIR={{ entry_ru_proxy_watch_state_dir | quote }}
+readonly DISABLED_FLAG={{ entry_ru_proxy_disabled_flag | quote }}
+readonly ROUTING_SCRIPT={{ entry_routing_script_path | quote }}
+readonly DNS_POLICY={{ awg_dns_policy_path | quote }}
+readonly EXIT_IF={{ entry_exit_interface | quote }}
+readonly EXIT_MARK={{ entry_exit_mark | quote }}
+readonly EXIT_TABLE={{ entry_exit_table }}
+readonly EXIT_PRIORITY={{ entry_exit_rule_priority }}
+readonly RU_MARK={{ entry_ru_mark | quote }}
+readonly RU_TABLE={{ entry_ru_table }}
+readonly RU_PRIORITY={{ entry_ru_rule_priority }}
+
+install -d -m 0755 "$STATE_DIR"
+exec 9>"$STATE_DIR/lock"
+flock -n 9 || exit 0
+
+read_counter() {
+    local file="$1" value=0
+    if [[ -r "$file" ]]; then
+        read -r value <"$file" || value=0
+    fi
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s' "$value"
+}
+
+write_counter() {
+    printf '%s\n' "$2" >"$1"
+}
+
+probe_ok=false
+probe_ip=""
+if systemctl is-active --quiet {{ sing_box_service_name | quote }} && \
+        ip link show "$PROXY_IF" >/dev/null 2>&1; then
+    probe_ip="$(curl --fail --silent --show-error --ipv4 \
+        --interface "$PROXY_IF" --connect-timeout "$CONNECT_TIMEOUT" \
+        --max-time "$MAX_TIME" "$PROBE_URL" 2>/dev/null || true)"
+    if [[ "$probe_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && \
+            { [[ -z "$EXPECTED_IP" ]] || [[ "$probe_ip" == "$EXPECTED_IP" ]]; }; then
+        probe_ok=true
+    fi
+fi
+
+success_file="$STATE_DIR/success.count"
+failure_file="$STATE_DIR/failure.count"
+
+if [[ "$probe_ok" == true ]]; then
+    successes=$(( $(read_counter "$success_file") + 1 ))
+    (( successes <= SUCCESS_THRESHOLD )) || successes=$SUCCESS_THRESHOLD
+    write_counter "$success_file" "$successes"
+    write_counter "$failure_file" 0
+    if [[ -e "$DISABLED_FLAG" && "$successes" -ge "$SUCCESS_THRESHOLD" ]]; then
+        rm -f "$DISABLED_FLAG"
+        "$ROUTING_SCRIPT" apply
+        "$DNS_POLICY"
+        logger -t awg-ru-proxy-watch "Российский прокси восстановился после ${successes} успешных проверок"
+    elif [[ ! -e "$DISABLED_FLAG" ]]; then
+        routing_ok=true
+        ip -4 rule show | grep -Eq "^${EXIT_PRIORITY}:.*fwmark ${EXIT_MARK}.*lookup ${EXIT_TABLE}" || routing_ok=false
+        ip -4 route show table "$EXIT_TABLE" | grep -Eq "^default .*dev ${EXIT_IF}( |$)" || routing_ok=false
+        ip -4 rule show | grep -Eq "^${RU_PRIORITY}:.*fwmark ${RU_MARK}.*lookup ${RU_TABLE}" || routing_ok=false
+        ip -4 route show table "$RU_TABLE" | grep -Eq "^default .*dev ${PROXY_IF}( |$)" || routing_ok=false
+        iptables -w 10 -t mangle -S AWG_RU_PROXY >/dev/null 2>&1 || routing_ok=false
+        if [[ "$routing_ok" == false ]]; then
+            "$ROUTING_SCRIPT" apply
+            "$DNS_POLICY"
+            logger -t awg-ru-proxy-watch 'Policy routing восстановлена без переключения режима прокси'
+        fi
+    fi
+else
+    failures=$(( $(read_counter "$failure_file") + 1 ))
+    (( failures <= FAIL_THRESHOLD )) || failures=$FAIL_THRESHOLD
+    write_counter "$failure_file" "$failures"
+    write_counter "$success_file" 0
+    if [[ ! -e "$DISABLED_FLAG" && "$failures" -ge "$FAIL_THRESHOLD" ]]; then
+        install -m 0644 /dev/null "$DISABLED_FLAG"
+        "$ROUTING_SCRIPT" apply
+        "$DNS_POLICY"
+        logger -t awg-ru-proxy-watch "Российский прокси отключён после ${failures} неудачных проверок"
+    fi
+fi

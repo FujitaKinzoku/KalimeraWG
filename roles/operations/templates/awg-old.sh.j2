@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly iface={{ entry_legacy_client_interface | quote }}
+readonly service="awg-quick@${iface}.service"
+readonly peer_dir={{ awg_legacy_local_peer_dir | quote }}
+readonly routing={{ entry_routing_script_path | quote }}
+readonly wan={{ entry_wan_interface | quote }}
+readonly listen_port={{ entry_legacy_client_listen_port | quote }}
+readonly ufw_marker={{ security_ufw_policy_marker | default('/var/lib/awg-iac/security/ufw-policy.sha256') | quote }}
+
+peer_count() {
+    find "$peer_dir" -maxdepth 1 -type f -name '*.peer' -printf '.' 2>/dev/null | wc -c
+}
+
+refresh_network() {
+    "$routing" apply
+}
+
+open_firewall() {
+    ufw allow in on "$wan" proto udp to any port "$listen_port" \
+        comment 'Совместимые клиенты AmneziaWG' >/dev/null
+}
+
+close_firewall() {
+    ufw --force delete allow in on "$wan" proto udp to any port "$listen_port" \
+        >/dev/null 2>&1 || true
+}
+
+refresh_ufw_marker() {
+    local fingerprint status rules_hash
+    [[ -r "$ufw_marker" ]] || return 0
+    fingerprint="$(cut -d '|' -f 1 "$ufw_marker")"
+    status="$(ufw status numbered)"
+    rules_hash="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
+    printf '%s|%s\n' "$fingerprint" "$rules_hash" >"$ufw_marker"
+    chmod 0600 "$ufw_marker"
+}
+
+case "${1:-status}" in
+    status)
+        [[ $# -le 1 ]] || { echo 'Использование: awg-old {status|on|off}' >&2; exit 2; }
+        if systemctl is-active --quiet "$service"; then
+            state=ON
+        else
+            state=OFF
+        fi
+        printf 'Старый интерфейс %s: %s; клиентов: %s\n' "$iface" "$state" "$(peer_count)"
+        ;;
+    on)
+        [[ $# -eq 1 || ( $# -eq 2 && "${2:-}" == --allow-empty ) ]] || { echo 'Использование: awg-old {status|on|off}' >&2; exit 2; }
+        [[ "$(peer_count)" -gt 0 || "${2:-}" == --allow-empty ]] || {
+            echo 'Интерфейс не включён: сначала создайте клиента командой vpn-user NAME old.' >&2
+            exit 1
+        }
+        open_firewall
+        started_here=false
+        if ! systemctl is-active --quiet "$service"; then
+            systemctl enable --now "$service"
+            started_here=true
+        else
+            systemctl enable "$service"
+        fi
+        if [[ "$(peer_count)" -gt 0 ]] && ! systemctl restart awg-local-peer-apply.service; then
+            if [[ "$started_here" == true ]]; then
+                systemctl disable --now "$service" || true
+                close_firewall
+            fi
+            echo "Не удалось применить peers интерфейса $iface." >&2
+            exit 1
+        fi
+        if ! refresh_network; then
+            if [[ "$started_here" == true ]]; then
+                systemctl disable --now "$service" || true
+                close_firewall
+                "$routing" apply || true
+            fi
+            echo "Не удалось полностью включить интерфейс $iface." >&2
+            exit 1
+        fi
+        refresh_ufw_marker
+        [[ "${2:-}" == --allow-empty ]] || echo "Старый интерфейс $iface включён."
+        ;;
+    off)
+        [[ $# -eq 1 ]] || { echo 'Использование: awg-old {status|on|off}' >&2; exit 2; }
+        systemctl disable --now "$service"
+        close_firewall
+        refresh_network
+        refresh_ufw_marker
+        echo "Старый интерфейс $iface выключен; клиентские файлы сохранены."
+        ;;
+    --help|-h)
+        [[ $# -eq 1 ]] || { echo 'Использование: awg-old {status|on|off}' >&2; exit 2; }
+        echo 'Использование: awg-old {status|on|off}'
+        ;;
+    *)
+        echo 'Использование: awg-old {status|on|off}' >&2
+        exit 2
+        ;;
+esac

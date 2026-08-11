@@ -1,0 +1,10 @@
+[Unit]
+Description=Безопасное обслуживание пакетов сервера AWG
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ awg_maintenance_path }} --scheduled
+Nice=10
+IOSchedulingClass=idle

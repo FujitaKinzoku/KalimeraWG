@@ -1,0 +1,22 @@
+---
+awg_server_audit_path: /usr/local/sbin/server-audit
+awg_health_script_path: /usr/local/sbin/awg-health
+awg_server_audit_service_name: awg-server-audit.service
+awg_server_audit_timer_name: awg-server-audit.timer
+awg_telegram_monitor_path: /usr/local/sbin/awg-telegram-monitor
+awg_telegram_monitor_env_path: /etc/awg-telegram-monitor.env
+awg_telegram_monitor_service_name: awg-telegram-monitor.service
+awg_telegram_monitor_timer_name: awg-telegram-monitor.timer
+awg_telegram_monitor_state_dir: /var/lib/awg-telegram-monitor
+awg_telegram_monitor_start_immediately: true
+awg_telegram_monitor_deferred_flag: /run/awg-telegram-monitor.deferred
+awg_maintenance_path: /usr/local/sbin/maintenance
+awg_maintenance_calendar: "Sun *-*-* 05:20:00"
+awg_domain_policy_dir: /etc/awg/domain-policy
+awg_client_output_dir: /root/awg-client-configs
+entry_ru_proxy_capability_path: /usr/local/sbin/ru-proxy-capability
+awg_local_peer_dir: /etc/awg/client-peers
+awg_legacy_local_peer_dir: /etc/awg/legacy-client-peers
+awg_mobile_local_peer_dir: /etc/awg/mobile-client-peers
+awg_local_peer_apply_path: /usr/local/sbin/awg-local-peer-apply
+awg_dns_policy_path: /usr/local/sbin/awg-dns-policy

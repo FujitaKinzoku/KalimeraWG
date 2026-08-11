@@ -1,0 +1,17 @@
+[Unit]
+Description=Согласование локально управляемых клиентских peers AWG
+After=awg-quick@{{ entry_client_interface }}.service
+{% if entry_legacy_client_available | default(false) | bool %}
+After=awg-quick@{{ entry_legacy_client_interface }}.service
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+After=awg-quick@{{ entry_mobile_client_interface }}.service
+{% endif %}
+Requires=awg-quick@{{ entry_client_interface }}.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ awg_local_peer_apply_path }}
+
+[Install]
+WantedBy=multi-user.target

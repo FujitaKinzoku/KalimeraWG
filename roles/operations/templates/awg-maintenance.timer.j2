@@ -1,0 +1,11 @@
+[Unit]
+Description=Периодическое безопасное обслуживание пакетов сервера AWG
+
+[Timer]
+OnCalendar={{ awg_maintenance_calendar }}
+Persistent=true
+RandomizedDelaySec=20m
+Unit=awg-maintenance.service
+
+[Install]
+WantedBy=timers.target

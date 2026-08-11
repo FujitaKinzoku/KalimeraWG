@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ $EUID -eq 0 ]] || exit 1
+[[ $# -eq 1 && -f "$1" ]] || exit 2
+
+candidate="$1"
+iface="a3v$RANDOM$RANDOM"
+iface="${iface:0:14}"
+temporary="$(mktemp /run/awg3-validate.XXXXXX)"
+
+cleanup() {
+    ip link delete "$iface" >/dev/null 2>&1 || true
+    rm -f "$temporary" "/var/run/amneziawg/${iface}.sock"
+}
+trap cleanup EXIT
+
+# Проверка не должна занимать рабочий UDP-порт.
+sed -E 's/^[[:space:]]*ListenPort[[:space:]]*=.*/ListenPort = 0/' \
+    "$candidate" >"$temporary"
+chmod 0600 "$temporary"
+
+{{ awg3_transit_binary_path | quote }} "$iface" >/dev/null
+for _ in {1..50}; do
+    ip link show "$iface" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+ip link show "$iface" >/dev/null
+{{ awg3_tools_binary_path | quote }} setconf "$iface" "$temporary"

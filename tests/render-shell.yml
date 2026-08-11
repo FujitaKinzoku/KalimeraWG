@@ -1,0 +1,291 @@
+---
+- name: Формирование управляемых shell-шаблонов и запуск ShellCheck
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    rendered_shell_root: /tmp/awg-rendered-shell
+    awg3_transit_address: 10.77.0.2/32
+    awg3_transit_effective_mtu: 1356
+    awg3_transit_obfuscation:
+      s4: 24
+
+  tasks:
+    - name: Загрузка безопасных общих примерных переменных
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/example/group_vars/all/main.yml"
+
+    - name: Загрузка безопасных примерных переменных ENTRY
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../inventory/example/group_vars/entry.yml"
+
+    - name: Загрузка defaults ролей для исполняемых шаблонов
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../{{ item }}"
+      loop:
+        - roles/common/defaults/main.yml
+        - roles/terminal/defaults/main.yml
+        - roles/entry/defaults/main.yml
+        - roles/entry_routing/defaults/main.yml
+        - roles/entry_dns/defaults/main.yml
+        - roles/entry_watchdog/defaults/main.yml
+        - roles/sing_box/defaults/main.yml
+        - roles/health/defaults/main.yml
+        - roles/operations/defaults/main.yml
+        - roles/awg3_transit/defaults/main.yml
+
+    - name: Включение preview-ветвей логики для проверки шаблонов
+      ansible.builtin.set_fact:
+        entry_legacy_client_available: true
+        entry_legacy_client_enabled: false
+        entry_mobile_client_available: true
+        entry_mobile_client_enabled: false
+        awg3_transit_enabled: true
+        awg_node_role: entry
+        terminal_summary_entry_host: 192.0.2.10
+        terminal_summary_exit_host: 192.0.2.20
+        terminal_summary_entry_user: root
+        terminal_summary_exit_user: root
+        terminal_summary_entry_ssh_port: 56777
+        terminal_summary_exit_ssh_port: 56777
+        terminal_summary_client_port: 443
+        terminal_summary_legacy_port: 39744
+        terminal_summary_mobile_port: 8443
+        terminal_summary_entry_transit_port: 39745
+        terminal_summary_exit_transit_port: 443
+        terminal_summary_legacy_available: true
+        terminal_summary_mobile_available: true
+        terminal_summary_proxy_configured: true
+        terminal_summary_entry_client_interface: awg0
+        terminal_summary_entry_transit_interface: awg3
+        terminal_summary_legacy_interface: awg-old
+        terminal_summary_mobile_interface: awg-mobile
+        terminal_summary_exit_transit_interface: awg3
+
+    - name: Пересоздание временного каталога шаблонов
+      block:
+        - name: Создание временного каталога шаблонов
+          ansible.builtin.file:
+            path: "{{ rendered_shell_root }}"
+            state: directory
+            mode: "0700"
+
+        - name: Формирование исполняемых шаблонов ENTRY
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0700"
+          loop:
+            - src: roles/entry_routing/templates/awg-entry-routing.sh.j2
+              dest: awg-entry-routing
+            - src: roles/entry_routing/templates/awg-ru-zone-update.sh.j2
+              dest: awg-ru-zone-update
+            - src: roles/entry_watchdog/templates/awg-ru-proxy-watch.sh.j2
+              dest: awg-ru-proxy-watch
+            - src: roles/operations/templates/server-audit.sh.j2
+              dest: server-audit-entry
+            - src: roles/operations/templates/telegram-monitor.sh.j2
+              dest: telegram-monitor-entry
+            - src: roles/operations/templates/awg-kernel-guard.sh.j2
+              dest: awg-kernel-guard
+            - src: roles/operations/templates/maintenance.sh.j2
+              dest: maintenance
+            - src: roles/operations/templates/update-all.sh.j2
+              dest: update-all
+            - src: roles/operations/templates/f2b-reset.sh.j2
+              dest: f2b-reset
+            - src: roles/operations/templates/domain-admin.sh.j2
+              dest: domain-admin
+            - src: roles/operations/templates/ru-proxy.sh.j2
+              dest: ru-proxy
+            - src: roles/operations/templates/ru-proxy-set.sh.j2
+              dest: ru-proxy-set
+            - src: roles/operations/templates/dot-switch.sh.j2
+              dest: dot-switch
+            - src: roles/operations/templates/doh-switch.sh.j2
+              dest: doh-switch
+            - src: roles/operations/templates/dns-status.sh.j2
+              dest: dns-status
+            - src: roles/operations/templates/ru-direct-ports.sh.j2
+              dest: ru-direct-ports
+            - src: roles/operations/templates/vpn-user.sh.j2
+              dest: vpn-user
+            - src: roles/operations/templates/awg-old.sh.j2
+              dest: awg-old
+            - src: roles/operations/templates/awg-mobile.sh.j2
+              dest: awg-mobile
+            - src: roles/entry/templates/awg-mobile-firewall.sh.j2
+              dest: awg-mobile-firewall
+            - src: roles/operations/templates/awg-local-peer-apply.sh.j2
+              dest: awg-local-peer-apply
+            - src: roles/operations/templates/awg-dns-policy.sh.j2
+              dest: awg-dns-policy
+            - src: roles/awg3_transit/templates/transit-setup.sh.j2
+              dest: awg3-transit-setup
+            - src: roles/awg3_transit/templates/validate-config.sh.j2
+              dest: awg3-validate-config
+
+        - name: Формирование настроек интерактивного терминала
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0600"
+          loop:
+            - src: roles/terminal/templates/kalimera-prompt.sh.j2
+              dest: kalimera-prompt
+            - src: roles/terminal/templates/kalimera-shell-tools.sh.j2
+              dest: kalimera-shell-tools
+            - src: roles/terminal/templates/kalimera-help.sh.j2
+              dest: kalimera-help
+            - src: roles/terminal/templates/kalimera-status.py.j2
+              dest: kalimera-status
+            - src: roles/terminal/templates/kalimera-blesh-init.sh.j2
+              dest: kalimera-blesh-init
+            - src: roles/terminal/templates/blesh.sh.j2
+              dest: blesh-loader
+
+        - name: Проверка синтаксиса настроек интерактивного терминала
+          ansible.builtin.command:
+            argv:
+              - bash
+              - -n
+              - "{{ rendered_shell_root }}/{{ item }}"
+          loop:
+            - kalimera-prompt
+            - kalimera-shell-tools
+            - kalimera-help
+            - kalimera-blesh-init
+            - blesh-loader
+          changed_when: false
+
+        - name: Проверка синтаксиса сводки текущей конфигурации
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - py_compile
+              - "{{ rendered_shell_root }}/kalimera-status"
+          changed_when: false
+
+        - name: Исполняемая проверка сводки и табличной справки
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ rendered_shell_root }}/kalimera-status"
+              - --with-commands
+          environment:
+            NO_COLOR: "1"
+          register: rendered_kalimera_status
+          changed_when: false
+          failed_when: >-
+            rendered_kalimera_status.rc != 0 or
+            'ПОДКЛЮЧЕНИЯ' not in rendered_kalimera_status.stdout or
+            'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status.stdout or
+            'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' not in rendered_kalimera_status.stdout or
+            'ЗАЩИТА ВНЕШНИХ ИНТЕРФЕЙСОВ' not in rendered_kalimera_status.stdout or
+            'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status.stdout or
+            'VPN-КЛИЕНТЫ' not in rendered_kalimera_status.stdout
+
+        - name: Проверка синтаксиса программы возможностей SOCKS5
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - py_compile
+              - "{{ playbook_dir }}/../roles/operations/files/ru-proxy-capability.py"
+          changed_when: false
+
+        - name: Формирование защищённого модуля systemd для watchdog
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/entry_watchdog/templates/awg-ru-proxy-watch.service.j2"
+            dest: "{{ rendered_shell_root }}/awg-ru-proxy-watch.service"
+            mode: "0600"
+
+        - name: Выбор ветви health-шаблона ENTRY
+          ansible.builtin.set_fact:
+            awg_node_role: entry
+
+        - name: Формирование health-программы ENTRY
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-entry"
+            mode: "0700"
+
+        - name: Загрузка безопасных примерных переменных EXIT
+          ansible.builtin.include_vars:
+            file: "{{ playbook_dir }}/../inventory/example/group_vars/exit.yml"
+
+        - name: Выбор ветви health-шаблона EXIT
+          ansible.builtin.set_fact:
+            awg_node_role: exit
+
+        - name: Формирование сводки текущей конфигурации EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-status.py.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-status-exit"
+            mode: "0700"
+
+        - name: Исполняемая проверка сводки и табличной справки EXIT
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ rendered_shell_root }}/kalimera-status-exit"
+              - --with-commands
+          environment:
+            NO_COLOR: "1"
+          register: rendered_kalimera_status_exit
+          changed_when: false
+          failed_when: >-
+            rendered_kalimera_status_exit.rc != 0 or
+            'ПОДКЛЮЧЕНИЯ' not in rendered_kalimera_status_exit.stdout or
+            'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status_exit.stdout or
+            'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status_exit.stdout or
+            'БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ' not in rendered_kalimera_status_exit.stdout or
+            'VPN-КЛИЕНТЫ' in rendered_kalimera_status_exit.stdout
+
+        - name: Формирование health-программы EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-exit"
+            mode: "0700"
+
+        - name: Проверка сформированных программ через ShellCheck
+          ansible.builtin.command:
+            argv:
+              - shellcheck
+              - --exclude=SC2317
+              - "{{ rendered_shell_root }}/awg-entry-routing"
+              - "{{ rendered_shell_root }}/awg-ru-zone-update"
+              - "{{ rendered_shell_root }}/awg-ru-proxy-watch"
+              - "{{ rendered_shell_root }}/server-audit-entry"
+              - "{{ rendered_shell_root }}/telegram-monitor-entry"
+              - "{{ rendered_shell_root }}/awg-kernel-guard"
+              - "{{ rendered_shell_root }}/maintenance"
+              - "{{ rendered_shell_root }}/update-all"
+              - "{{ rendered_shell_root }}/f2b-reset"
+              - "{{ rendered_shell_root }}/domain-admin"
+              - "{{ rendered_shell_root }}/ru-proxy"
+              - "{{ rendered_shell_root }}/ru-proxy-set"
+              - "{{ rendered_shell_root }}/dot-switch"
+              - "{{ rendered_shell_root }}/doh-switch"
+              - "{{ rendered_shell_root }}/dns-status"
+              - "{{ rendered_shell_root }}/ru-direct-ports"
+              - "{{ rendered_shell_root }}/vpn-user"
+              - "{{ rendered_shell_root }}/awg-old"
+              - "{{ rendered_shell_root }}/awg-mobile"
+              - "{{ rendered_shell_root }}/awg-mobile-firewall"
+              - "{{ rendered_shell_root }}/awg-local-peer-apply"
+              - "{{ rendered_shell_root }}/awg-dns-policy"
+              - "{{ rendered_shell_root }}/awg3-transit-setup"
+              - "{{ rendered_shell_root }}/awg3-validate-config"
+              - "{{ rendered_shell_root }}/awg-health-entry"
+              - "{{ rendered_shell_root }}/awg-health-exit"
+              - "{{ rendered_shell_root }}/kalimera-help"
+          changed_when: false
+
+      always:
+        - name: Удаление временных сформированных программ
+          ansible.builtin.file:
+            path: "{{ rendered_shell_root }}"
+            state: absent
+          changed_when: false

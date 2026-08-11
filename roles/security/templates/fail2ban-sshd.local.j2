@@ -1,0 +1,13 @@
+[sshd]
+enabled = true
+port = {{ ssh_listen_port }}
+filter = sshd
+backend = systemd
+mode = aggressive
+banaction = ufw
+maxretry = {{ fail2ban_sshd.maxretry }}
+findtime = {{ fail2ban_sshd.findtime }}
+bantime = {{ fail2ban_sshd.bantime }}
+bantime.increment = {{ fail2ban_sshd.bantime_increment | ternary('true', 'false') }}
+bantime.factor = {{ fail2ban_sshd.bantime_factor }}
+bantime.maxtime = {{ fail2ban_sshd.bantime_max }}

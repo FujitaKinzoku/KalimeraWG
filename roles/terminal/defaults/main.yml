@@ -1,0 +1,8 @@
+---
+terminal_enabled: true
+terminal_blesh_enabled: true
+terminal_blesh_repository: https://github.com/akinomyoga/ble.sh.git
+terminal_blesh_revision: d69e4d549a1881a37300fe6b4a05478bd9157dfc
+terminal_blesh_source_dir: /usr/local/src/ble.sh
+terminal_blesh_install_dir: /usr/local/share/blesh
+terminal_backup_dir: "{{ awg_backup_root }}/terminal"

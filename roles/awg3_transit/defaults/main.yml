@@ -1,0 +1,46 @@
+---
+awg3_transit_enabled: false
+awg3_transit_interface: awg3
+awg3_transit_listen_port: 443
+awg3_peer_endpoint_port: "{{ awg3_transit_listen_port }}"
+awg3_peer_tunnel_address: ""
+awg3_transit_service_name: awg3-transit.service
+awg3_transit_config_dir: /etc/amnezia/amneziawg-v3
+awg3_transit_config_path: "{{ awg3_transit_config_dir }}/{{ awg3_transit_interface }}.conf"
+awg3_transit_setup_path: /usr/local/sbin/awg3-transit-setup
+awg3_transit_validate_path: /usr/local/sbin/awg3-validate-config
+awg3_transit_binary_path: /usr/local/sbin/amneziawg-go
+awg3_tools_binary_path: /usr/local/sbin/awg-v3
+awg3_go_version: "1.25.12"
+awg3_go_archives:
+  x86_64:
+    filename: go1.25.12.linux-amd64.tar.gz
+    checksum: sha256:234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1
+  aarch64:
+    filename: go1.25.12.linux-arm64.tar.gz
+    checksum: sha256:8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2
+awg3_go_source_version: v3.0.20260805
+awg3_go_source_commit: 08d68cdae27762c3e07f36bbb12d2bad32f81926
+awg3_tools_source_version: v3.0.20260805
+awg3_tools_source_commit: 9f70177d204d5be66c5b043518a57b7d62b3f9d1
+awg3_build_root: /usr/local/src/awg-iac
+awg3_cache_root: /var/cache/awg-iac/awg3
+awg3_go_install_root: "/opt/awg-iac/go-{{ awg3_go_version }}"
+awg3_go_current_link: /opt/awg-iac/go
+awg3_go_cached_binary: "{{ awg3_cache_root }}/amneziawg-go-{{ awg3_go_source_commit }}-{{ ansible_architecture }}"
+awg3_tools_cached_binary: "{{ awg3_cache_root }}/awg-v3-{{ awg3_tools_source_commit }}-{{ ansible_architecture }}"
+awg3_transit_candidate_path: "/run/{{ awg3_transit_interface }}.awg3-candidate.conf"
+awg3_transit_backup_dir: "/root/config-backups/{{ awg_node_role }}/awg3"
+awg3_mtu_auto: true
+awg3_mtu_fallback_outer_pmtu: 1420
+awg3_mtu_minimum: 1120
+awg3_mtu_ceiling: 1420
+awg3_mtu_overhead: 80
+awg3_transit_mtu: 1280
+awg3_content_padding_addition: "8-32"
+awg3_rekey_after_time: "120-180"
+awg3_rekey_timeout: "5-8"
+awg3_reject_after_time: "180-240"
+awg3_keepalive_timeout: "10-15"
+awg3_max_handshake_attempts: "18-24"
+awg3_persistent_keepalive: "22-30"

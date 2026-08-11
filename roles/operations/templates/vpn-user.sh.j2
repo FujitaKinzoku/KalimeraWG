@@ -1,0 +1,442 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+shopt -s nullglob
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly output_dir={{ awg_client_output_dir | quote }}
+readonly main_peer_dir={{ awg_local_peer_dir | quote }}
+readonly main_iface={{ entry_client_interface | quote }}
+readonly main_config="/etc/amnezia/amneziawg/${main_iface}.conf"
+{% if entry_legacy_client_available | default(false) | bool %}
+readonly legacy_peer_dir={{ awg_legacy_local_peer_dir | quote }}
+readonly legacy_iface={{ entry_legacy_client_interface | quote }}
+readonly legacy_config="/etc/amnezia/amneziawg/${legacy_iface}.conf"
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+readonly mobile_peer_dir={{ awg_mobile_local_peer_dir | quote }}
+readonly mobile_iface={{ entry_mobile_client_interface | quote }}
+readonly mobile_config="/etc/amnezia/amneziawg/${mobile_iface}.conf"
+{% endif %}
+
+usage() {
+    cat <<'EOF'
+Использование:
+  vpn-user list
+  vpn-user delete NAME [--yes]
+  vpn-user NAME [performance|balanced|masking|mobile|old]
+EOF
+}
+
+valid_name() {
+    [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
+peer_state() {
+    local iface="$1" public_key="$2" latest now age
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        printf 'интерфейс выключен'
+        return
+    fi
+    latest="$(awg show "$iface" latest-handshakes 2>/dev/null |
+        awk -v peer="$public_key" '$1 == peer {print $2}')"
+    if [[ ! "$latest" =~ ^[0-9]+$ || "$latest" == 0 ]]; then
+        printf 'без handshake'
+        return
+    fi
+    now="$(date +%s)"
+    age=$((now - latest))
+    if (( age < 180 )); then
+        printf 'активен'
+    elif (( age < 3600 )); then
+        printf '%d мин назад' "$((age / 60))"
+    elif (( age < 86400 )); then
+        printf '%d ч назад' "$((age / 3600))"
+    else
+        printf '%d дн назад' "$((age / 86400))"
+    fi
+}
+
+list_inventory_peers() {
+    local config="$1" iface="$2" default_profile="$3" name public_key address profile
+    [[ -r "$config" ]] || return 0
+    while IFS=$'\t' read -r name public_key address profile; do
+        [[ -n "$name" && -z ${seen_names[$name]:-} ]] || continue
+        seen_names[$name]=1
+        profile="${profile:-$default_profile}"
+        printf '%-24s %-11s %-17s %-11s %s\n' \
+            "$name" "$profile" "$address" inventory "$(peer_state "$iface" "$public_key")"
+    done < <(
+        awk '
+          /^\[Peer\]/ {name=""; profile=""; key=""; address=""}
+          /^#_Name[[:space:]]*=/ {name=$0; sub(/^[^=]*=[[:space:]]*/, "", name)}
+          /^#_Profile[[:space:]]*=/ {profile=$0; sub(/^[^=]*=[[:space:]]*/, "", profile)}
+          /^PublicKey[[:space:]]*=/ {key=$0; sub(/^[^=]*=[[:space:]]*/, "", key)}
+          /^AllowedIPs[[:space:]]*=/ {
+            address=$0; sub(/^[^=]*=[[:space:]]*/, "", address); sub(/,.*/, "", address)
+            if (name != "" && key != "") print name "\t" key "\t" address "\t" profile
+          }
+        ' "$config"
+    )
+}
+
+list_users() {
+    local specification directory iface default_profile peer_file name public_key address profile
+    declare -gA seen_names=()
+    declare -a specifications=("$main_peer_dir|$main_iface|standard")
+{% if entry_legacy_client_available | default(false) | bool %}
+    specifications+=("$legacy_peer_dir|$legacy_iface|old")
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+    specifications+=("$mobile_peer_dir|$mobile_iface|mobile")
+{% endif %}
+    printf '%-24s %-11s %-17s %-11s %s\n' 'ИМЯ' 'ПРОФИЛЬ' 'АДРЕС' 'ИСТОЧНИК' 'СОСТОЯНИЕ'
+    printf '%-24s %-11s %-17s %-11s %s\n' '------------------------' '-----------' '-----------------' '-----------' '----------------'
+    for specification in "${specifications[@]}"; do
+        IFS='|' read -r directory iface default_profile <<<"$specification"
+        for peer_file in "$directory"/*.peer; do
+            name="${peer_file##*/}"
+            name="${name%.peer}"
+            public_key="$(sed -n '1p' "$peer_file")"
+            address="$(sed -n '3p' "$peer_file")"
+            profile="$(sed -n '4p' "$peer_file")"
+            profile="${profile:-$default_profile}"
+            seen_names[$name]=1
+            printf '%-24s %-11s %-17s %-11s %s\n' \
+                "$name" "$profile" "$address" local "$(peer_state "$iface" "$public_key")"
+        done
+    done
+    list_inventory_peers "$main_config" "$main_iface" standard
+{% if entry_legacy_client_available | default(false) | bool %}
+    list_inventory_peers "$legacy_config" "$legacy_iface" old
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+    list_inventory_peers "$mobile_config" "$mobile_iface" mobile
+{% endif %}
+}
+
+inventory_has_user() {
+    local name="$1" config
+    for config in "$main_config" \
+{% if entry_legacy_client_available | default(false) | bool %}
+            "$legacy_config" \
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+            "$mobile_config" \
+{% endif %}
+            ; do
+        [[ -r "$config" ]] && grep -Fxq "#_Name = $name" "$config" && return 0
+    done
+    return 1
+}
+
+delete_user() {
+    local name="$1" assume_yes="$2" specification directory iface peer_file='' public_key
+    local output backup_dir timestamp optional_controller='' answer remaining
+    local completed=false
+    declare -a specifications=("$main_peer_dir|$main_iface")
+{% if entry_legacy_client_available | default(false) | bool %}
+    specifications+=("$legacy_peer_dir|$legacy_iface")
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+    specifications+=("$mobile_peer_dir|$mobile_iface")
+{% endif %}
+    for specification in "${specifications[@]}"; do
+        IFS='|' read -r directory iface <<<"$specification"
+        if [[ -f "$directory/$name.peer" ]]; then
+            peer_file="$directory/$name.peer"
+            break
+        fi
+    done
+    if [[ -z "$peer_file" ]]; then
+        if inventory_has_user "$name"; then
+            echo "Пользователь $name управляется зашифрованным inventory." >&2
+            echo 'Удалите его на управляющем компьютере и выполните deploy --resume; локальное удаление было бы восстановлено.' >&2
+            return 2
+        fi
+        echo "Локальный VPN-пользователь $name не найден." >&2
+        return 1
+    fi
+    if [[ "$assume_yes" == false ]]; then
+        [[ -t 0 ]] || { echo 'Для неинтерактивного удаления добавьте --yes.' >&2; return 2; }
+        read -e -r -p "Удалить VPN-пользователя $name и отозвать доступ? [y/N]: " answer
+        [[ "${answer,,}" =~ ^(y|yes|д|да)$ ]] || { echo 'Удаление отменено.'; return 0; }
+    fi
+
+    exec 9>/run/awg-vpn-user.lock
+    flock 9
+    public_key="$(sed -n '1p' "$peer_file")"
+    output="$output_dir/$name.conf"
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_dir="/root/config-backups/entry/clients/deleted/${timestamp}-${name}"
+    install -d -m 0700 "$backup_dir"
+    install -m 0600 "$peer_file" "$backup_dir/$name.peer"
+    [[ ! -f "$output" ]] || install -m 0600 "$output" "$backup_dir/$name.conf"
+
+    rollback_delete() {
+        local rc=$?
+        if (( rc != 0 )) && [[ "$completed" == false ]]; then
+            install -m 0600 "$backup_dir/$name.peer" "$peer_file" || true
+            [[ ! -f "$backup_dir/$name.conf" ]] || install -m 0600 "$backup_dir/$name.conf" "$output" || true
+            systemctl restart awg-local-peer-apply.service >/dev/null 2>&1 || true
+            echo 'Удаление VPN-пользователя отменено; peer восстановлен.' >&2
+        fi
+        return "$rc"
+    }
+    trap rollback_delete EXIT
+
+    # Проверяем все локальные peer-файлы до отзыва доступа, чтобы ошибка в
+    # другой записи не помешала безопасному откату удаляемого пользователя.
+    systemctl restart awg-local-peer-apply.service
+    if ip link show "$iface" >/dev/null 2>&1; then
+        awg set "$iface" peer "$public_key" remove
+    fi
+    rm -f "$peer_file" "$output"
+    systemctl restart awg-local-peer-apply.service
+
+    if [[ "$iface" != "$main_iface" ]] && ip link show "$iface" >/dev/null 2>&1; then
+        remaining="$(awg show "$iface" peers 2>/dev/null || true)"
+        if [[ -z "$remaining" ]]; then
+{% if entry_legacy_client_available | default(false) | bool %}
+            [[ "$iface" != "$legacy_iface" ]] || optional_controller=/usr/local/sbin/awg-old
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+            [[ "$iface" != "$mobile_iface" ]] || optional_controller=/usr/local/sbin/awg-mobile
+{% endif %}
+            if [[ -n "$optional_controller" ]] && ! "$optional_controller" off; then
+                echo "Пользователь удалён, но пустой интерфейс $iface не удалось выключить автоматически." >&2
+            fi
+        fi
+    fi
+    completed=true
+    trap - EXIT
+    echo "VPN-пользователь $name удалён; доступ отозван. Резервная копия: $backup_dir"
+}
+
+case "${1:-}" in
+    list)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        list_users
+        exit 0
+        ;;
+    delete|del|remove)
+        [[ $# -ge 2 && $# -le 3 ]] || { usage >&2; exit 2; }
+        valid_name "$2" || { echo 'Недопустимое имя пользователя.' >&2; exit 2; }
+        assume_yes=false
+        if [[ $# -eq 3 ]]; then
+            [[ "$3" == --yes ]] || { usage >&2; exit 2; }
+            assume_yes=true
+        fi
+        delete_user "$2" "$assume_yes"
+        exit $?
+        ;;
+    --help|-h)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        usage
+        exit 0
+        ;;
+esac
+
+stage='проверка параметров'
+report_error() {
+    local rc=$?
+    printf 'Не удалось создать VPN-пользователя. Этап: %s; код: %s.\n' "$stage" "$rc" >&2
+    exit "$rc"
+}
+trap report_error ERR
+[[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
+name="$1"
+valid_name "$name" || { echo 'Недопустимое имя пользователя' >&2; exit 2; }
+profile="${2:-}"
+if [[ -z "$profile" && -t 0 ]]; then
+    printf '%s\n' 'Профиль маскировки:' '  1 — максимальная производительность' '  2 — сбалансированный' '  3 — максимальная маскировка' '  4 — мобильный QUIC-подобный интерфейс UDP/8443' '  5 — KeeneticOS 4.3.x (только для legacy-режима установки)'
+    read -e -r -p 'Выберите профиль [2]: ' profile_choice
+    case "${profile_choice:-2}" in
+        1) profile=performance ;;
+        2) profile=balanced ;;
+        3) profile=masking ;;
+        4) profile=mobile ;;
+        5) profile=old ;;
+        *) echo 'Выбран неподдерживаемый профиль' >&2; exit 2 ;;
+    esac
+fi
+profile="${profile:-{{ entry_awg_client_default_profile | default('balanced') }}}"
+case "$profile" in
+    performance) jc_min=4; jc_max=4; jmin_min=64; jmin_max=64; jmax_min=80; jmax_max=96 ;;
+    balanced) jc_min=5; jc_max=7; jmin_min=64; jmin_max=96; jmax_min=128; jmax_max=384 ;;
+    masking) jc_min=8; jc_max=10; jmin_min=96; jmin_max=192; jmax_min=384; jmax_max=1024 ;;
+    mobile) jc_min=5; jc_max=5; jmin_min=10; jmin_max=10; jmax_min=50; jmax_max=50 ;;
+    old) jc_min=4; jc_max=6; jmin_min=64; jmin_max=64; jmax_min=80; jmax_max=96 ;;
+    *) echo 'Профиль должен быть performance, balanced, masking, mobile или old' >&2; exit 2 ;;
+esac
+if [[ "$profile" == old ]]; then
+{% if entry_legacy_client_available | default(false) | bool %}
+    readonly iface={{ entry_legacy_client_interface | quote }}
+    readonly subnet={{ entry_legacy_client_subnet | quote }}
+    readonly server_address={{ entry_legacy_client_listen_address | quote }}
+    readonly endpoint={{ (entry_public_endpoint | default(ansible_host)) | quote }}:{{ entry_legacy_client_listen_port }}
+    readonly client_mtu={{ entry_legacy_client_mtu }}
+    readonly peer_dir={{ awg_legacy_local_peer_dir | quote }}
+{% else %}
+    echo 'Legacy-интерфейс не включён при установке этого ENTRY сервера.' >&2
+    exit 2
+{% endif %}
+elif [[ "$profile" == mobile ]]; then
+{% if entry_mobile_client_available | default(false) | bool %}
+    readonly iface={{ entry_mobile_client_interface | quote }}
+    readonly subnet={{ entry_mobile_client_subnet | quote }}
+    readonly server_address={{ entry_mobile_client_listen_address | quote }}
+    readonly endpoint={{ (entry_public_endpoint | default(ansible_host)) | quote }}:{{ entry_mobile_client_listen_port }}
+    readonly client_mtu={{ entry_mobile_client_mtu }}
+    readonly peer_dir={{ awg_mobile_local_peer_dir | quote }}
+{% else %}
+    echo 'Мобильный интерфейс отсутствует в production inventory.' >&2
+    echo 'На управляющем узле выполните: ./deploy --resume --enable-mobile' >&2
+    exit 2
+{% endif %}
+else
+    readonly iface={{ entry_client_interface | quote }}
+    readonly subnet={{ entry_client_subnet | quote }}
+    readonly server_address={{ entry_client_listen_address | quote }}
+    readonly endpoint={{ (entry_public_endpoint | default(ansible_host)) | quote }}:{{ entry_awg0_listen_port }}
+    readonly client_mtu={{ entry_awg_client_mtu }}
+    readonly peer_dir={{ awg_local_peer_dir | quote }}
+fi
+readonly client_prefix="${subnet#*/}"
+stage='подготовка каталогов'
+install -d -m 0700 "$output_dir" "$peer_dir"
+stage='получение блокировки'
+exec 9>/run/awg-vpn-user.lock; flock 9
+output="$output_dir/$name.conf"; [[ ! -e "$output" ]] || { echo 'VPN-пользователь уже существует' >&2; exit 1; }
+peer_file="$peer_dir/$name.peer"; [[ ! -e "$peer_file" ]] || { echo 'VPN peer уже существует' >&2; exit 1; }
+inventory_has_user "$name" && { echo 'VPN-пользователь с таким именем уже существует в inventory.' >&2; exit 1; }
+random_between() { shuf -i "$1-$2" -n 1; }
+stage='выбор параметров профиля'
+jc="$(random_between "$jc_min" "$jc_max")"
+jmin="$(random_between "$jmin_min" "$jmin_max")"
+jmax="$(random_between "$jmax_min" "$jmax_max")"
+private_file=$(mktemp /run/awg-client-private.XXXXXX)
+psk_file=$(mktemp /run/awg-client-psk.XXXXXX)
+legacy_started=false
+mobile_started=false
+completed=false
+cleanup() {
+    rm -f "$private_file" "$psk_file"
+    if [[ "$completed" == false ]]; then
+        rm -f "$peer_file" "$output"
+    fi
+    if [[ "$legacy_started" == true ]]; then
+        /usr/local/sbin/awg-old off >/dev/null 2>&1 || true
+    fi
+    if [[ "$mobile_started" == true ]]; then
+        /usr/local/sbin/awg-mobile off >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+chmod 0600 "$private_file" "$psk_file"
+stage='генерация ключей'
+awg genkey >"$private_file"; awg genpsk >"$psk_file"
+public_key=$(awg pubkey <"$private_file")
+if [[ "$profile" == old ]] && ! systemctl is-active --quiet "awg-quick@${iface}.service"; then
+    /usr/local/sbin/awg-old on --allow-empty
+    legacy_started=true
+fi
+if [[ "$profile" == mobile ]] && ! systemctl is-active --quiet "awg-quick@${iface}.service"; then
+    /usr/local/sbin/awg-mobile on --allow-empty
+    mobile_started=true
+fi
+stage='чтение состояния AWG'
+server_public=$(awg show "$iface" public-key)
+stage='поиск занятых адресов'
+used="$({ awg show "$iface" allowed-ips 2>/dev/null | tr ',' '\n' | awk '{print $NF}';
+          for existing_peer in "$peer_dir"/*.peer; do
+              [[ -f "$existing_peer" ]] && sed -n '3p' "$existing_peer"
+          done; } | sort -u)"
+stage='выбор свободного адреса'
+client_ip=$(python3 - "$subnet" "$server_address" "$used" <<'PY'
+import ipaddress, sys
+network = ipaddress.ip_network(sys.argv[1])
+reserved = {ipaddress.ip_address(sys.argv[2])}
+for value in sys.argv[3].splitlines():
+    try: reserved.add(ipaddress.ip_interface(value).ip)
+    except ValueError: pass
+for candidate in network.hosts():
+    if candidate not in reserved:
+        print(candidate); break
+else: raise SystemExit('Нет свободного адреса для клиента')
+PY
+)
+stage='сохранение peer'
+umask 077
+printf '%s\n%s\n%s/32\n%s\n' "$public_key" "$(<"$psk_file")" "$client_ip" "$profile" >"$peer_file"
+if [[ "$profile" == old ]]; then
+    awg_parameters=$(cat <<'LEGACY'
+S1 = {{ entry_legacy_awg_obfuscation.s1 }}
+S2 = {{ entry_legacy_awg_obfuscation.s2 }}
+H1 = {{ entry_legacy_awg_obfuscation.h1 }}
+H2 = {{ entry_legacy_awg_obfuscation.h2 }}
+H3 = {{ entry_legacy_awg_obfuscation.h3 }}
+H4 = {{ entry_legacy_awg_obfuscation.h4 }}
+LEGACY
+)
+elif [[ "$profile" == mobile ]]; then
+    awg_parameters=$(cat <<'MOBILE'
+S1 = {{ entry_mobile_awg_obfuscation.s1 }}
+S2 = {{ entry_mobile_awg_obfuscation.s2 }}
+S3 = {{ entry_mobile_awg_obfuscation.s3 }}
+S4 = {{ entry_mobile_awg_obfuscation.s4 }}
+H1 = {{ entry_mobile_awg_obfuscation.h1 }}
+H2 = {{ entry_mobile_awg_obfuscation.h2 }}
+H3 = {{ entry_mobile_awg_obfuscation.h3 }}
+H4 = {{ entry_mobile_awg_obfuscation.h4 }}
+I1 = {{ entry_mobile_awg_obfuscation.i1 }}
+MOBILE
+)
+else
+    awg_parameters=$(cat <<'MODERN'
+S1 = {{ entry_awg0_obfuscation.s1 }}
+S2 = {{ entry_awg0_obfuscation.s2 }}
+S3 = {{ entry_awg0_obfuscation.s3 }}
+S4 = {{ entry_awg0_obfuscation.s4 }}
+H1 = {{ entry_awg0_obfuscation.h1 }}
+H2 = {{ entry_awg0_obfuscation.h2 }}
+H3 = {{ entry_awg0_obfuscation.h3 }}
+H4 = {{ entry_awg0_obfuscation.h4 }}
+I1 = {{ entry_awg0_obfuscation.i1 }}
+I2 = {{ entry_awg0_obfuscation.i2 }}
+I3 = {{ entry_awg0_obfuscation.i3 }}
+I4 = {{ entry_awg0_obfuscation.i4 }}
+I5 = {{ entry_awg0_obfuscation.i5 }}
+MODERN
+)
+fi
+stage='формирование клиентской конфигурации'
+cat >"$output" <<EOF
+[Interface]
+PrivateKey = $(<"$private_file")
+Address = $client_ip/$client_prefix
+DNS = $server_address
+MTU = $client_mtu
+Jc = $jc
+Jmin = $jmin
+Jmax = $jmax
+$awg_parameters
+
+[Peer]
+PublicKey = $server_public
+PresharedKey = $(<"$psk_file")
+Endpoint = $endpoint
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+chmod 0600 "$output"
+stage='применение peer к AWG'
+apply_command=(systemctl restart awg-local-peer-apply.service)
+if ! "${apply_command[@]}"; then
+    rm -f "$peer_file" "$output"
+    echo 'Не удалось применить peer; созданные файлы удалены.' >&2
+    exit 1
+fi
+legacy_started=false
+mobile_started=false
+completed=true
+echo "VPN-пользователь создан. Профиль: $profile. Защищённая конфигурация: $output"

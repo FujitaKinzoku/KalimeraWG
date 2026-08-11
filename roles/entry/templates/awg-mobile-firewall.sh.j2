@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly wan={{ entry_wan_interface | quote }}
+readonly listen_port={{ entry_mobile_client_listen_port | quote }}
+readonly legacy_public_port={{ entry_mobile_legacy_public_port | default(53) | quote }}
+readonly legacy_internal_port={{ entry_mobile_legacy_internal_port | default(39746) | quote }}
+readonly ufw_chain=ufw-before-input
+readonly comment=awg-mobile-public-quic
+readonly legacy_comment=awg-mobile-public-dns
+
+delete_all() {
+    local table="$1"
+    shift
+    while iptables -w 10 -t "$table" -C "$@" 2>/dev/null; do
+        iptables -w 10 -t "$table" -D "$@"
+    done
+}
+
+remove_legacy_redirect() {
+    delete_all nat PREROUTING -i "$wan" -p udp --dport "$legacy_public_port" \
+        -m comment --comment "$legacy_comment" -j REDIRECT \
+        --to-ports "$legacy_internal_port"
+    delete_all filter "$ufw_chain" -i "$wan" -p udp \
+        --dport "$legacy_internal_port" -m conntrack \
+        --ctorigdstport "$legacy_public_port" \
+        -m comment --comment "$legacy_comment" -j ACCEPT
+    delete_all filter "$ufw_chain" -i "$wan" -p udp \
+        --dport "$legacy_internal_port" \
+        -m comment --comment "$legacy_comment" -j DROP
+}
+
+legacy_redirect_absent() {
+    ! iptables -w 10 -t nat -C PREROUTING -i "$wan" -p udp \
+        --dport "$legacy_public_port" -m comment --comment "$legacy_comment" \
+        -j REDIRECT --to-ports "$legacy_internal_port" 2>/dev/null &&
+    ! iptables -w 10 -t filter -C "$ufw_chain" -i "$wan" -p udp \
+        --dport "$legacy_internal_port" -m conntrack \
+        --ctorigdstport "$legacy_public_port" \
+        -m comment --comment "$legacy_comment" -j ACCEPT 2>/dev/null &&
+    ! iptables -w 10 -t filter -C "$ufw_chain" -i "$wan" -p udp \
+        --dport "$legacy_internal_port" \
+        -m comment --comment "$legacy_comment" -j DROP 2>/dev/null
+}
+
+remove_direct_rule() {
+    delete_all filter "$ufw_chain" -i "$wan" -p udp \
+        --dport "$listen_port" -m comment --comment "$comment" -j ACCEPT
+}
+
+direct_rule_present() {
+    iptables -w 10 -t filter -C "$ufw_chain" -i "$wan" -p udp \
+        --dport "$listen_port" -m comment --comment "$comment" -j ACCEPT
+}
+
+remove_rules() {
+    remove_direct_rule
+    remove_legacy_redirect
+}
+
+apply_rules() {
+    ip link show "$wan" >/dev/null
+    iptables -w 10 -t filter -S "$ufw_chain" >/dev/null
+    if direct_rule_present >/dev/null 2>&1 && legacy_redirect_absent; then
+        return 0
+    fi
+    remove_rules
+    iptables -w 10 -t filter -I "$ufw_chain" 1 -i "$wan" -p udp \
+        --dport "$listen_port" -m comment --comment "$comment" -j ACCEPT
+}
+
+case "${1:-}" in
+    apply) apply_rules ;;
+    remove) remove_rules ;;
+    check) direct_rule_present && legacy_redirect_absent ;;
+    check-absent) ! direct_rule_present 2>/dev/null && legacy_redirect_absent ;;
+    check-dns-clean) legacy_redirect_absent ;;
+    *)
+        echo 'Использование: awg-mobile-firewall {apply|remove|check|check-absent|check-dns-clean}' >&2
+        exit 2
+        ;;
+esac
