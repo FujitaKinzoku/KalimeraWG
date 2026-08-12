@@ -1,0 +1,6 @@
+# Управляется Ansible: системные DNS-запросы ENTRY через локальный Unbound.
+[Resolve]
+DNS=127.0.0.1:{{ entry_dns_default_port }}
+FallbackDNS=
+Domains=~.
+DNSStubListener=yes

@@ -221,6 +221,8 @@ check 'согласование локальных VPN-пиров' systemctl is-
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
 check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
 check 'служба Unbound' systemctl is-active --quiet unbound.service
+check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port }}' {{ entry_dns_resolved_dropin_path | quote }}
+check 'системное разрешение имён' getent ahostsv4 example.com
 check 'синтаксис dnsmasq' dnsmasq --test
 check 'синтаксис Unbound' unbound-checkconf
 check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port }} example.com A

@@ -17,6 +17,9 @@ from urllib.parse import urlsplit
 
 
 TIMEOUT = 7
+EXIT_NO_HOST = 68
+EXIT_UNAVAILABLE = 69
+EXIT_CONFIG = 78
 
 
 def receive_exact(connection: socket.socket, size: int) -> bytes:
@@ -223,9 +226,15 @@ def main() -> int:
                 arguments.tcp_probe_url,
                 arguments.expected_ip,
             )
-    except (OSError, RuntimeError, ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
+    except socket.gaierror as error:
         print(f"Проверка SOCKS5 не выполнена: {error}", file=sys.stderr)
-        return 2
+        return EXIT_NO_HOST
+    except (OSError, RuntimeError) as error:
+        print(f"Проверка SOCKS5 не выполнена: {error}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except (ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
+        print(f"Проверка SOCKS5 не выполнена: {error}", file=sys.stderr)
+        return EXIT_CONFIG
     mode = "proxy" if supported else "direct"
     if arguments.update_state:
         if save_mode(arguments.state, mode):
