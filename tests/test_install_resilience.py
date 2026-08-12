@@ -25,6 +25,22 @@ class InstallResilienceTests(unittest.TestCase):
         )
         self.assertIn("  - ipset\n", common_defaults)
 
+    def test_entry_system_resolver_uses_local_unbound(self) -> None:
+        tasks = (ROOT / "roles/entry_dns/tasks/main.yml").read_text(encoding="utf-8")
+        template = (
+            ROOT / "roles/entry_dns/templates/60-kalimerawg-resolved.conf.j2"
+        ).read_text(encoding="utf-8")
+        health = (ROOT / "roles/health/templates/awg-health.sh.j2").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("systemd-resolved", tasks)
+        self.assertIn("resolvectl, flush-caches", tasks)
+        self.assertIn("/usr/bin/getent, ahostsv4, example.com", tasks)
+        self.assertIn("DNS=127.0.0.1:{{ entry_dns_default_port }}", template)
+        self.assertIn("FallbackDNS=", template)
+        self.assertIn("системное разрешение имён", health)
+
     def test_bootstrap_apt_commands_retry_transient_failures(self) -> None:
         for relative_path in ("install.sh", "deploy"):
             content = (ROOT / relative_path).read_text(encoding="utf-8")

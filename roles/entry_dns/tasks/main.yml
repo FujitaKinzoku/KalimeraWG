@@ -65,6 +65,7 @@
   ansible.builtin.apt:
     name:
       - dnsmasq
+      - systemd-resolved
       - unbound
       - unbound-anchor
     state: present
@@ -225,3 +226,42 @@
   loop:
     - unbound.service
     - dnsmasq.service
+
+- name: "Создание: DNS ENTRY сервера — этап 22"
+  ansible.builtin.file:
+    path: "{{ entry_dns_resolved_dropin_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Настройка: DNS ENTRY сервера — этап 23"
+  ansible.builtin.template:
+    src: 60-kalimerawg-resolved.conf.j2
+    dest: "{{ entry_dns_resolved_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: entry_dns_resolved_dropin
+
+- name: "Включение: DNS ENTRY сервера — этап 24"
+  ansible.builtin.systemd_service:
+    name: systemd-resolved.service
+    enabled: true
+    state: "{{ 'restarted' if entry_dns_resolved_dropin.changed else 'started' }}"
+
+- name: "Очистка: DNS ENTRY сервера — этап 25"
+  ansible.builtin.command:
+    argv: [/usr/bin/resolvectl, flush-caches]
+  changed_when: false
+
+- name: "Проверка: DNS ENTRY сервера — этап 26"
+  ansible.builtin.command:
+    argv: [/usr/bin/getent, ahostsv4, example.com]
+  register: entry_dns_system_resolution
+  changed_when: false
+  retries: 12
+  delay: 5
+  until:
+    - entry_dns_system_resolution.rc == 0
+    - entry_dns_system_resolution.stdout | trim | length > 0

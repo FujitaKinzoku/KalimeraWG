@@ -2,6 +2,8 @@
 entry_dns_candidate_root: /run/ansible-entry-dns-candidate
 entry_dns_backup_root: /root/config-backups/entry/dns
 entry_dns_dot_override_path: /etc/awg/dot-override.json
+entry_dns_resolved_dropin_dir: /etc/systemd/resolved.conf.d
+entry_dns_resolved_dropin_path: /etc/systemd/resolved.conf.d/60-kalimerawg.conf
 entry_dnsmasq_config_dir: /etc/dnsmasq.d
 entry_unbound_config_dir: /etc/unbound/unbound.conf.d
 entry_domain_files_enabled: false

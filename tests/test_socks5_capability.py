@@ -133,7 +133,7 @@ class Socks5CapabilityTests(unittest.TestCase):
                      "--state", str(state), "--update-state"],
                 ),
             ):
-                self.assertEqual(MODULE.main(), 2)
+                self.assertEqual(MODULE.main(), MODULE.EXIT_UNAVAILABLE)
             self.assertFalse(state.exists())
 
     def test_explicit_udp_rejection_selects_direct_mode(self) -> None:
@@ -180,8 +180,26 @@ class Socks5CapabilityTests(unittest.TestCase):
                     ],
                 ),
             ):
-                self.assertEqual(MODULE.main(), 2)
+                self.assertEqual(MODULE.main(), MODULE.EXIT_UNAVAILABLE)
             self.assertFalse(state.exists())
+
+    def test_name_resolution_failure_has_a_distinct_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.json"
+            config.write_text('{"outbounds": []}', encoding="utf-8")
+            with (
+                mock.patch.object(
+                    MODULE,
+                    "udp_supported",
+                    side_effect=socket.gaierror(-3, "Temporary failure in name resolution"),
+                ),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["ru-proxy-capability", "--config", str(config)],
+                ),
+            ):
+                self.assertEqual(MODULE.main(), MODULE.EXIT_NO_HOST)
 
     def test_tcp_probe_uses_ipv4_destination_like_tun_traffic(self) -> None:
         request_parts: list[bytes] = []
