@@ -995,6 +995,7 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("Cache=no", resolved)
         self.assertIn("log-queries: no", unbound)
         self.assertIn("log-replies: no", unbound)
+        self.assertNotIn("log-destaddr", unbound)
         self.assertIn('"disabled": true', sing_box)
         self.assertIn('"disable_cache": true', sing_box)
         self.assertIn("export HISTFILE=/dev/null", shell)

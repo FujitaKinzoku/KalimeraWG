@@ -26,7 +26,7 @@ jobs:
       - name: Установка инструментов проверки
         run: |
           sudo apt-get update
-          sudo apt-get install --yes shellcheck ssss
+          sudo apt-get install --yes shellcheck ssss unbound
           pip install --require-hashes -r requirements.lock
 
       - name: Установка коллекций Ansible

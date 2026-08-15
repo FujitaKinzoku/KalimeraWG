@@ -242,6 +242,19 @@
               - "{{ playbook_dir }}/../roles/operations/files/ru-proxy-capability.py"
           changed_when: false
 
+        - name: Формирование конфигурации Unbound для Ubuntu 24.04
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/entry_dns/templates/90-awg-dot.conf.j2"
+            dest: "{{ rendered_shell_root }}/90-awg-dot.conf"
+            mode: "0600"
+
+        - name: Проверка конфигурации штатным unbound-checkconf Ubuntu 24.04
+          ansible.builtin.command:
+            argv:
+              - unbound-checkconf
+              - "{{ rendered_shell_root }}/90-awg-dot.conf"
+          changed_when: false
+
         - name: Формирование защищённого модуля systemd для watchdog
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/entry_watchdog/templates/awg-ru-proxy-watch.service.j2"
