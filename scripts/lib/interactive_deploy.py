@@ -1076,13 +1076,31 @@ def bootstrap_key(
         str(port),
         "-o",
         "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=2",
         f"{user}@{host}",
     ]
     for attempt in range(1, 4):
         print(f"{server_label}: установка ключа для {user}@{host}:{port} (попытка {attempt}/3)...")
         environment = os.environ.copy()
         environment["SSHPASS"] = candidate
-        result = subprocess.run(argv, check=False, env=environment)
+        try:
+            result = subprocess.run(argv, check=False, env=environment, timeout=45)
+        except subprocess.TimeoutExpired:
+            print(
+                f"{server_label} не ответил за 45 секунд. Проверьте доступность "
+                f"TCP/{port} с управляющего сервера, UFW, Fail2Ban и firewall хостинга."
+            )
+            if attempt < 3:
+                print(f"{server_label}: повтор подключения без повторного запроса пароля.")
+                continue
+            break
         if result.returncode == 0:
             print(f"{server_label}: вход по установленному ключу подготовлен.")
             return candidate

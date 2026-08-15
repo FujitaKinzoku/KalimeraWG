@@ -1169,8 +1169,47 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args_list[0].kwargs["env"]["SSHPASS"], "initial-value")
         self.assertEqual(run.call_args_list[1].kwargs["env"]["SSHPASS"], "corrected-value")
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 45)
+        bootstrap_command = run.call_args_list[0].args[0]
+        for option in (
+            "ConnectTimeout=10",
+            "ConnectionAttempts=1",
+            "ServerAliveInterval=5",
+            "ServerAliveCountMax=2",
+        ):
+            self.assertIn(option, bootstrap_command)
         self.assertTrue(
             any("EXIT сервер отклонил" in str(call) for call in output.call_args_list)
+        )
+
+    def test_key_bootstrap_limits_total_wait_time(self) -> None:
+        with (
+            mock.patch.object(MODULE, "require_command", side_effect=lambda name: name),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                side_effect=[
+                    MODULE.subprocess.TimeoutExpired("ssh-copy-id", 45),
+                    mock.Mock(returncode=0),
+                ],
+            ) as run,
+            mock.patch.object(MODULE.getpass, "getpass", return_value="retry-value"),
+            mock.patch("builtins.print") as output,
+        ):
+            password = MODULE.bootstrap_key(
+                "exit.invalid",
+                "root",
+                56777,
+                "initial-value",
+                Path("public-key.pub"),
+                "EXIT сервер",
+            )
+
+        self.assertEqual(password, "initial-value")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].kwargs["env"]["SSHPASS"], "initial-value")
+        self.assertTrue(
+            any("не ответил за 45 секунд" in str(call) for call in output.call_args_list)
         )
 
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:
