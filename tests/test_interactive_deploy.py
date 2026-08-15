@@ -25,6 +25,236 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_local_entry_public_ipv4_uses_route_source_not_loopback(self) -> None:
+        connection = mock.Mock()
+        connection.getsockname.return_value = ("198.51.100.44", 49152)
+        with (
+            mock.patch.object(
+                MODULE.socket,
+                "getaddrinfo",
+                return_value=[
+                    (
+                        MODULE.socket.AF_INET,
+                        MODULE.socket.SOCK_DGRAM,
+                        17,
+                        "",
+                        ("198.51.100.20", 0),
+                    )
+                ],
+            ),
+            mock.patch.object(MODULE.socket, "socket", return_value=connection),
+            mock.patch.object(
+                MODULE.ipaddress,
+                "ip_address",
+                return_value=mock.Mock(is_global=True),
+            ),
+        ):
+            self.assertEqual(
+                MODULE.detect_local_public_ipv4("exit.example.invalid"),
+                "198.51.100.44",
+            )
+        connection.connect.assert_called_once_with(("198.51.100.20", 443))
+        connection.close.assert_called_once()
+
+    def test_local_entry_behind_nat_requires_explicit_public_endpoint(self) -> None:
+        connection = mock.Mock()
+        connection.getsockname.return_value = ("10.0.0.10", 49152)
+        with (
+            mock.patch.object(
+                MODULE.socket, "getaddrinfo", side_effect=MODULE.socket.gaierror
+            ),
+            mock.patch.object(MODULE.socket, "socket", return_value=connection),
+        ):
+            self.assertEqual(MODULE.detect_local_public_ipv4("unresolved.invalid"), "")
+
+    def test_component_update_uses_candidate_awg_and_stable_sing_box(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            production = repo / "inventory" / "production"
+            example = repo / "inventory" / "example"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            entry_vars_path = production / "group_vars" / "entry.yml"
+            stable_entry_path = example / "group_vars" / "entry.yml"
+            awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+            all_vars_path.parent.mkdir(parents=True)
+            stable_entry_path.parent.mkdir(parents=True)
+            awg3_defaults_path.parent.mkdir(parents=True)
+            MODULE.yaml_write(
+                all_vars_path,
+                {
+                    "awg_package_version_mode": "pinned",
+                    "awg_package_versions": {"amneziawg": "old"},
+                },
+            )
+            MODULE.yaml_write(
+                entry_vars_path,
+                {
+                    "entry_sing_box_version": "1.0.0",
+                    "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+                },
+            )
+            MODULE.yaml_write(
+                stable_entry_path,
+                {
+                    "entry_sing_box_version": "2.0.0",
+                    "entry_sing_box_packages": {
+                        "x86_64": {"url": "new", "checksum": "sha256:test"}
+                    },
+                },
+            )
+            MODULE.yaml_write(
+                awg3_defaults_path,
+                {
+                    "awg3_go_version": "1.25.12",
+                    "awg3_go_archives": {"x86_64": {"checksum": "sha256:go"}},
+                    "awg3_go_source_version": "v3",
+                    "awg3_go_source_commit": "a" * 40,
+                    "awg3_tools_source_version": "v3",
+                    "awg3_tools_source_commit": "b" * 40,
+                },
+            )
+
+            MODULE.prepare_component_update(repo, production)
+
+            all_vars = MODULE.load_yaml(all_vars_path)
+            entry_vars = MODULE.load_yaml(entry_vars_path)
+            self.assertEqual(all_vars["awg_package_version_mode"], "candidate")
+            self.assertNotIn("awg_package_versions", all_vars)
+            self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
+            self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
+            self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
+
+    def test_failed_component_update_restores_inventory_and_runs_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            home = root / "home"
+            production = repo / "inventory" / "production"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            entry_vars_path = production / "group_vars" / "entry.yml"
+            vault_path = production / "group_vars" / "all" / "vault.yml"
+            hosts_path = production / "hosts.yml"
+            stable_entry_path = (
+                repo / "inventory" / "example" / "group_vars" / "entry.yml"
+            )
+            awg3_defaults_path = (
+                repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+            )
+            awg3_defaults_path.parent.mkdir(parents=True)
+            stable_entry_path.parent.mkdir(parents=True)
+            original_all = {
+                "awg_package_version_mode": "pinned",
+                "awg_package_versions": {
+                    "amneziawg": "old",
+                    "amneziawg_dkms": "old",
+                    "amneziawg_tools": "old",
+                },
+                "security_admin_authorized_keys": ["ssh-ed25519 fixture"],
+                "security_require_admin_authorized_key": True,
+            }
+            original_entry = {
+                "entry_sing_box_version": "1.0.0",
+                "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+            }
+            MODULE.yaml_write(all_vars_path, original_all)
+            MODULE.yaml_write(entry_vars_path, original_entry)
+            MODULE.yaml_write(
+                stable_entry_path,
+                {
+                    "entry_sing_box_version": "2.0.0",
+                    "entry_sing_box_packages": {"x86_64": {"url": "new"}},
+                },
+            )
+            awg3_manifest = {
+                "awg3_go_version": "1.25.12",
+                "awg3_go_archives": {"x86_64": {"checksum": "sha256:go"}},
+                "awg3_go_source_version": "v3",
+                "awg3_go_source_commit": "a" * 40,
+                "awg3_tools_source_version": "v3",
+                "awg3_tools_source_commit": "b" * 40,
+            }
+            MODULE.yaml_write(awg3_defaults_path, awg3_manifest)
+            MODULE.yaml_write(
+                hosts_path,
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {
+                                        "security_allow_ssh_port_change": False
+                                    }
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {
+                                        "security_allow_ssh_port_change": False
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            vault_path.write_text("$ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
+            vault_password = home / ".config" / "awg-iac" / "production-vault.pass"
+            vault_password.parent.mkdir(parents=True)
+            vault_password.write_text("fixture\n", encoding="utf-8")
+            package_lock = (
+                home
+                / ".local"
+                / "share"
+                / "awg-iac"
+                / "production"
+                / "amneziawg-package-lock.txt"
+            )
+            package_lock.parent.mkdir(parents=True)
+            original_lock = (
+                "amneziawg=old\namneziawg-dkms=old\namneziawg-tools=old\n"
+            )
+            package_lock.write_text(original_lock, encoding="utf-8")
+
+            with (
+                mock.patch.object(Path, "home", return_value=home),
+                mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
+                mock.patch.object(
+                    MODULE,
+                    "ansible",
+                    side_effect=[SystemExit("candidate failed"), None, None],
+                ) as ansible_run,
+                mock.patch.object(MODULE, "cleanup_deployment"),
+                mock.patch.object(MODULE.atexit, "register"),
+                mock.patch.object(MODULE.atexit, "unregister"),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "interactive_deploy.py",
+                        "--repo-root",
+                        str(repo),
+                        "--resume",
+                        "--update-components",
+                    ],
+                ),
+            ):
+                with self.assertRaisesRegex(SystemExit, "Предыдущая рабочая версия"):
+                    MODULE.main()
+
+            self.assertEqual(MODULE.load_yaml(all_vars_path), original_all)
+            self.assertEqual(MODULE.load_yaml(entry_vars_path), original_entry)
+            self.assertEqual(package_lock.read_text(encoding="utf-8"), original_lock)
+            self.assertEqual(ansible_run.call_count, 3)
+            rollback_extra = ansible_run.call_args_list[1].args[4]
+            self.assertIs(rollback_extra["awg_package_rollback"], True)
+            self.assertIs(rollback_extra["awg_package_refresh"], False)
+            self.assertEqual(
+                rollback_extra["awg_package_transaction_id"],
+                ansible_run.call_args_list[0].args[4]["awg_package_transaction_id"],
+            )
+
     def test_terminal_only_updates_role_without_full_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -206,18 +436,26 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("path: /etc/ufw/sysctl.conf", security)
         self.assertIn("line: net/ipv4/icmp_echo_ignore_all=1", security)
 
-    def test_resume_tolerates_only_a_previously_verified_proxy_timeout(self) -> None:
+    def test_deploy_uses_fail_open_only_for_transient_proxy_errors(self) -> None:
         repository = MODULE_PATH.parents[2]
         operations = (repository / "roles/operations/tasks/main.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("operations_ru_proxy_udp_existing_state", operations)
-        self.assertIn("operations_ru_proxy_capability.rc == 2", operations)
+        self.assertIn(
+            "operations_ru_proxy_capability.rc not in [0, 68, 69]",
+            operations,
+        )
+        self.assertIn(
+            "operations_ru_proxy_capability.rc | default(0) in [68, 69]",
+            operations,
+        )
         self.assertIn(
             "not operations_ru_proxy_udp_existing_state.stat.exists", operations
         )
-        self.assertIn("watchdog применит fail-open через ENTRY", operations)
+        self.assertIn("content: \"direct\\n\"", operations)
+        self.assertIn("watchdog применит общий fail-open", operations)
 
     def test_non_tty_ui_never_emits_escape_sequences(self) -> None:
         with (
@@ -939,8 +1177,47 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args_list[0].kwargs["env"]["SSHPASS"], "initial-value")
         self.assertEqual(run.call_args_list[1].kwargs["env"]["SSHPASS"], "corrected-value")
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 45)
+        bootstrap_command = run.call_args_list[0].args[0]
+        for option in (
+            "ConnectTimeout=10",
+            "ConnectionAttempts=1",
+            "ServerAliveInterval=5",
+            "ServerAliveCountMax=2",
+        ):
+            self.assertIn(option, bootstrap_command)
         self.assertTrue(
             any("EXIT сервер отклонил" in str(call) for call in output.call_args_list)
+        )
+
+    def test_key_bootstrap_limits_total_wait_time(self) -> None:
+        with (
+            mock.patch.object(MODULE, "require_command", side_effect=lambda name: name),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                side_effect=[
+                    MODULE.subprocess.TimeoutExpired("ssh-copy-id", 45),
+                    mock.Mock(returncode=0),
+                ],
+            ) as run,
+            mock.patch.object(MODULE.getpass, "getpass", return_value="retry-value"),
+            mock.patch("builtins.print") as output,
+        ):
+            password = MODULE.bootstrap_key(
+                "exit.invalid",
+                "root",
+                56777,
+                "initial-value",
+                Path("public-key.pub"),
+                "EXIT сервер",
+            )
+
+        self.assertEqual(password, "initial-value")
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].kwargs["env"]["SSHPASS"], "initial-value")
+        self.assertTrue(
+            any("не ответил за 45 секунд" in str(call) for call in output.call_args_list)
         )
 
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:

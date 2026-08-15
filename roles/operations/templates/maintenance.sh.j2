@@ -23,4 +23,7 @@ else
     {{ awg_server_audit_path | quote }}
     printf '\nТребуется перезагрузка: '
     [[ -e /var/run/reboot-required ]] && echo да || echo нет
+    printf '%s\n' \
+      'Критические компоненты показаны в списке, но применяются только отдельной транзакцией:' \
+      '  ./deploy --resume --update-components'
 fi

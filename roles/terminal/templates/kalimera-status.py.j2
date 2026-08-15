@@ -237,7 +237,12 @@ def command_panels() -> None:
             ("awg-health --strict", "строгая проверка AWG, маршрутов, DNS и UFW", "INFO"),
             ("server-audit", "AWG, диск, systemd, UFW и Fail2Ban", "INFO"),
             ("maintenance", "проверка обновлений без их установки", "INFO"),
-            ("update-all", "установка обновлений и подготовка DKMS", "INFO"),
+            ("update-all", "обновления ОС и подготовка DKMS", "INFO"),
+            (
+                "./deploy --resume --update-components",
+                "транзакционное обновление AWG с управляющей ENTRY",
+                "INFO",
+            ),
         ],
     )
     if CONFIG["role"] == "entry":

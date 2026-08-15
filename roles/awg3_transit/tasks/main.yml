@@ -328,9 +328,83 @@
   when: awg3_transit_enabled | bool
 
 - name: "Запуск межсерверного AWG 3+"
-  ansible.builtin.systemd_service:
-    name: "{{ awg3_transit_service_name }}"
-    enabled: true
-    state: started
-    daemon_reload: true
   when: awg3_transit_enabled | bool
+  block:
+    - name: "Запуск службы межсерверного AWG 3+"
+      ansible.builtin.systemd_service:
+        name: "{{ awg3_transit_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      register: awg3_transit_start_result
+      until: awg3_transit_start_result is succeeded
+      retries: 3
+      delay: 5
+
+  rescue:
+    - name: "Сбор безопасной диагностики запуска AWG 3+"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {
+            printf '%s\n' '--- systemd ---'
+            systemctl show "{{ awg3_transit_service_name }}" \
+              -p ActiveState \
+              -p SubState \
+              -p Result \
+              -p ExecMainCode \
+              -p ExecMainStatus \
+              -p ExecStart \
+              -p ExecStartPost || true
+
+            printf '%s\n' '--- журнал запуска ---'
+            journalctl -u "{{ awg3_transit_service_name }}" \
+              -n 80 --no-pager --output=cat || true
+
+            printf '%s\n' '--- интерфейс {{ awg3_transit_interface }} ---'
+            ip -brief link show "{{ awg3_transit_interface }}" || true
+            ip -brief address show "{{ awg3_transit_interface }}" || true
+
+            printf '%s\n' '--- UDP/{{ awg3_transit_listen_port }} ---'
+            ss -H -lunp | grep -E \
+              '(^|[[:space:]])[^[:space:]]*:{{ awg3_transit_listen_port }}([[:space:]]|$)' || \
+              echo 'порт не прослушивается'
+
+            printf '%s\n' '--- файлы и TUN ---'
+            stat -c '%A %U:%G %n' \
+              "{{ awg3_transit_binary_path }}" \
+              "{{ awg3_tools_binary_path }}" \
+              "{{ awg3_transit_setup_path }}" \
+              "{{ awg3_transit_config_path }}" 2>&1 || true
+            test -c /dev/net/tun \
+              && echo '/dev/net/tun: OK' \
+              || echo '/dev/net/tun: отсутствует'
+          } 2>&1 | sed -E \
+            -e 's/((PrivateKey|PresharedKey|HeaderProtectionKey)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1[СКРЫТО]/Ig' \
+            -e 's/[A-Za-z0-9+\/]{42}[A-Za-z0-9+\/=]{2,}/[КЛЮЧ СКРЫТ]/g'
+        executable: /bin/bash
+      register: awg3_transit_start_diagnostics
+      changed_when: false
+      failed_when: false
+
+    - name: "Остановка неуспешно запущенной службы AWG 3+"
+      ansible.builtin.systemd_service:
+        name: "{{ awg3_transit_service_name }}"
+        state: stopped
+      failed_when: false
+
+    - name: "Сброс состояния отказа службы AWG 3+"
+      ansible.builtin.command:
+        argv:
+          - /bin/systemctl
+          - reset-failed
+          - "{{ awg3_transit_service_name }}"
+      changed_when: false
+      failed_when: false
+
+    - name: "Остановка установки с безопасной диагностикой AWG 3+"
+      ansible.builtin.fail:
+        msg: |-
+          Не удалось запустить межсерверный AWG 3+.
+          Конфигурация и ключевой материал не выводились.
+          {{ awg3_transit_start_diagnostics.stdout | default('Диагностика недоступна.') }}

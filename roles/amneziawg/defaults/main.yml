@@ -1,6 +1,11 @@
 ---
 amneziawg_ppa: ppa:amnezia/ppa
 awg_package_version_mode: pinned
+awg_package_refresh: false
+awg_package_rollback: false
+awg_package_transaction_id: manual
+amneziawg_component_rollback_dir: >-
+  /var/cache/awg-iac/component-rollback/{{ awg_package_transaction_id }}
 amneziawg_package_names:
   - amneziawg
   - amneziawg-dkms

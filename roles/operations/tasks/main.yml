@@ -159,22 +159,34 @@
   register: operations_ru_proxy_capability
   changed_when: "'Режим UDP изменён' in operations_ru_proxy_capability.stdout"
   failed_when: >-
-    operations_ru_proxy_capability.rc not in [0, 2] or
-    (operations_ru_proxy_capability.rc == 2 and
-     not operations_ru_proxy_udp_existing_state.stat.exists)
+    operations_ru_proxy_capability.rc not in [0, 68, 69]
   when:
     - awg_node_role == 'entry'
     - entry_ru_proxy_enabled | bool
 
-- name: "Безопасный fail-open при временной недоступности ранее проверенного SOCKS5"
-  ansible.builtin.debug:
-    msg: >-
-      Ранее настроенный SOCKS5 временно не ответил. Сохранён прежний режим RU UDP;
-      watchdog применит fail-open через ENTRY, если прокси остаётся недоступным.
+- name: "Выбор прямого RU UDP при временной недоступности нового SOCKS5"
+  ansible.builtin.copy:
+    dest: "{{ entry_ru_proxy_udp_mode_path }}"
+    content: "direct\n"
+    owner: root
+    group: root
+    mode: "0644"
   when:
     - awg_node_role == 'entry'
     - entry_ru_proxy_enabled | bool
-    - operations_ru_proxy_capability.rc | default(0) == 2
+    - operations_ru_proxy_capability.rc | default(0) in [68, 69]
+    - not operations_ru_proxy_udp_existing_state.stat.exists
+
+- name: "Безопасный fail-open при временной недоступности SOCKS5"
+  ansible.builtin.debug:
+    msg: >-
+      SOCKS5 временно не ответил. Для новой установки выбран прямой RU UDP,
+      а ранее подтверждённый режим сохранён; watchdog применит общий fail-open
+      через ENTRY, если прокси остаётся недоступным.
+  when:
+    - awg_node_role == 'entry'
+    - entry_ru_proxy_enabled | bool
+    - operations_ru_proxy_capability.rc | default(0) in [68, 69]
 
 - name: "Выбор прямого RU UDP при установке без прокси"
   ansible.builtin.copy:
