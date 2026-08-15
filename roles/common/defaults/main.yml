@@ -8,5 +8,7 @@ common_packages:
   - iptables
   - ufw
   - software-properties-common
+  - python3-cryptography
+  - ssss
 awg_backup_root: /root/config-backups
 awg_enable_fail2ban: true

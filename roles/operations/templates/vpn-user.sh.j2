@@ -4,6 +4,7 @@ shopt -s nullglob
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
 
 readonly output_dir={{ awg_client_output_dir | quote }}
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
 readonly main_peer_dir={{ awg_local_peer_dir | quote }}
 readonly main_iface={{ entry_client_interface | quote }}
 readonly main_config="/etc/amnezia/amneziawg/${main_iface}.conf"
@@ -207,6 +208,9 @@ delete_user() {
             fi
         fi
     fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+    "$secretctl" seal
+{% endif %}
     completed=true
     trap - EXIT
     echo "VPN-пользователь $name удалён; доступ отозван. Резервная копия: $backup_dir"
@@ -436,6 +440,10 @@ if ! "${apply_command[@]}"; then
     echo 'Не удалось применить peer; созданные файлы удалены.' >&2
     exit 1
 fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+stage='обновление зашифрованного runtime-пакета'
+"$secretctl" seal
+{% endif %}
 legacy_started=false
 mobile_started=false
 completed=true

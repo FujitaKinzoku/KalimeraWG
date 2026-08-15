@@ -1,6 +1,10 @@
 ---
 awg_node_role: entry
 
+runtime_secrets_share_index: 1
+runtime_secrets_peer_inventory_hosts: "{{ groups['exit'] | default([]) }}"
+runtime_secrets_advertise_ipv4: "{{ entry_public_endpoint | default(ansible_host) }}"
+
 entry_client_interface: awg0
 entry_exit_interface: awg1
 entry_ru_proxy_interface: sb-ru

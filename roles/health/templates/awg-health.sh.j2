@@ -83,6 +83,20 @@ ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
 
+{% if runtime_secrets_enabled | default(false) | bool %}
+runtime_secrets_are_healthy() {
+    systemctl is-enabled --quiet {{ runtime_secrets_service_name | quote }} &&
+        systemctl is-active --quiet {{ runtime_secrets_service_name | quote }} &&
+        {{ runtime_secrets_ctl_path | quote }} check >/dev/null 2>&1
+}
+
+runtime_secret_dependencies_are_loaded() {
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:'
+}
+{% endif %}
+
 {% if awg_node_role == 'entry' %}
 dns_no_logs_policy_is_active() {
     grep -Fxq 'cache-size=0' /etc/dnsmasq.d/50-awg-base.conf &&
@@ -234,6 +248,10 @@ check 'состояние Fail2Ban хранится только в RAM' fail2ba
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
+{% if runtime_secrets_enabled | default(false) | bool %}
+check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
+check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
+{% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
 {% if awg_telegram_monitor_enabled | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then

@@ -8,6 +8,7 @@ import atexit
 import base64
 import binascii
 import getpass
+import hashlib
 import ipaddress
 import json
 import os
@@ -26,6 +27,7 @@ from pathlib import Path
 import yaml
 from ansible.parsing.vault import VaultLib, VaultSecret
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 
@@ -639,6 +641,246 @@ def awg_public_key(private_value: str) -> str:
 
 def awg_psk() -> str:
     return base64.b64encode(os.urandom(32)).decode("ascii")
+
+
+def ssh_exchange_keypair() -> tuple[str, str]:
+    """Создать отдельную Ed25519 identity только для обмена долями."""
+    private = Ed25519PrivateKey.generate()
+    private_value = private.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    public_value = private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    return private_value, f"{public_value} kalimerawg-share-exchange"
+
+
+def split_runtime_secret(
+    secret_hex: str, *, threshold: int = 2, total: int = 5
+) -> list[str]:
+    """Разделить 256-битный KEK штатной Ubuntu-реализацией Shamir SSS."""
+    if not re.fullmatch(r"[0-9a-f]{64}", secret_hex):
+        fail("Ключ runtime-пакета должен быть 256-битным hex-значением")
+    if not (2 <= threshold <= total <= 16):
+        fail("Допустимо от 2 до 16 долей, threshold не может превышать total")
+    command = require_command("ssss-split")
+    result = subprocess.run(
+        [
+            command,
+            "-t",
+            str(threshold),
+            "-n",
+            str(total),
+            "-s",
+            "256",
+            "-x",
+            "-Q",
+            "-w",
+            "kalimerawgruntimev1",
+        ],
+        input=secret_hex + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    shares = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(shares) != total:
+        fail("Не удалось создать пороговые доли; секретные данные не показаны")
+    if len(set(shares)) != total or any(
+        not re.fullmatch(r"kalimerawgruntimev1-[1-9][0-9]*-[0-9a-f]+", share)
+        for share in shares
+    ):
+        fail("ssss-split вернул неожиданный формат долей")
+    return shares
+
+
+def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bool:
+    """Добавить 2-of-5 материал существующему inventory без вывода секретов."""
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    hosts_path = production / "hosts.yml"
+    if not all(
+        path.is_file()
+        for path in (vault_path, all_path, entry_path, exit_path, hosts_path)
+    ):
+        fail("Production inventory неполон для включения runtime-защиты")
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.get("all", {}).get("children", {})
+    entry_hosts = children.get("entry", {}).get("hosts", {})
+    exit_hosts = children.get("exit", {}).get("hosts", {})
+    if not isinstance(entry_hosts, dict) or len(entry_hosts) != 1:
+        fail("Пороговое хранилище требует ровно один ENTRY сервер")
+    if not isinstance(exit_hosts, dict) or not exit_hosts:
+        fail("Пороговое хранилище требует хотя бы один EXIT сервер")
+    active_hosts = list(entry_hosts) + list(exit_hosts)
+
+    changed = False
+    shares = document.get("vault_runtime_secret_shares")
+    if not isinstance(shares, list) or len(shares) < 3:
+        total_shares = max(5, len(active_hosts) + 2)
+        if total_shares > 16:
+            fail("Слишком много держателей для поддерживаемого набора Shamir-долей")
+        data_key = secrets.token_hex(32)
+        shares = split_runtime_secret(
+            data_key, threshold=2, total=total_shares
+        )
+        document["vault_runtime_secret_key_sha256"] = hashlib.sha256(
+            bytes.fromhex(data_key)
+        ).hexdigest()
+        document["vault_runtime_secret_shares"] = shares
+        changed = True
+    if len(active_hosts) > len(shares) - 2:
+        fail(
+            "Для серверов не хватает уникальных Shamir-долей с сохранением "
+            "двух резервных долей"
+        )
+
+    exchange_private = document.get("vault_runtime_exchange_private_keys")
+    exchange_public = document.get("vault_runtime_exchange_public_keys")
+    if not isinstance(exchange_private, dict) or not isinstance(exchange_public, dict):
+        exchange_private = {}
+        exchange_public = {}
+    for host in active_hosts:
+        if not exchange_private.get(host) or not exchange_public.get(host):
+            private_value, public_value = ssh_exchange_keypair()
+            exchange_private[host] = private_value
+            exchange_public[host] = public_value
+            changed = True
+    stale_hosts = (set(exchange_private) | set(exchange_public)) - set(active_hosts)
+    for stale_host in stale_hosts:
+        exchange_private.pop(stale_host, None)
+        exchange_public.pop(stale_host, None)
+        changed = True
+    document["vault_runtime_exchange_private_keys"] = exchange_private
+    document["vault_runtime_exchange_public_keys"] = exchange_public
+
+    all_vars = load_yaml(all_path)
+    expected_all = {
+        "runtime_secrets_enabled": True,
+        "runtime_secrets_threshold": 2,
+        "runtime_secrets_total_shares": len(shares),
+        "runtime_secrets_runtime_root": "/run/kalimera-secrets",
+        "runtime_secrets_state_root": "/var/lib/kalimera-secrets",
+        "runtime_secrets_config_root": "/etc/kalimera-secrets",
+        "runtime_secrets_peer_timeout_seconds": 7,
+        "runtime_secrets_unlock_timeout_seconds": 180,
+        "runtime_secrets_service_name": "kalimera-secrets-unlock.service",
+        "runtime_secrets_ctl_path": "/usr/local/sbin/kalimera-secretctl",
+    }
+    if not all_vars.get("runtime_secrets_cluster_id"):
+        expected_all["runtime_secrets_cluster_id"] = secrets.token_hex(16)
+    for key, value in expected_all.items():
+        if all_vars.get(key) != value:
+            all_vars[key] = value
+            changed = True
+
+    local_controller = any(
+        isinstance(values, dict)
+        and values.get("ansible_connection") == "local"
+        for values in entry_hosts.values()
+    )
+
+    for share_index, host in enumerate(active_hosts, start=1):
+        host_group = entry_hosts if host in entry_hosts else exit_hosts
+        host_values = host_group[host]
+        if not isinstance(host_values, dict):
+            host_values = {}
+            host_group[host] = host_values
+        if host_values.get("runtime_secrets_share_index") != share_index:
+            host_values["runtime_secrets_share_index"] = share_index
+            changed = True
+        if host in exit_hosts:
+            advertise_ipv4 = host_values.get("ansible_host", host)
+            if host_values.get("runtime_secrets_advertise_ipv4") != advertise_ipv4:
+                host_values["runtime_secrets_advertise_ipv4"] = advertise_ipv4
+                changed = True
+
+    existing_entry_vars = load_yaml(entry_path)
+    existing_exit_vars = load_yaml(exit_path)
+    for path, index, peers in (
+        (entry_path, 1, "{{ groups['exit'] | default([]) }}"),
+        (
+            exit_path,
+            2,
+            "{{ (groups['entry'] | default([])) + "
+            "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}",
+        ),
+    ):
+        values = load_yaml(path)
+        if values.get("runtime_secrets_share_index") != index:
+            values["runtime_secrets_share_index"] = index
+            changed = True
+        if values.get("runtime_secrets_peer_inventory_hosts") != peers:
+            values["runtime_secrets_peer_inventory_hosts"] = peers
+            changed = True
+        advertise = (
+            existing_exit_vars.get("security_interserver_peer_ipv4")
+            if index == 1
+            else existing_entry_vars.get("security_interserver_peer_ipv4")
+        )
+        if not advertise:
+            advertise = (
+                "{{ entry_public_endpoint | default(ansible_host) }}"
+                if index == 1
+                else "{{ ansible_host }}"
+            )
+        if values.get("runtime_secrets_advertise_ipv4") != advertise:
+            values["runtime_secrets_advertise_ipv4"] = advertise
+            changed = True
+        if index == 1 and local_controller:
+            controller_values = {
+                "runtime_secrets_controller_vault_password_path": str(vault_password),
+                "runtime_secrets_controller_ssh_private_key_path": str(
+                    Path.home() / ".ssh" / "awg-iac-production"
+                ),
+                "runtime_secrets_controller_client_state_path": str(
+                    Path.home()
+                    / ".local"
+                    / "share"
+                    / "awg-iac"
+                    / "production"
+                    / "clients"
+                ),
+            }
+            for key, value in controller_values.items():
+                if values.get(key) != value:
+                    values[key] = value
+                    changed = True
+        yaml_write(path, values)
+
+    if changed:
+        yaml_write(hosts_path, hosts_document)
+        yaml_write(all_path, all_vars)
+        plaintext = yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+        temporary = vault_path.with_name(
+            f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            secure_write(temporary, vault_lib.encrypt(plaintext))
+            os.replace(temporary, vault_path)
+            vault_path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
+        print(
+            "Production inventory обновлён: включено пороговое хранение "
+            "runtime-секретов 2-of-5."
+        )
+    return changed
 
 
 AWG_CLIENT_PROFILES = {
@@ -1598,6 +1840,7 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        ensure_runtime_secret_material(production, vault_password)
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
         if args.mobile_i1_mode:
@@ -1723,6 +1966,8 @@ def main() -> None:
         "ssh-copy-id",
         "ssh-keygen",
         "sshpass",
+        "ssss-split",
+        "ssss-combine",
     ):
         require_command(command)
 
@@ -2136,6 +2381,11 @@ def main() -> None:
             "security_require_admin_authorized_key": True,
             "awg_interserver_entry_address": f"{entry_transit_ip}/32",
             "awg_telegram_monitor_enabled": telegram_enabled,
+            "runtime_secrets_enabled": True,
+            "runtime_secrets_threshold": 2,
+            "runtime_secrets_total_shares": 5,
+            "runtime_secrets_cluster_id": secrets.token_hex(16),
+            "runtime_secrets_unlock_timeout_seconds": 180,
         }
     )
     entry_vars.update(
@@ -2197,8 +2447,21 @@ def main() -> None:
             "entry_dns_doh_server": doh_server,
             "entry_dns_doh_tls_name": doh_tls_name,
             "entry_dns_doh_path": doh_path,
+            "runtime_secrets_share_index": 1,
+            "runtime_secrets_peer_inventory_hosts": "{{ groups['exit'] | default([]) }}",
+            "runtime_secrets_advertise_ipv4": entry_public_ipv4,
         }
     )
+    if local_entry:
+        entry_vars["runtime_secrets_controller_vault_password_path"] = str(
+            vault_password
+        )
+        entry_vars["runtime_secrets_controller_ssh_private_key_path"] = str(
+            ssh_private
+        )
+        entry_vars["runtime_secrets_controller_client_state_path"] = str(
+            state_root / "clients"
+        )
     exit_vars.update(
         {
             "exit_wan_interface": "auto",
@@ -2222,6 +2485,12 @@ def main() -> None:
             "awg3_transit_peer_public_key": "{{ vault_awg_entry_exit_entry_public_key }}",
             "awg3_transit_allowed_ips": [f"{entry_transit_ip}/32"],
             "awg3_transit_obfuscation": transit_obfuscation,
+            "runtime_secrets_share_index": 2,
+            "runtime_secrets_peer_inventory_hosts": (
+                "{{ (groups['entry'] | default([])) + "
+                "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}"
+            ),
+            "runtime_secrets_advertise_ipv4": exit_public_ipv4,
         }
     )
     yaml_write(all_vars_path, all_vars)
@@ -2237,6 +2506,7 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": entry_new_port,
             "security_allow_ssh_port_change": entry_current_port != entry_new_port,
+            "runtime_secrets_share_index": 1,
         },
         "exit-managed": {
             "ansible_host": exit_host,
@@ -2246,6 +2516,7 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": exit_new_port,
             "security_allow_ssh_port_change": exit_current_port != exit_new_port,
+            "runtime_secrets_share_index": 2,
         },
     }
     if local_entry:
@@ -2275,6 +2546,12 @@ def main() -> None:
     transit_psk = awg_psk()
     client_private = awg_private_key()
     client_psk = awg_psk()
+    runtime_secret_key = secrets.token_hex(32)
+    runtime_secret_shares = split_runtime_secret(
+        runtime_secret_key, threshold=2, total=5
+    )
+    entry_exchange_private, entry_exchange_public = ssh_exchange_keypair()
+    exit_exchange_private, exit_exchange_public = ssh_exchange_keypair()
     vault_document: dict[str, object] = {
         "vault_awg_entry_private_key": entry_private,
         "vault_awg_entry_legacy_private_key": legacy_entry_private,
@@ -2319,6 +2596,18 @@ def main() -> None:
                 "preshared_key": transit_psk,
             }
         ],
+        "vault_runtime_secret_key_sha256": hashlib.sha256(
+            bytes.fromhex(runtime_secret_key)
+        ).hexdigest(),
+        "vault_runtime_secret_shares": runtime_secret_shares,
+        "vault_runtime_exchange_private_keys": {
+            "entry-managed": entry_exchange_private,
+            "exit-managed": exit_exchange_private,
+        },
+        "vault_runtime_exchange_public_keys": {
+            "entry-managed": entry_exchange_public,
+            "exit-managed": exit_exchange_public,
+        },
     }
     if entry_sudo:
         vault_document["vault_entry_become_password"] = entry_password

@@ -33,6 +33,7 @@
         - roles/health/defaults/main.yml
         - roles/operations/defaults/main.yml
         - roles/awg3_transit/defaults/main.yml
+        - roles/runtime_secrets/defaults/main.yml
 
     - name: Включение preview-ветвей логики для проверки шаблонов
       ansible.builtin.set_fact:
@@ -41,6 +42,11 @@
         entry_mobile_client_available: true
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
+        runtime_secrets_enabled: true
+        runtime_secrets_cluster_id: 0123456789abcdef0123456789abcdef
+        runtime_secrets_peer_inventory_hosts:
+          - exit.example.invalid
+        vault_runtime_secret_key_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         awg_node_role: entry
         ansible_port: 56777
         terminal_summary_entry_host: 192.0.2.10
@@ -70,6 +76,41 @@
             path: "{{ rendered_shell_root }}"
             state: directory
             mode: "0700"
+
+        - name: Формирование программы порогового runtime-хранилища
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/secretctl.py.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-secretctl"
+            mode: "0700"
+
+        - name: Проверка синтаксиса программы порогового runtime-хранилища
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - py_compile
+              - "{{ rendered_shell_root }}/kalimera-secretctl"
+          changed_when: false
+
+        - name: Формирование безопасной структуры runtime-хранилища
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/config.json.j2"
+            dest: "{{ rendered_shell_root }}/runtime-config.json"
+            mode: "0600"
+
+        - name: Проверка JSON и полного набора защищаемых путей
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - >-
+                import json,sys;
+                d=json.load(open(sys.argv[1], encoding='utf-8'));
+                paths={m['source'] for m in d['mappings']};
+                assert '/etc/awg' in paths and '/etc/sing-box' in paths and
+                '/etc/amnezia/amneziawg-v3' in paths
+              - "{{ rendered_shell_root }}/runtime-config.json"
+          changed_when: false
 
         - name: Формирование исполняемых шаблонов ENTRY
           ansible.builtin.template:
@@ -127,6 +168,8 @@
               dest: awg3-transit-setup
             - src: roles/awg3_transit/templates/validate-config.sh.j2
               dest: awg3-validate-config
+            - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
+              dest: kalimera-secrets-unlock
 
         - name: Формирование настроек интерактивного терминала
           ansible.builtin.template:
@@ -284,6 +327,7 @@
               - "{{ rendered_shell_root }}/awg-dns-policy"
               - "{{ rendered_shell_root }}/awg3-transit-setup"
               - "{{ rendered_shell_root }}/awg3-validate-config"
+              - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/kalimera-help"

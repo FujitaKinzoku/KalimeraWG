@@ -175,6 +175,7 @@ vpn-user delete phone
 | Ядро | заголовки, DKMS и `modinfo` проверяются для текущего и следующего ядра |
 | DNS | локальный Unbound, контроль DoT/DoH, защита от DNS-сбоев образа VPS |
 | No-logs | journal и учёт входов только в RAM; UFW/sing-box/DNS query logs, shell history и coredump отключены |
+| Секреты на диске | Shamir 2-of-5 + AES-256-GCM; открытые конфигурации только в `/run`, службы используют systemd credentials |
 | Ошибки AWG3 | ограниченные повторные попытки и очищенная диагностика без ключевого материала |
 | Сеть VPS | совместимость с ifupdown/systemd-networkd без самовольной смены сетевого менеджера |
 | Репозиторий | Gitleaks, собственный secret scan, YAML/Ansible/Shell/Python-проверки в CI |

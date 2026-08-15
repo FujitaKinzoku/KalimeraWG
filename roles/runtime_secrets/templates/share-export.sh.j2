@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly expected='get-share {{ runtime_secrets_cluster_id }}'
+[[ "${SSH_ORIGINAL_COMMAND:-}" == "$expected" ]] || exit 64
+[[ -r {{ runtime_secrets_local_share_path | quote }} ]] || exit 66
+exec /usr/bin/head -n 1 {{ runtime_secrets_local_share_path | quote }}

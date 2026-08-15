@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly secretctl={{ runtime_secrets_ctl_path | quote }}
+readonly timeout={{ runtime_secrets_unlock_timeout_seconds | int }}
+readonly retry_interval=5
+error_file="$(mktemp /run/kalimerawg-unlock-error.XXXXXX)"
+trap 'rm -f "$error_file"' EXIT
+
+deadline=$(( SECONDS + timeout ))
+while (( SECONDS < deadline )); do
+    if "$secretctl" unlock 2>"$error_file"; then
+        exit 0
+    fi
+    sleep "$retry_interval"
+done
+
+cat "$error_file" >&2
+echo "Runtime-секреты: кворум не появился за ${timeout} секунд; запуск каскада запрещён." >&2
+exit 1

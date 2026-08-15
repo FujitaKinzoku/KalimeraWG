@@ -1,0 +1,24 @@
+---
+runtime_secrets_enabled: false
+runtime_secrets_threshold: 2
+runtime_secrets_total_shares: 5
+runtime_secrets_cluster_id: ""
+runtime_secrets_share_index: 0
+runtime_secrets_peer_inventory_hosts: []
+runtime_secrets_runtime_root: /run/kalimera-secrets
+runtime_secrets_state_root: /var/lib/kalimera-secrets
+runtime_secrets_config_root: /etc/kalimera-secrets
+runtime_secrets_peer_timeout_seconds: 7
+runtime_secrets_unlock_timeout_seconds: 180
+runtime_secrets_service_name: kalimera-secrets-unlock.service
+runtime_secrets_ctl_path: /usr/local/sbin/kalimera-secretctl
+runtime_secrets_export_path: /usr/local/libexec/kalimera-share-export
+runtime_secrets_unlock_path: /usr/local/libexec/kalimera-secrets-unlock
+runtime_secrets_bundle_path: "{{ runtime_secrets_state_root }}/bundle.v1.json"
+runtime_secrets_local_share_path: "{{ runtime_secrets_config_root }}/local.share"
+runtime_secrets_exchange_identity_path: "{{ runtime_secrets_config_root }}/share-exchange"
+runtime_secrets_known_hosts_path: "{{ runtime_secrets_config_root }}/known_hosts"
+runtime_secrets_config_path: "{{ runtime_secrets_config_root }}/config.json"
+runtime_secrets_controller_vault_password_path: ""
+runtime_secrets_controller_ssh_private_key_path: ""
+runtime_secrets_controller_client_state_path: ""

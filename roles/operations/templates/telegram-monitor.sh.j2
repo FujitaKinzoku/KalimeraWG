@@ -2,7 +2,12 @@
 set -Eeuo pipefail
 umask 077
 
-readonly ENV_FILE={{ awg_telegram_monitor_env_path | quote }}
+ENV_FILE={{ awg_telegram_monitor_env_path | quote }}
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" &&
+      -r "${CREDENTIALS_DIRECTORY}/telegram.env" ]]; then
+    ENV_FILE="${CREDENTIALS_DIRECTORY}/telegram.env"
+fi
+readonly ENV_FILE
 readonly STATE_DIR={{ awg_telegram_monitor_state_dir | quote }}
 readonly NODE_ROLE={{ awg_node_role | quote }}
 {% if awg_node_role == 'entry' and entry_ru_proxy_enabled | bool %}

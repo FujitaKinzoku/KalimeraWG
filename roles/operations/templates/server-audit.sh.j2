@@ -49,6 +49,10 @@ sensitive_modes_ok() {
     local file mode
     while IFS= read -r file; do
         [[ -e "$file" ]] || continue
+        if [[ -L "$file" ]]; then
+            [[ "$(readlink -f "$file")" == /run/kalimera-secrets/* ]] || return 1
+            file="$(readlink -f "$file")"
+        fi
         mode="$(stat -c '%a' "$file")"
         case "$mode" in
             600|400) ;;
@@ -61,6 +65,10 @@ EOF
 
     for file in /etc/amnezia/amneziawg/*.conf /etc/awg/*.conf; do
         [[ -e "$file" ]] || continue
+        if [[ -L "$file" ]]; then
+            [[ "$(readlink -f "$file")" == /run/kalimera-secrets/* ]] || return 1
+            file="$(readlink -f "$file")"
+        fi
         mode="$(stat -c '%a' "$file")"
         case "$mode" in
             600|400) ;;
@@ -68,6 +76,14 @@ EOF
         esac
     done
 }
+
+{% if runtime_secrets_enabled | default(false) | bool %}
+runtime_secrets_ok() {
+    systemctl is-enabled --quiet {{ runtime_secrets_service_name | quote }} &&
+        systemctl is-active --quiet {{ runtime_secrets_service_name | quote }} &&
+        {{ runtime_secrets_ctl_path | quote }} check >/dev/null 2>&1
+}
+{% endif %}
 
 ssh_baseline_ok() {
     local effective
@@ -200,6 +216,9 @@ record 'учёт входов хранится только в RAM' login_accoun
 record 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 record 'постоянные журналы активности отсутствуют' no_persistent_activity_logs
 record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
+{% if runtime_secrets_enabled | default(false) | bool %}
+record 'пороговое хранилище runtime-секретов исправно' runtime_secrets_ok
+{% endif %}
 record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check

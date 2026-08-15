@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "cluster_id": {{ runtime_secrets_cluster_id | to_json }},
+  "threshold": {{ runtime_secrets_threshold | int }},
+  "total_shares": {{ runtime_secrets_total_shares | int }},
+  "key_sha256": {{ vault_runtime_secret_key_sha256 | to_json }},
+  "runtime_root": {{ runtime_secrets_runtime_root | to_json }},
+  "bundle_path": {{ runtime_secrets_bundle_path | to_json }},
+  "local_share_path": {{ runtime_secrets_local_share_path | to_json }},
+  "identity_path": {{ runtime_secrets_exchange_identity_path | to_json }},
+  "known_hosts_path": {{ runtime_secrets_known_hosts_path | to_json }},
+  "peer_timeout_seconds": {{ runtime_secrets_peer_timeout_seconds | int }},
+  "peers": [
+{% for peer in runtime_secrets_peer_inventory_hosts %}
+    {
+      "name": {{ peer | to_json }},
+      "host": {{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) | to_json }},
+      "port": {{ hostvars[peer].ssh_listen_port | default(hostvars[peer].ansible_port | default(22)) | int }}
+    }{{ "," if not loop.last else "" }}
+{% endfor %}
+  ],
+  "mappings": [
+{% set mappings = [
+  {'source': '/etc/amnezia/amneziawg', 'target': 'amneziawg'},
+  {'source': '/etc/amnezia/amneziawg-v3', 'target': 'amneziawg-v3'},
+  {'source': '/etc/sing-box', 'target': 'sing-box'},
+  {'source': '/etc/awg', 'target': 'awg'},
+  {'source': '/root/awg-client-configs', 'target': 'clients'},
+  {'source': '/root/config-backups', 'target': 'backups'},
+  {'source': '/etc/awg-telegram-monitor.env', 'target': 'telegram/monitor.env'}
+] %}
+{% if runtime_secrets_controller_vault_password_path | default('') | length > 0 %}
+{% set _ = mappings.append({'source': runtime_secrets_controller_vault_password_path, 'target': 'controller/production-vault.pass'}) %}
+{% endif %}
+{% if runtime_secrets_controller_ssh_private_key_path | default('') | length > 0 %}
+{% set _ = mappings.append({'source': runtime_secrets_controller_ssh_private_key_path, 'target': 'controller/awg-iac-production'}) %}
+{% endif %}
+{% if runtime_secrets_controller_client_state_path | default('') | length > 0 %}
+{% set _ = mappings.append({'source': runtime_secrets_controller_client_state_path, 'target': 'controller/clients'}) %}
+{% endif %}
+{% for mapping in mappings %}
+    {"source": {{ mapping.source | to_json }}, "target": {{ mapping.target | to_json }}}{% if not loop.last %},{% endif %}
+{% endfor %}
+  ]
+}

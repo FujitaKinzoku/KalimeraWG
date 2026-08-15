@@ -3,6 +3,10 @@ set -Eeuo pipefail
 mode="${1:-up}"
 iface={{ awg3_transit_interface | quote }}
 config={{ awg3_transit_config_path | quote }}
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" &&
+      -r "${CREDENTIALS_DIRECTORY}/awg3.conf" ]]; then
+    config="${CREDENTIALS_DIRECTORY}/awg3.conf"
+fi
 peer={{ awg3_peer_tunnel_address | quote }}
 if [[ "$mode" == up ]]; then
     for _ in {1..50}; do

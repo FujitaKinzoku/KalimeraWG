@@ -1,0 +1,23 @@
+[Unit]
+Description=Сборка 2-of-N ключа и открытие runtime-секретов KalimeraWG
+After=network-online.target ssh.service
+Wants=network-online.target
+Before=awg-quick@{{ entry_client_interface | default('awg0') }}.service
+Before={{ awg3_transit_service_name | default('awg3-transit.service') }}
+Before=sing-box.service
+Before=awg-telegram-monitor.service
+
+[Service]
+Type=oneshot
+ExecStart={{ runtime_secrets_unlock_path }}
+ExecStartPost={{ runtime_secrets_ctl_path }} verify
+RemainAfterExit=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

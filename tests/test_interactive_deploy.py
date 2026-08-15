@@ -219,6 +219,7 @@ class InteractiveDeployTests(unittest.TestCase):
             with (
                 mock.patch.object(Path, "home", return_value=home),
                 mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
                 mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
                 mock.patch.object(
                     MODULE,
@@ -1377,6 +1378,127 @@ class InteractiveDeployTests(unittest.TestCase):
             any("не ответил за 45 секунд" in str(call) for call in output.call_args_list)
         )
 
+    def test_runtime_secret_uses_true_shamir_2_of_5_without_output(self) -> None:
+        shares = [
+            f"kalimerawgruntimev1-{index}-{'a' * 64}"
+            for index in range(1, 6)
+        ]
+        with (
+            mock.patch.object(MODULE, "require_command", return_value="ssss-split"),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout="\n".join(shares) + "\n"),
+            ) as run,
+        ):
+            result = MODULE.split_runtime_secret("1" * 64)
+
+        self.assertEqual(result, shares)
+        command = run.call_args.args[0]
+        self.assertIn("-t", command)
+        self.assertEqual(command[command.index("-t") + 1], "2")
+        self.assertEqual(command[command.index("-n") + 1], "5")
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+
+    def test_runtime_secret_inventory_assigns_unique_second_exit_share(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(all_root / "main.yml", {})
+            MODULE.yaml_write(
+                production / "group_vars" / "entry.yml",
+                {"security_interserver_peer_ipv4": "198.51.100.20"},
+            )
+            MODULE.yaml_write(
+                production / "group_vars" / "exit.yml",
+                {"security_interserver_peer_ipv4": "198.51.100.10"},
+            )
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {"ansible_host": "198.51.100.10"}
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {"ansible_host": "198.51.100.20"},
+                                "exit-secondary": {"ansible_host": "198.51.100.30"},
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(production / "hosts.yml", hosts)
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump({}).encode("utf-8"))
+            )
+            shares = [
+                f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                for index in range(1, 6)
+            ]
+            exchange_counter = iter(range(1, 4))
+
+            def exchange_keypair() -> tuple[str, str]:
+                index = next(exchange_counter)
+                return f"private-{index}", f"ssh-ed25519 public-{index} exchange"
+
+            with (
+                mock.patch.object(MODULE, "split_runtime_secret", return_value=shares),
+                mock.patch.object(
+                    MODULE, "ssh_exchange_keypair", side_effect=exchange_keypair
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.ensure_runtime_secret_material(production, password_path)
+                )
+
+            updated_hosts = yaml.safe_load(
+                (production / "hosts.yml").read_text(encoding="utf-8")
+            )["all"]["children"]
+            self.assertEqual(
+                updated_hosts["entry"]["hosts"]["entry-managed"][
+                    "runtime_secrets_share_index"
+                ],
+                1,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-managed"][
+                    "runtime_secrets_share_index"
+                ],
+                2,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-secondary"][
+                    "runtime_secrets_share_index"
+                ],
+                3,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-secondary"][
+                    "runtime_secrets_advertise_ipv4"
+                ],
+                "198.51.100.30",
+            )
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertEqual(
+                set(decrypted["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed", "exit-secondary"},
+            )
+            self.assertFalse(
+                MODULE.ensure_runtime_secret_material(production, password_path)
+            )
+
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1447,6 +1569,14 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
                 mock.patch("getpass.getpass", side_effect=lambda _="": next(hidden_answers)),
                 mock.patch.object(MODULE, "require_command", side_effect=lambda name: name),
+                mock.patch.object(
+                    MODULE,
+                    "split_runtime_secret",
+                    return_value=[
+                        f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                        for index in range(1, 6)
+                    ],
+                ),
                 mock.patch.object(MODULE, "run", side_effect=simulated_run) as run,
                 mock.patch.object(MODULE, "cleanup_deployment"),
                 mock.patch.object(
@@ -1525,6 +1655,12 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(len(all_vars["security_admin_authorized_keys"]), 1)
             self.assertEqual(all_vars["awg_package_version_mode"], "pinned")
             self.assertEqual(all_vars["awg_package_versions"]["amneziawg"], "1.0")
+            self.assertTrue(all_vars["runtime_secrets_enabled"])
+            self.assertEqual(all_vars["runtime_secrets_threshold"], 2)
+            self.assertEqual(all_vars["runtime_secrets_total_shares"], 5)
+            self.assertRegex(all_vars["runtime_secrets_cluster_id"], r"^[0-9a-f]{32}$")
+            self.assertEqual(entry_vars["runtime_secrets_share_index"], 1)
+            self.assertEqual(exit_vars["runtime_secrets_share_index"], 2)
 
             encrypted = (
                 repo / "inventory" / "production" / "group_vars" / "all" / "vault.yml"
@@ -1537,6 +1673,11 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertIn("vault_awg_entry_legacy_private_key", vault)
             self.assertIn("vault_awg_entry_mobile_private_key", vault)
             self.assertIn("vault_awg3_header_protection_key", vault)
+            self.assertEqual(len(vault["vault_runtime_secret_shares"]), 5)
+            self.assertEqual(
+                set(vault["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed"},
+            )
             self.assertEqual(vault["vault_proxy_username"], "")
             self.assertEqual(
                 vault["vault_entry_client_peers"][0]["allowed_ips"],

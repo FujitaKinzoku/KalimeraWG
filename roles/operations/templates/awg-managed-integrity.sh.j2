@@ -29,6 +29,17 @@ managed_files() {
 /usr/local/sbin/update-all
 /etc/systemd/system/awg-server-audit.service
 /etc/systemd/system/awg-server-audit.timer
+{% if runtime_secrets_enabled | default(false) | bool %}
+{{ runtime_secrets_ctl_path }}
+{{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
+{{ runtime_secrets_unlock_path | default('/usr/local/libexec/kalimera-secrets-unlock') }}
+{{ runtime_secrets_config_path | default('/etc/kalimera-secrets/config.json') }}
+/etc/systemd/system/{{ runtime_secrets_service_name }}
+/etc/systemd/system/awg-quick@.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/{{ awg3_transit_service_name | default('awg3-transit.service') }}.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/sing-box.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/awg-telegram-monitor.service.d/90-kalimerawg-runtime-secrets.conf
+{% endif %}
 {% if awg_node_role == 'entry' %}
 /etc/dnsmasq.d/50-awg-base.conf
 /etc/systemd/resolved.conf.d/60-kalimerawg.conf

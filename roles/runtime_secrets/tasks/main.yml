@@ -1,0 +1,246 @@
+---
+- name: Проверка параметров порогового хранения
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - runtime_secrets_cluster_id is match('^[0-9a-f]{32}$')
+      - runtime_secrets_threshold | int == 2
+      - runtime_secrets_total_shares | int >= 3
+      - runtime_secrets_total_shares | int <= 16
+      - runtime_secrets_unlock_timeout_seconds | int >= 30
+      - runtime_secrets_unlock_timeout_seconds | int <= 900
+      - runtime_secrets_share_index | int >= 1
+      - runtime_secrets_share_index | int <= runtime_secrets_total_shares | int
+      - vault_runtime_secret_shares is sequence
+      - vault_runtime_secret_shares | length == runtime_secrets_total_shares | int
+      - vault_runtime_secret_key_sha256 is match('^[0-9a-f]{64}$')
+      - vault_runtime_exchange_private_keys[inventory_hostname] is defined
+      - vault_runtime_exchange_public_keys[inventory_hostname] is defined
+      - runtime_secrets_peer_inventory_hosts | length >= 1
+    fail_msg: Пороговое хранилище требует уникальную локальную долю и хотя бы один peer
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Создание каталогов порогового хранилища
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ runtime_secrets_config_root }}", mode: "0700"}
+    - {path: "{{ runtime_secrets_state_root }}", mode: "0700"}
+    - {path: "{{ runtime_secrets_runtime_root }}", mode: "0700"}
+    - {path: "{{ runtime_secrets_export_path | dirname }}", mode: "0755"}
+    - {path: /root/.ssh, mode: "0700"}
+  when: runtime_secrets_enabled | bool
+
+- name: Установка локальной доли Shamir
+  ansible.builtin.copy:
+    dest: "{{ runtime_secrets_local_share_path }}"
+    content: "{{ vault_runtime_secret_shares[(runtime_secrets_share_index | int) - 1] }}\n"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Установка отдельной identity обмена долями
+  ansible.builtin.copy:
+    dest: "{{ runtime_secrets_exchange_identity_path }}"
+    content: "{{ vault_runtime_exchange_private_keys[inventory_hostname] }}\n"
+    owner: root
+    group: root
+    mode: "0400"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Установка проверенных host keys держателей долей
+  ansible.builtin.template:
+    src: known_hosts.j2
+    dest: "{{ runtime_secrets_known_hosts_path }}"
+    owner: root
+    group: root
+    mode: "0400"
+  when: runtime_secrets_enabled | bool
+
+- name: Установка конфигурации runtime-хранилища
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ runtime_secrets_config_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Установка утилиты открытия и перепаковки секретов
+  ansible.builtin.template:
+    src: secretctl.py.j2
+    dest: "{{ runtime_secrets_ctl_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: runtime_secrets_enabled | bool
+
+- name: Установка строго ограниченного экспортёра доли
+  ansible.builtin.template:
+    src: share-export.sh.j2
+    dest: "{{ runtime_secrets_export_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: runtime_secrets_enabled | bool
+
+- name: Установка ограниченного ожидания кворума при загрузке
+  ansible.builtin.template:
+    src: unlock-runtime.sh.j2
+    dest: "{{ runtime_secrets_unlock_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: runtime_secrets_enabled | bool
+
+- name: Разрешение только текущим peer-узлам получить локальную долю
+  ansible.builtin.blockinfile:
+    path: /root/.ssh/authorized_keys
+    create: true
+    owner: root
+    group: root
+    mode: "0600"
+    marker: "# {mark} KALIMERAWG RUNTIME SHARE EXCHANGE"
+    block: |
+      {% for peer in runtime_secrets_peer_inventory_hosts %}
+      from="{{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) }}",restrict,command="{{ runtime_secrets_export_path }}" {{ vault_runtime_exchange_public_keys[peer] | regex_replace(' kalimerawg-share-exchange$', '') }} kalimerawg-share-exchange-{{ peer }}
+      {% endfor %}
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Проверка уникальности локальных долей активных узлов
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - >-
+        (runtime_secrets_peer_inventory_hosts |
+         map('extract', hostvars, 'runtime_secrets_share_index') |
+         map('int') | list) |
+        intersect([runtime_secrets_share_index | int]) | length == 0
+    fail_msg: Каждый сервер обязан использовать отдельный индекс Shamir-доли
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Принятие текущих открытых конфигураций в tmpfs
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path }}", adopt]
+  register: runtime_secrets_adopt_result
+  changed_when: "'changed' in runtime_secrets_adopt_result.stdout_lines"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Создание аутентифицированного AES-256-GCM пакета
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path }}", seal]
+  register: runtime_secrets_seal_result
+  changed_when: "'changed' in runtime_secrets_seal_result.stdout_lines"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Замена открытых постоянных путей ссылками на tmpfs
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path }}", link]
+  register: runtime_secrets_link_result
+  changed_when: "'changed' in runtime_secrets_link_result.stdout_lines"
+  no_log: true
+  when: runtime_secrets_enabled | bool
+
+- name: Фиксация открытого состояния текущей загрузки
+  ansible.builtin.copy:
+    dest: "{{ runtime_secrets_runtime_root }}/.unlocked"
+    content: "{{ runtime_secrets_cluster_id }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  when: runtime_secrets_enabled | bool
+
+- name: Установка службы раннего открытия runtime-пакета
+  ansible.builtin.template:
+    src: unlock.service.j2
+    dest: "/etc/systemd/system/{{ runtime_secrets_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перечитать systemd после настройки runtime-секретов
+  when: runtime_secrets_enabled | bool
+
+- name: Создание каталогов зависимостей защищённых служб
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - awg-quick@.service
+    - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
+    - sing-box.service
+    - awg-telegram-monitor.service
+  when: runtime_secrets_enabled | bool
+
+- name: Связывание служб с открытием секретов и systemd credentials
+  ansible.builtin.template:
+    src: "{{ item.template }}"
+    dest: "/etc/systemd/system/{{ item.unit }}.d/90-kalimerawg-runtime-secrets.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {unit: awg-quick@.service, template: awg-quick-credential.conf.j2}
+    - {unit: "{{ awg3_transit_service_name | default('awg3-transit.service') }}", template: awg3-credential.conf.j2}
+    - {unit: sing-box.service, template: sing-box-credential.conf.j2}
+    - {unit: awg-telegram-monitor.service, template: telegram-credential.conf.j2}
+  notify: Перечитать systemd после настройки runtime-секретов
+  register: runtime_credential_dropins
+  when: runtime_secrets_enabled | bool
+
+- name: Применение изменений systemd до проверки
+  ansible.builtin.meta: flush_handlers
+
+- name: Включение раннего открытия runtime-пакета
+  ansible.builtin.systemd_service:
+    name: "{{ runtime_secrets_service_name }}"
+    enabled: true
+    state: started
+  when: runtime_secrets_enabled | bool
+
+- name: Получение состояния защищённых служб после установки credentials
+  ansible.builtin.service_facts:
+  when:
+    - runtime_secrets_enabled | bool
+    - runtime_credential_dropins is changed
+
+- name: Проверка credential-пути перезапуском только уже работающих служб
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - try-restart
+      - "{{ item }}"
+  loop:
+    - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
+    - "awg-quick@{{ entry_client_interface | default('awg0') }}.service"
+    - "awg-quick@{{ entry_legacy_client_interface | default('awg-old') }}.service"
+    - "awg-quick@{{ entry_mobile_client_interface | default('awg-mobile') }}.service"
+    - sing-box.service
+  changed_when: true
+  when:
+    - runtime_secrets_enabled | bool
+    - runtime_credential_dropins is changed
+    - item in ansible_facts.services
+    - ansible_facts.services[item].state == 'running'
+
+- name: Проверка порогового пакета без вывода содержимого
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path }}", verify]
+  changed_when: false
+  no_log: true
+  when: runtime_secrets_enabled | bool
