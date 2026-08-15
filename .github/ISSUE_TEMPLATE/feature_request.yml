@@ -1,0 +1,39 @@
+name: Предложение улучшения
+description: Новая возможность или улучшение существующего поведения
+title: "[Предложение]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: Спасибо за предложение. Опишите задачу пользователя, а не только предполагаемую реализацию.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какая задача не решается сейчас
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Рассмотренные альтернативы
+  - type: textarea
+    id: impact
+    attributes:
+      label: Влияние на безопасность и совместимость
+      description: Укажите новые порты, службы, секреты, зависимости или требования к хостингу.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Границы предложения
+      options:
+        - label: Предложение относится к воспроизводимому развёртыванию KalimeraWG.
+          required: true
+        - label: В сообщении нет секретов и персональных данных.
+          required: true

@@ -70,6 +70,19 @@ and transit segments use separate interfaces, keys, and parameters.
 | Highest client performance | `performance` |
 | Russian residential/mobile egress | SOAX or another SOCKS5 provider |
 
+### Validated compatibility
+
+| Path | `v1.0.0` validation |
+|---|---|
+| Ubuntu 24.04 LTS | repeated clean deployments across different VPS providers, reboot, and strict audit |
+| ENTRY–EXIT | fresh AWG 3+ handshake, coordinated MTU, and post-reboot recovery |
+| iOS | `mobile` profile on the dedicated UDP/8443 interface in the official AmneziaWG client |
+| KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
+| RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
+
+This matrix records scenarios that were actually exercised. It cannot guarantee
+identical behavior across every carrier, hosting provider, and client version.
+
 ```bash
 vpn-user phone balanced
 vpn-user iphone mobile

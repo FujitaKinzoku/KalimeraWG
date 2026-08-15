@@ -1,0 +1,75 @@
+name: Сообщение об ошибке
+description: Воспроизводимая ошибка установки, обновления или работы каскада
+title: "[Ошибка]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Не публикуйте ключи, PSK, пароли, токены, клиентские конфигурации, IP-адреса и необезличенные журналы. Об уязвимости сообщайте приватно через Security Advisory.
+  - type: input
+    id: version
+    attributes:
+      label: Версия KalimeraWG
+      description: Результат `./deploy --version` или тег выпуска.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: node
+    attributes:
+      label: Где возникла ошибка
+      options:
+        - ENTRY
+        - EXIT
+        - Клиент
+        - Установка или обновление
+        - Не определено
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Окружение
+      description: Обезличенные сведения о VPS, Ubuntu, клиенте или модели роутера.
+      placeholder: Ubuntu 24.04, x86_64; KeeneticOS 5.x
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      placeholder: |
+        1. Выполнить...
+        2. Выбрать...
+        3. Наблюдать...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Обезличенная диагностика
+      description: Добавьте только очищенный вывод `awg-health --strict`, `server-audit` или соответствующей службы.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Проверка безопасности
+      options:
+        - label: Я удалил секреты, публичные IP-адреса и персональные данные.
+          required: true
+        - label: Это обычная ошибка, а не сообщение об уязвимости.
+          required: true
