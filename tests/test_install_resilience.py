@@ -1,4 +1,5 @@
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -6,6 +7,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallResilienceTests(unittest.TestCase):
+    def test_readmes_use_fixed_valid_cascade_diagrams(self) -> None:
+        for readme_name, asset_name in (
+            ("README.md", "cascade-ru.svg"),
+            ("README.en.md", "cascade-en.svg"),
+        ):
+            readme = (ROOT / readme_name).read_text(encoding="utf-8")
+            diagram = ROOT / "assets" / asset_name
+            root = ET.parse(diagram).getroot()
+
+            self.assertIn(f'assets/{asset_name}', readme)
+            self.assertNotIn("```mermaid", readme)
+            self.assertEqual(root.attrib["viewBox"], "0 0 1440 620")
+
     def test_release_version_is_used_by_installer_and_deploy(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")

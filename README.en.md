@@ -45,15 +45,9 @@ branch. Confirm the local version with `./deploy --version`.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    C["VPN client"] -->|"AmneziaWG<br/>UDP/443 or UDP/8443"| E["ENTRY"]
-    E -->|"default/foreign traffic<br/>AWG 3+"| X["EXIT"]
-    X --> I["Internet"]
-    E -->|"RU policy"| R{"RU egress"}
-    R --> W["ENTRY WAN"]
-    R --> P["SOAX / SOCKS5 TUN"]
-```
+<p align="center">
+  <img src="assets/cascade-en.svg" alt="KalimeraWG routing diagram" width="100%">
+</p>
 
 | Segment | Purpose | Default state |
 |---|---|---|
