@@ -932,6 +932,74 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("Изоляция служебного AWG 3+", security_tasks)
         self.assertIn("взаимно изолированы", health)
 
+    def test_no_logs_baseline_keeps_only_volatile_operational_state(self) -> None:
+        root = MODULE_PATH.parents[2]
+        journal = (
+            root / "roles" / "security" / "templates" /
+            "journald-limits.conf.j2"
+        ).read_text(encoding="utf-8")
+        coredump = (
+            root / "roles" / "security" / "templates" /
+            "coredump-no-storage.conf.j2"
+        ).read_text(encoding="utf-8")
+        accounting = (
+            root / "roles" / "security" / "templates" /
+            "volatile-accounting.conf.j2"
+        ).read_text(encoding="utf-8")
+        security_tasks = (
+            root / "roles" / "security" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        fail2ban = (
+            root / "roles" / "fail2ban" / "templates" / "fail2ban.local.j2"
+        ).read_text(encoding="utf-8")
+        dnsmasq = (
+            root / "roles" / "entry_dns" / "templates" /
+            "50-awg-base.conf.j2"
+        ).read_text(encoding="utf-8")
+        resolved = (
+            root / "roles" / "entry_dns" / "templates" /
+            "60-kalimerawg-resolved.conf.j2"
+        ).read_text(encoding="utf-8")
+        unbound = (
+            root / "roles" / "entry_dns" / "templates" /
+            "90-awg-dot.conf.j2"
+        ).read_text(encoding="utf-8")
+        sing_box = (
+            root / "roles" / "sing_box" / "templates" / "config.json.j2"
+        ).read_text(encoding="utf-8")
+        shell = (
+            root / "roles" / "terminal" / "templates" /
+            "kalimera-shell-tools.sh.j2"
+        ).read_text(encoding="utf-8")
+        audit = (
+            root / "roles" / "operations" / "templates" /
+            "server-audit.sh.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Storage=volatile", journal)
+        self.assertIn("ForwardToSyslog=no", journal)
+        self.assertNotIn("SystemMaxUse", journal)
+        self.assertIn("Storage=none", coredump)
+        self.assertIn("ProcessSizeMax=0", coredump)
+        self.assertIn("L+ /var/log/wtmp", accounting)
+        self.assertIn("security_volatile_accounting_dir", accounting)
+        self.assertIn("masked: true", security_tasks)
+        self.assertIn("/var/log/journal", security_tasks)
+        self.assertIn("/root/.bash_history", security_tasks)
+        self.assertIn("src: /dev/null", security_tasks)
+        self.assertIn("dbfile = :memory:", fail2ban)
+        self.assertIn("logtarget = SYSTEMD-JOURNAL", fail2ban)
+        self.assertIn("cache-size=0", dnsmasq)
+        self.assertNotIn("log-queries", dnsmasq)
+        self.assertIn("Cache=no", resolved)
+        self.assertIn("log-queries: no", unbound)
+        self.assertIn("log-replies: no", unbound)
+        self.assertIn('"disabled": true', sing_box)
+        self.assertIn('"disable_cache": true', sing_box)
+        self.assertIn("export HISTFILE=/dev/null", shell)
+        self.assertIn("постоянные журналы активности отсутствуют", audit)
+        self.assertIn("/root/.wget-hsts", audit)
+
     def test_amnezia_ppa_and_managed_integrity_are_verified(self) -> None:
         root = MODULE_PATH.parents[2]
         awg_defaults = (

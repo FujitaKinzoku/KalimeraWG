@@ -15,7 +15,12 @@ managed_files() {
     done <<'EOF'
 /etc/sysctl.d/90-awg-managed.conf
 /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
+/etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf
+/etc/tmpfiles.d/90-kalimerawg-volatile-accounting.conf
+/etc/fail2ban/fail2ban.local
+/etc/fail2ban/jail.d/zz-awg-sshd.local
 /etc/ssh/sshd_config.d/00-awg-managed.conf
+/etc/profile.d/kalimera-shell-tools.sh
 /usr/local/sbin/awg-health
 /usr/local/sbin/server-audit
 /usr/local/sbin/awg-managed-integrity
@@ -25,6 +30,9 @@ managed_files() {
 /etc/systemd/system/awg-server-audit.service
 /etc/systemd/system/awg-server-audit.timer
 {% if awg_node_role == 'entry' %}
+/etc/dnsmasq.d/50-awg-base.conf
+/etc/systemd/resolved.conf.d/60-kalimerawg.conf
+/etc/unbound/unbound.conf.d/90-awg-dot.conf
 /usr/local/sbin/awg-entry-routing
 /usr/local/sbin/awg-dns-policy
 /usr/local/sbin/awg-local-peer-apply

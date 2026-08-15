@@ -45,6 +45,63 @@ service_inactive() {
     ! systemctl is-active --quiet "$1"
 }
 
+journald_is_volatile() {
+    local effective
+    effective="$(systemd-analyze cat-config systemd/journald.conf)"
+    grep -Fxq 'Storage=volatile' <<<"$effective"
+}
+
+rsyslog_is_disabled() {
+    local enabled
+    ! systemctl is-active --quiet rsyslog.service &&
+        enabled="$(systemctl is-enabled rsyslog.service 2>/dev/null || true)" &&
+        [[ "$enabled" == masked || "$enabled" == not-found ]]
+}
+
+coredump_storage_is_disabled() {
+    local effective
+    effective="$(systemd-analyze cat-config systemd/coredump.conf)"
+    grep -Fxq 'Storage=none' <<<"$effective"
+}
+
+login_accounting_is_volatile() {
+    local name
+    for name in wtmp btmp lastlog faillog; do
+        [[ "$(readlink -f "/var/log/$name")" == "/run/kalimerawg-accounting/$name" ]] ||
+            return 1
+    done
+}
+
+fail2ban_state_is_volatile() {
+    grep -Eq '^[[:space:]]*logtarget[[:space:]]*=[[:space:]]*SYSTEMD-JOURNAL[[:space:]]*$' \
+        /etc/fail2ban/fail2ban.local &&
+        grep -Eq '^[[:space:]]*dbfile[[:space:]]*=[[:space:]]*:memory:[[:space:]]*$' \
+            /etc/fail2ban/fail2ban.local
+}
+
+ufw_logging_is_disabled() {
+    ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
+}
+
+{% if awg_node_role == 'entry' %}
+dns_no_logs_policy_is_active() {
+    grep -Fxq 'cache-size=0' /etc/dnsmasq.d/50-awg-base.conf &&
+        ! grep -Eq '^[[:space:]]*log-queries([=[:space:]]|$)' \
+            /etc/dnsmasq.d/50-awg-base.conf &&
+        grep -Fxq 'Cache=no' {{ entry_dns_resolved_dropin_path | quote }} &&
+        grep -Eq '^[[:space:]]*log-queries:[[:space:]]*no[[:space:]]*$' \
+            /etc/unbound/unbound.conf.d/90-awg-dot.conf &&
+        grep -Eq '^[[:space:]]*log-replies:[[:space:]]*no[[:space:]]*$' \
+            /etc/unbound/unbound.conf.d/90-awg-dot.conf
+}
+
+sing_box_no_logs_policy_is_active() {
+    [[ ! -e /etc/sing-box/config.json ]] ||
+        jq -e '.log.disabled == true and .dns.disable_cache == true' \
+            /etc/sing-box/config.json >/dev/null
+}
+{% endif %}
+
 handshake_recent() {
     local interface="$1" max_age="$2" tool="${3:-awg}" latest now
     latest="$("$tool" show "$interface" latest-handshakes |
@@ -153,6 +210,11 @@ check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
 check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
 check 'UFW активен' ufw_active
 check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check 'журналирование UFW отключено' ufw_logging_is_disabled
+check 'systemd journal хранится только в RAM' journald_is_volatile
+check 'постоянный rsyslog отключён' rsyslog_is_disabled
+check 'coredump не сохраняются' coredump_storage_is_disabled
+check 'учёт входов хранится только в RAM' login_accounting_is_volatile
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
     ufw_interserver_restricted \
@@ -167,6 +229,7 @@ check 'UFW не разрешает межсерверный AWG для всех 
 {% endif %}
 {% if awg_enable_fail2ban | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 {% else %}
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
@@ -236,6 +299,8 @@ check 'системный резолвер использует локальны
 check 'системное разрешение имён' getent ahostsv4 example.com
 check 'синтаксис dnsmasq' dnsmasq --test
 check 'синтаксис Unbound' unbound-checkconf
+check 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
+check 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
 check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port }} example.com A
 check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered

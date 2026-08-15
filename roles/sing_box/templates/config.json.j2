@@ -5,8 +5,7 @@
 {% set doh_tls_name = dns_override.tls_name | default(entry_dns_doh_tls_name) %}
 {
   "log": {
-    "level": "info",
-    "timestamp": true
+    "disabled": true
   },
   "inbounds": [
     {
@@ -84,6 +83,6 @@
     ],
     "final": "yandex-doh-ru",
     "strategy": "ipv4_only",
-    "disable_cache": false
+    "disable_cache": true
   }
 }

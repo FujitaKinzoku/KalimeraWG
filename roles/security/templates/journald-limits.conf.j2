@@ -1,6 +1,11 @@
 [Journal]
-SystemMaxUse={{ security_journal_system_max_use }}
+Storage=volatile
 RuntimeMaxUse={{ security_journal_runtime_max_use }}
 MaxRetentionSec={{ security_journal_max_retention }}
+MaxFileSec=15min
 RateLimitIntervalSec=30s
 RateLimitBurst=1000
+ForwardToSyslog=no
+ForwardToKMsg=no
+ForwardToConsole=no
+ForwardToWall=no

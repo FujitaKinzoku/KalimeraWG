@@ -3,6 +3,13 @@
 [[ -z ${KALIMERA_SHELL_TOOLS_LOADED:-} ]] || return 0
 KALIMERA_SHELL_TOOLS_LOADED=1
 
+# Команды администратора не сохраняются между сеансами.
+export HISTFILE=/dev/null
+export HISTSIZE=1000
+export HISTFILESIZE=0
+history -c 2>/dev/null || true
+export LESSHISTFILE=-
+
 export LESS='-R -F -X'
 export SYSTEMD_COLORS=1
 export SYSTEMD_PAGERSECURE=1

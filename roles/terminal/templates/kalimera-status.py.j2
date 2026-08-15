@@ -170,6 +170,30 @@ def ssh_key_only() -> bool:
     )
 
 
+def no_logs_baseline() -> bool:
+    expected = {
+        Path("/etc/systemd/journald.conf.d/90-kalimerawg-limits.conf"): (
+            "Storage=volatile",
+            "ForwardToSyslog=no",
+        ),
+        Path("/etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf"): (
+            "Storage=none",
+            "ProcessSizeMax=0",
+        ),
+        Path("/etc/fail2ban/fail2ban.local"): (
+            "logtarget = SYSTEMD-JOURNAL",
+            "dbfile = :memory:",
+        ),
+    }
+    try:
+        return all(
+            all(value in path.read_text(encoding="utf-8") for value in values)
+            for path, values in expected.items()
+        )
+    except OSError:
+        return False
+
+
 def state_word(active: bool, available: bool = True) -> str:
     if not available:
         return "не предусмотрен текущей конфигурацией"
@@ -387,6 +411,7 @@ def main() -> int:
     ufw_ok = ufw_active is not None and "Status: active" in ufw_active.stdout
     fail2ban_ok = service_active("fail2ban.service")
     ssh_ok = ssh_key_only()
+    no_logs_ok = no_logs_baseline()
     audit_level, audit_text = audit_state()
     entry_policy = (
         f"TCP/{CONFIG['entry_ssh_port']} SSH; UDP/{CONFIG['client_port']} клиенты; "
@@ -405,6 +430,11 @@ def main() -> int:
             ("Локальный UFW", "активен" if ufw_ok else "неактивен или недоступен", "OK" if ufw_ok else "FAIL"),
             ("Доступ SSH", "только по публичному ключу" if ssh_ok else "политика key-only не подтверждена", "OK" if ssh_ok else "WARN"),
             ("Fail2Ban", "активен" if fail2ban_ok else "неактивен", "OK" if fail2ban_ok else "FAIL"),
+            (
+                "No-logs",
+                "активность не сохраняется на диск" if no_logs_ok else "политика не подтверждена",
+                "OK" if no_logs_ok else "FAIL",
+            ),
             ("Полная проверка", audit_text, audit_level),
         ],
     )

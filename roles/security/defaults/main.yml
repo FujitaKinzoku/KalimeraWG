@@ -37,7 +37,9 @@ security_ufw_authoritative: true
 security_ufw_state_dir: /var/lib/awg-iac/security
 security_ufw_policy_marker: "{{ security_ufw_state_dir }}/ufw-policy.sha256"
 security_journald_dropin_path: /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
-security_journal_system_max_use: 256M
-security_journal_runtime_max_use: 64M
-security_journal_max_retention: 14day
-security_ufw_logging_level: low
+security_journal_runtime_max_use: 32M
+security_journal_max_retention: 2h
+security_coredump_dropin_path: /etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf
+security_volatile_accounting_tmpfiles_path: /etc/tmpfiles.d/90-kalimerawg-volatile-accounting.conf
+security_volatile_accounting_dir: /run/kalimerawg-accounting
+security_ufw_logging_level: 'off'

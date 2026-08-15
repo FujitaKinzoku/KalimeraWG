@@ -244,7 +244,7 @@
     group: root
     mode: "0755"
 
-- name: Ограничение размера и срока хранения системного журнала
+- name: Перевод системного журнала в ограниченное хранилище RAM
   ansible.builtin.template:
     src: journald-limits.conf.j2
     dest: "{{ security_journald_dropin_path }}"
@@ -252,6 +252,109 @@
     group: root
     mode: "0644"
   notify: Перезагрузить journald
+
+- name: Создание каталога политики coredump
+  ansible.builtin.file:
+    path: "{{ security_coredump_dropin_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Запрет постоянного хранения coredump
+  ansible.builtin.template:
+    src: coredump-no-storage.conf.j2
+    dest: "{{ security_coredump_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Настройка временного учёта входов только в RAM
+  ansible.builtin.template:
+    src: volatile-accounting.conf.j2
+    dest: "{{ security_volatile_accounting_tmpfiles_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Применение временного учёта входов
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-tmpfiles
+      - --create
+      - --remove
+      - "{{ security_volatile_accounting_tmpfiles_path }}"
+  changed_when: false
+
+- name: Отключение постоянного syslog
+  ansible.builtin.systemd_service:
+    name: rsyslog.service
+    enabled: false
+    state: stopped
+    masked: true
+  failed_when: false
+
+- name: Применение политики журнала перед удалением прежних записей
+  ansible.builtin.meta: flush_handlers
+
+- name: Удаление прежнего постоянного systemd journal
+  ansible.builtin.file:
+    path: /var/log/journal
+    state: absent
+
+- name: Поиск прежних журналов активности
+  ansible.builtin.find:
+    paths: /var/log
+    recurse: false
+    file_type: file
+    patterns:
+      - auth.log*
+      - syslog*
+      - kern.log*
+      - ufw.log*
+      - fail2ban.log*
+  register: security_persistent_activity_logs
+
+- name: Удаление прежних журналов активности
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ security_persistent_activity_logs.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Поиск прежних постоянных coredump
+  ansible.builtin.find:
+    paths: /var/lib/systemd/coredump
+    recurse: false
+    file_type: file
+  register: security_persistent_coredumps
+  failed_when: false
+
+- name: Удаление прежних постоянных coredump
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ security_persistent_coredumps.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Перенаправление локальных историй root в /dev/null
+  ansible.builtin.file:
+    src: /dev/null
+    dest: "{{ item }}"
+    state: link
+    force: true
+  loop:
+    - /root/.bash_history
+    - /root/.lesshst
+    - /root/.viminfo
+    - /root/.nano_history
+    - /root/.python_history
+    - /root/.mysql_history
+    - /root/.psql_history
+    - /root/.sqlite_history
+    - /root/.wget-hsts
 
 - name: "Проверка изоляции межсерверного канала"
   ansible.builtin.assert:
@@ -772,7 +875,7 @@
     policy: deny
     direction: incoming
 
-- name: Включение ограниченного журналирования UFW
+- name: Отключение журналирования UFW
   community.general.ufw:
     logging: "{{ security_ufw_logging_level }}"
 

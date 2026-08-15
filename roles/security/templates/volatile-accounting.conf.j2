@@ -1,0 +1,10 @@
+# Данные о входах существуют только в /run и исчезают при перезагрузке.
+d {{ security_volatile_accounting_dir }} 0755 root root -
+f {{ security_volatile_accounting_dir }}/wtmp 0664 root utmp -
+f {{ security_volatile_accounting_dir }}/btmp 0660 root utmp -
+f {{ security_volatile_accounting_dir }}/lastlog 0664 root utmp -
+f {{ security_volatile_accounting_dir }}/faillog 0600 root root -
+L+ /var/log/wtmp - - - - {{ security_volatile_accounting_dir }}/wtmp
+L+ /var/log/btmp - - - - {{ security_volatile_accounting_dir }}/btmp
+L+ /var/log/lastlog - - - - {{ security_volatile_accounting_dir }}/lastlog
+L+ /var/log/faillog - - - - {{ security_volatile_accounting_dir }}/faillog

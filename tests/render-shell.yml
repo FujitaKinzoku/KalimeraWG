@@ -186,6 +186,7 @@
             'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status.stdout or
             'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' not in rendered_kalimera_status.stdout or
             'ЗАЩИТА ВНЕШНИХ ИНТЕРФЕЙСОВ' not in rendered_kalimera_status.stdout or
+            'No-logs' not in rendered_kalimera_status.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status.stdout or
             'VPN-КЛИЕНТЫ' not in rendered_kalimera_status.stdout
 
@@ -242,6 +243,7 @@
             rendered_kalimera_status_exit.rc != 0 or
             'ПОДКЛЮЧЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status_exit.stdout or
+            'No-logs' not in rendered_kalimera_status_exit.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status_exit.stdout or
             'БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_exit.stdout

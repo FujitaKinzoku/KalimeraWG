@@ -124,6 +124,7 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | Updates | candidate validation, exact applied-version lock, automatic rollback |
 | Kernel | headers, DKMS and `modinfo` verified for current and next kernels |
 | DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience |
+| No-logs | journal and login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
 | AWG3 failures | bounded retries and sanitized diagnostics without key material |
 | Repository | Gitleaks plus YAML, Ansible, Shell, and Python checks |
 

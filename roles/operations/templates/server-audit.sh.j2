@@ -126,12 +126,79 @@ known_public_listeners_only() {
     done < <(ss -H -lntu)
 }
 
+journald_is_volatile() {
+    local effective
+    effective="$(systemd-analyze cat-config systemd/journald.conf)"
+    grep -Fxq 'Storage=volatile' <<<"$effective" &&
+        grep -Fxq 'ForwardToSyslog=no' <<<"$effective"
+}
+
+rsyslog_is_disabled() {
+    local enabled
+    ! systemctl is-active --quiet rsyslog.service &&
+        enabled="$(systemctl is-enabled rsyslog.service 2>/dev/null || true)" &&
+        [[ "$enabled" == masked || "$enabled" == not-found ]]
+}
+
+coredump_storage_is_disabled() {
+    local effective
+    effective="$(systemd-analyze cat-config systemd/coredump.conf)"
+    grep -Fxq 'Storage=none' <<<"$effective" &&
+        grep -Fxq 'ProcessSizeMax=0' <<<"$effective"
+}
+
+login_accounting_is_volatile() {
+    local name target
+    for name in wtmp btmp lastlog faillog; do
+        target="$(readlink -f "/var/log/$name")"
+        [[ "$target" == "/run/kalimerawg-accounting/$name" ]] || return 1
+    done
+}
+
+fail2ban_state_is_volatile() {
+    grep -Eq '^[[:space:]]*logtarget[[:space:]]*=[[:space:]]*SYSTEMD-JOURNAL[[:space:]]*$' \
+        /etc/fail2ban/fail2ban.local &&
+        grep -Eq '^[[:space:]]*dbfile[[:space:]]*=[[:space:]]*:memory:[[:space:]]*$' \
+            /etc/fail2ban/fail2ban.local
+}
+
+no_persistent_activity_logs() {
+    local file history_file
+    if [[ -d /var/log/journal ]] &&
+       find /var/log/journal -type f -print -quit | grep -q .; then
+        return 1
+    fi
+    for file in /var/log/auth.log* /var/log/syslog* /var/log/kern.log* \
+                /var/log/ufw.log* /var/log/fail2ban.log* \
+                /var/lib/fail2ban/fail2ban.sqlite3*; do
+        [[ ! -s "$file" ]] || return 1
+    done
+    for history_file in \
+        /root/.bash_history \
+        /root/.lesshst \
+        /root/.viminfo \
+        /root/.nano_history \
+        /root/.python_history \
+        /root/.mysql_history \
+        /root/.psql_history \
+        /root/.sqlite_history \
+        /root/.wget-hsts; do
+        [[ "$(readlink -f "$history_file")" == /dev/null ]] || return 1
+    done
+}
+
 record 'строгая проверка AWG' {{ awg_health_script_path | quote }} --strict
 record 'корневой раздел заполнен менее чем на 90%' disk_ok
 record 'нет неисправных модулей systemd' no_failed_units
 record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
-record 'ограниченное журналирование UFW активно' bash -c "ufw status verbose | grep -Eq '^Logging:[[:space:]]+on \\(low\\)'"
+record 'журналирование UFW отключено' bash -c "ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'"
 record 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+record 'systemd journal хранится только в RAM' journald_is_volatile
+record 'постоянный rsyslog отключён' rsyslog_is_disabled
+record 'coredump не сохраняются' coredump_storage_is_disabled
+record 'учёт входов хранится только в RAM' login_accounting_is_volatile
+record 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
+record 'постоянные журналы активности отсутствуют' no_persistent_activity_logs
 record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
 record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
