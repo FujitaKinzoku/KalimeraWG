@@ -298,6 +298,12 @@ clamped to the effective PMTU.
   Git.
 - Automated security updates, health checks, audit and maintenance timers are
   installed.
+- When IPv6 is disabled, active `ifupdown` IPv6 hooks are backed up under
+  `/root/config-backups/security/network` and commented without changing the
+  provider IPv4 address, gateway, DNS, or active network manager.
+- `systemd-networkd-wait-online` is disabled only when the default WAN is
+  explicitly reported as unmanaged by `systemd-networkd`; no running network
+  service is stopped or switched.
 - Before an update completes, KalimeraWG installs headers and verifies the
   AmneziaWG DKMS module for both the running kernel and the next boot kernel,
   preventing a planned reboot from leaving the cascade without its module.

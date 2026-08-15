@@ -22,6 +22,149 @@
     - security_manage_ssh | bool
     - security_admin_authorized_keys | length > 0
 
+- name: "Проверка основной конфигурации ifupdown перед запретом IPv6"
+  ansible.builtin.stat:
+    path: /etc/network/interfaces
+  register: security_ifupdown_main
+  when: security_disable_ipv6 | bool
+
+- name: "Проверка каталога фрагментов ifupdown перед запретом IPv6"
+  ansible.builtin.stat:
+    path: /etc/network/interfaces.d
+  register: security_ifupdown_fragments_dir
+  when: security_disable_ipv6 | bool
+
+- name: "Поиск фрагментов ifupdown перед запретом IPv6"
+  ansible.builtin.find:
+    paths: /etc/network/interfaces.d
+    recurse: false
+    file_type: file
+    hidden: true
+  register: security_ifupdown_fragments
+  when:
+    - security_disable_ipv6 | bool
+    - security_ifupdown_fragments_dir.stat.isdir | default(false)
+
+- name: "Формирование списка конфигураций ifupdown"
+  ansible.builtin.set_fact:
+    security_ifupdown_config_files: >-
+      {{
+        ((['/etc/network/interfaces'] if security_ifupdown_main.stat.exists else []) +
+        (security_ifupdown_fragments.files | default([]) | map(attribute='path') | list)) |
+        unique | list
+      }}
+  when: security_disable_ipv6 | bool
+
+- name: "Поиск несовместимых IPv6-hooks в ifupdown"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/grep
+      - -Eq
+      - "{{ security_ifupdown_ipv6_hook_ere_parts | join('') }}"
+      - "{{ item }}"
+  loop: "{{ security_ifupdown_config_files | default([]) }}"
+  register: security_ifupdown_ipv6_hook_scan
+  changed_when: false
+  failed_when: security_ifupdown_ipv6_hook_scan.rc not in [0, 1]
+  when: security_disable_ipv6 | bool
+
+- name: "Выбор конфигураций ifupdown с несовместимыми IPv6-hooks"
+  ansible.builtin.set_fact:
+    security_ifupdown_ipv6_hook_files: >-
+      {{
+        security_ifupdown_ipv6_hook_scan.results | default([]) |
+        selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) |
+        map(attribute='item') | list
+      }}
+  when: security_disable_ipv6 | bool
+
+- name: "Создание каталогов резервных копий ifupdown"
+  ansible.builtin.file:
+    path: >-
+      {{ security_ifupdown_backup_dir }}/{{ item | dirname | regex_replace('^/', '') }}
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop: "{{ security_ifupdown_ipv6_hook_files | default([]) }}"
+
+- name: "Резервное копирование исходных конфигураций ifupdown"
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: >-
+      {{ security_ifupdown_backup_dir }}/{{ item | regex_replace('^/', '') }}.before-kalimera
+    remote_src: true
+    force: false
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ security_ifupdown_ipv6_hook_files | default([]) }}"
+
+- name: "Отключение несовместимых IPv6-hooks в ifupdown"
+  ansible.builtin.replace:
+    path: "{{ item }}"
+    regexp: "{{ security_ifupdown_ipv6_hook_regexp_parts | join('') }}"
+    replace: |-
+      # KalimeraWG: IPv6-hook отключён, поскольку IPv6 запрещён политикой каскада
+      # \1
+  loop: "{{ security_ifupdown_ipv6_hook_files | default([]) }}"
+
+- name: "Сброс исторических ошибок ifupdown после нормализации IPv6-hooks"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - reset-failed
+      - "ifup@{{ ansible_default_ipv4.interface }}.service"
+      - networking.service
+  changed_when: false
+  failed_when: false
+  when:
+    - security_ifupdown_ipv6_hook_files | default([]) | length > 0
+    - ansible_default_ipv4.interface | default('') | length > 0
+
+- name: "Проверка управления внешним интерфейсом через systemd-networkd"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/networkctl
+      - status
+      - "{{ ansible_default_ipv4.interface }}"
+      - --no-pager
+  environment:
+    LC_ALL: C
+    SYSTEMD_COLORS: "0"
+  register: security_default_interface_networkctl
+  changed_when: false
+  failed_when: false
+  when:
+    - security_disable_unmanaged_networkd_wait_online | bool
+    - ansible_default_ipv4.interface | default('') | length > 0
+
+- name: "Определение внешнего интерфейса, не управляемого systemd-networkd"
+  ansible.builtin.set_fact:
+    security_default_interface_networkd_unmanaged: >-
+      {{
+        security_default_interface_networkctl.rc | default(1) == 0 and
+        'Network File: n/a' in (security_default_interface_networkctl.stdout | default('')) and
+        '(unmanaged)' in (security_default_interface_networkctl.stdout | default(''))
+      }}
+  when: security_disable_unmanaged_networkd_wait_online | bool
+
+- name: "Отключение ожидания интерфейса, не управляемого systemd-networkd"
+  ansible.builtin.systemd_service:
+    name: systemd-networkd-wait-online.service
+    enabled: false
+  when: security_default_interface_networkd_unmanaged | default(false) | bool
+
+- name: "Сброс исторической ошибки ожидания неуправляемого интерфейса"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - reset-failed
+      - systemd-networkd-wait-online.service
+  changed_when: false
+  failed_when: false
+  when: security_default_interface_networkd_unmanaged | default(false) | bool
+
 - name: "Установка: безопасность — этап 3"
   ansible.builtin.template:
     src: sysctl.conf.j2

@@ -1,5 +1,17 @@
 ---
 security_sysctl_file: /etc/sysctl.d/90-awg-managed.conf
+security_disable_ipv6: true
+security_ifupdown_backup_dir: "{{ awg_backup_root }}/security/network"
+security_disable_unmanaged_networkd_wait_online: true
+security_ifupdown_ipv6_hook_ere_parts:
+  - '^[[:space:]]*(pre-up|up|post-up|pre-down|down|post-down)'
+  - '[[:space:]]+ip[[:space:]]+(addr[[:space:]]+(add|del)'
+  - '[[:space:]]+[0-9A-Fa-f:]*:[0-9A-Fa-f:]*/[0-9]+|'
+  - '-6[[:space:]]+route[[:space:]]+(add|del|replace)[[:space:]]+)'
+security_ifupdown_ipv6_hook_regexp_parts:
+  - '^([ \t]*(?:pre-up|up|post-up|pre-down|down|post-down)[ \t]+ip[ \t]+'
+  - '(?:addr[ \t]+(?:add|del)[ \t]+[0-9A-Fa-f:]*:[0-9A-Fa-f:]*/[0-9]+.*|'
+  - '-[ \t]*6[ \t]+route[ \t]+(?:add|del|replace)[ \t]+.*))$'
 security_fail2ban_file: /etc/fail2ban/jail.d/zz-awg-sshd.local
 security_manage_ssh: false
 security_allow_ssh_port_change: false
