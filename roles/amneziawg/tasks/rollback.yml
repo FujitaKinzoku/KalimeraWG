@@ -1,0 +1,61 @@
+---
+- name: Поиск локально сохранённых пакетов предыдущей версии
+  ansible.builtin.find:
+    paths: "{{ amneziawg_component_rollback_dir }}/previous"
+    patterns: "*.deb"
+    file_type: file
+  register: amneziawg_rollback_packages
+
+- name: Восстановление предыдущей версии из локальных пакетов
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/apt-get', '-o', 'DPkg::Lock::Timeout=600', '-y',
+          '--allow-downgrades', '--no-remove', 'install'] +
+         (amneziawg_rollback_packages.files | map(attribute='path') | list) }}
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: amneziawg_rollback_install
+  changed_when: true
+  when: amneziawg_rollback_packages.matched | int > 0
+
+- name: Повторная сборка модуля для текущего ядра после отката
+  ansible.builtin.command:
+    argv: [/usr/sbin/dkms, autoinstall, -k, "{{ ansible_kernel }}"]
+  changed_when: false
+
+- name: Обновление зависимостей модулей после отката
+  ansible.builtin.command:
+    argv: [/usr/sbin/depmod, -a, "{{ ansible_kernel }}"]
+  changed_when: false
+
+- name: Проверка модуля AmneziaWG после отката
+  community.general.modprobe:
+    name: amneziawg
+    state: present
+
+- name: Чтение фактически восстановленных версий AmneziaWG
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dpkg-query
+      - -W
+      - "-f=${Package}=${Version}\n"
+      - "{{ item }}"
+  loop: "{{ amneziawg_package_names }}"
+  register: amneziawg_rollback_versions
+  changed_when: false
+
+- name: Создание каталога локального списка версий после отката
+  ansible.builtin.file:
+    path: "{{ amneziawg_package_lock_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Запись фактически восстановленных версий AmneziaWG
+  ansible.builtin.copy:
+    dest: "{{ amneziawg_package_lock_path }}"
+    content: "{{ amneziawg_rollback_versions.results | map(attribute='stdout') | map('trim') | sort | join('\n') }}\n"
+    owner: root
+    group: root
+    mode: "0644"

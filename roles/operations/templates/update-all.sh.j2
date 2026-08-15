@@ -23,4 +23,8 @@ apt-get -o DPkg::Lock::Timeout=600 -y upgrade
 apt-get -o DPkg::Lock::Timeout=600 -y autoremove
 /usr/local/sbin/awg-kernel-guard
 {{ awg_server_audit_path | quote }}
+printf '%s\n' \
+  'AmneziaWG, sing-box и AWG3 не обновляются обычным update-all.' \
+  'Для транзакционного обновления каскада на управляющей машине используйте:' \
+  '  ./deploy --resume --update-components'
 [[ ! -e /var/run/reboot-required ]] || echo 'Требуется перезагрузка; автоматически она не выполнялась.'

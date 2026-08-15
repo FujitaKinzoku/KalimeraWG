@@ -117,6 +117,15 @@ _ANSI = {
     "white": "\033[1;37m",
 }
 
+AWG3_COMPONENT_KEYS = (
+    "awg3_go_version",
+    "awg3_go_archives",
+    "awg3_go_source_version",
+    "awg3_go_source_commit",
+    "awg3_tools_source_version",
+    "awg3_tools_source_commit",
+)
+
 
 def color_output_enabled() -> bool:
     """Использовать цвет только в настоящем совместимом терминале."""
@@ -210,11 +219,29 @@ def migrate_production_inventory(production: Path) -> bool:
     """Безопасно обновить известные устаревшие несекретные параметры inventory."""
     entry_path = production / "group_vars" / "entry.yml"
     exit_path = production / "group_vars" / "exit.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
     if not entry_path.is_file():
         return False
     entry_vars = load_yaml(entry_path)
     exit_vars = load_yaml(exit_path) if exit_path.is_file() else {}
+    all_vars = load_yaml(all_path) if all_path.is_file() else {}
     changed = False
+    all_changed = False
+
+    awg3_defaults_path = (
+        production.parents[1] / "roles" / "awg3_transit" / "defaults" / "main.yml"
+    )
+    if all_path.is_file() and awg3_defaults_path.is_file():
+        awg3_defaults = load_yaml(awg3_defaults_path)
+        for key in AWG3_COMPONENT_KEYS:
+            if key not in all_vars and key in awg3_defaults:
+                all_vars[key] = awg3_defaults[key]
+                all_changed = True
+        if all_changed:
+            print(
+                "Production inventory обновлён: текущая проверенная сборка AWG3 "
+                "закреплена для воспроизводимых повторных deploy."
+            )
     if (
         entry_vars.get("entry_ru_tun_stack") == "mixed"
         and entry_vars.get("entry_ru_endpoint_independent_nat") is False
@@ -288,7 +315,9 @@ def migrate_production_inventory(production: Path) -> bool:
         yaml_write(entry_path, entry_vars)
         if exit_path.is_file():
             yaml_write(exit_path, exit_vars)
-    return changed
+    if all_changed:
+        yaml_write(all_path, all_vars)
+    return changed or all_changed
 
 
 def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
@@ -496,6 +525,48 @@ def resolve_single_public_ipv4(value: str, label: str) -> str:
     if not ipaddress.ip_address(address).is_global:
         fail(f"{label} должен быть публичным IPv4-адресом")
     return address
+
+
+def detect_local_public_ipv4(route_target: str) -> str:
+    """Определить публичный IPv4 локального интерфейса по реальному маршруту.
+
+    Для локальной установки Ansible должен продолжать использовать loopback,
+    однако клиентам и EXIT нужен внешний адрес ENTRY. Источник маршрута до EXIT
+    точнее имени интерфейса и работает с любым его названием. Если VPS находится
+    за NAT и на интерфейсе нет публичного адреса, автоматическое значение не
+    подставляется: установщик попросит указать опубликованный адрес явно.
+    """
+    targets: list[str] = []
+    try:
+        targets.extend(
+            sorted(
+                {
+                    item[4][0]
+                    for item in socket.getaddrinfo(
+                        route_target, None, socket.AF_INET, socket.SOCK_DGRAM
+                    )
+                }
+            )
+        )
+    except socket.gaierror:
+        pass
+    targets.append("1.1.1.1")
+
+    for target in targets:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            connection.connect((target, 443))
+            candidate = str(connection.getsockname()[0])
+        except OSError:
+            continue
+        finally:
+            connection.close()
+        try:
+            if ipaddress.ip_address(candidate).is_global:
+                return candidate
+        except ValueError:
+            continue
+    return ""
 
 
 def detect_local_ssh_port() -> int:
@@ -951,6 +1022,41 @@ def pin_resolved_awg_packages(all_vars_path: Path, lock_path: Path) -> None:
     yaml_write(all_vars_path, variables)
 
 
+def prepare_component_update(repo: Path, production: Path) -> None:
+    """Выбрать новые AWG-пакеты и проверенный manifest остальных компонентов."""
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    entry_vars_path = production / "group_vars" / "entry.yml"
+    stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
+    awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+    variables = load_yaml(all_vars_path)
+    entry_variables = load_yaml(entry_vars_path)
+    stable_entry = load_yaml(stable_entry_path)
+    awg3_defaults = load_yaml(awg3_defaults_path)
+
+    variables["awg_package_version_mode"] = "candidate"
+    variables.pop("awg_package_versions", None)
+    for key in ("entry_sing_box_version", "entry_sing_box_packages"):
+        if key not in stable_entry:
+            fail(f"Проверенный manifest компонентов не содержит {key}")
+        entry_variables[key] = stable_entry[key]
+    for key in AWG3_COMPONENT_KEYS:
+        if key not in awg3_defaults:
+            fail(f"Проверенный manifest AWG3 не содержит {key}")
+        variables[key] = awg3_defaults[key]
+    yaml_write(all_vars_path, variables)
+    yaml_write(entry_vars_path, entry_variables)
+
+
+def restore_file(path: Path, content: bytes | None) -> None:
+    """Атомарно восстановить файл транзакции либо удалить созданный файл."""
+    if content is None:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.rollback")
+    secure_write(temporary, content)
+    os.replace(temporary, path)
+
+
 def bootstrap_key(
     host: str,
     user: str,
@@ -1213,14 +1319,14 @@ def show_deployment_summary(production: Path) -> None:
             "Клиенты:    vpn-user list/create/delete · awg-old · awg-mobile",
             "Маршруты:   ru-domain · se-domain · entry-domain · ru-direct-ports",
             "Прокси/DNS: ru-proxy · ru-proxy-set · dot-switch · doh-switch",
-            "Система:    maintenance · update-all · f2b-reset",
+            "Система:    maintenance · update-all · ./deploy --resume --update-components · f2b-reset",
         ],
         "blue",
     )
     ui_panel(
         "КОМАНДЫ EXIT СЕРВЕРА",
         [
-            "awg-health · server-audit · maintenance · update-all · f2b-reset",
+            "awg-health · server-audit · maintenance · update-all · обновление компонентов с управляющей машины · f2b-reset",
         ],
         "blue",
     )
@@ -1343,13 +1449,27 @@ def main() -> None:
         action="store_true",
         help="при --resume безопасно добавить отсутствующий mobile AWG UDP/8443",
     )
+    parser.add_argument(
+        "--update-components",
+        action="store_true",
+        help=(
+            "при --resume транзакционно обновить пакеты AmneziaWG и применить "
+            "проверенные версии sing-box/AWG3 из текущего выпуска KalimeraWG"
+        ),
+    )
     args = parser.parse_args()
     if args.mobile_i1_mode and not args.resume:
         parser.error("--mobile-i1-mode используется только вместе с --resume")
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
+    if args.update_components and not args.resume:
+        parser.error("--update-components используется только вместе с --resume")
     if args.terminal_only and (
-        args.resume or args.summary or args.mobile_i1_mode or args.enable_mobile
+        args.resume
+        or args.summary
+        or args.mobile_i1_mode
+        or args.enable_mobile
+        or args.update_components
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
     repo = args.repo_root.resolve()
@@ -1394,6 +1514,7 @@ def main() -> None:
         if (
             all_vars.get("awg_package_version_mode") == "candidate"
             and awg_package_lock.is_file()
+            and not args.update_components
         ):
             pin_resolved_awg_packages(all_vars_path, awg_package_lock)
             all_vars = load_yaml(all_vars_path)
@@ -1405,6 +1526,18 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        if args.update_components:
+            transitioning = [
+                variables
+                for group in ("entry", "exit")
+                for variables in hosts_document["all"]["children"][group]["hosts"].values()
+                if variables.get("security_allow_ssh_port_change", False)
+            ]
+            if transitioning:
+                fail(
+                    "Сначала завершите обычный './deploy --resume' для перехода SSH, "
+                    "затем отдельно запустите обновление компонентов"
+                )
         cleanup_callback = lambda: cleanup_deployment(repo, hosts_path, vault_password)
         atexit.register(cleanup_callback)
         transition_completed = complete_ssh_transition(
@@ -1415,8 +1548,14 @@ def main() -> None:
             mtu_result,
             awg_package_lock,
         )
-        if awg_package_lock.is_file():
+        if awg_package_lock.is_file() and not args.update_components:
             pin_resolved_awg_packages(all_vars_path, awg_package_lock)
+        component_backup: dict[Path, bytes | None] = {}
+        if args.update_components:
+            entry_vars_path = production / "group_vars" / "entry.yml"
+            for path in (all_vars_path, entry_vars_path, awg_package_lock):
+                component_backup[path] = path.read_bytes() if path.is_file() else None
+            prepare_component_update(repo, production)
         final_variables = {
             "awg_enable_fail2ban": True,
             "awg_health_run_during_deploy": False,
@@ -1424,18 +1563,58 @@ def main() -> None:
             "awg_mtu_controller_result_path": str(mtu_result),
             "awg_package_controller_lock_path": str(awg_package_lock),
         }
+        if args.update_components:
+            final_variables["awg_package_refresh"] = True
+            final_variables["awg_package_transaction_id"] = secrets.token_hex(12)
         if transition_completed:
             final_variables.update({"awg_prepare_apt": False, "awg_restore_apt": True})
-        ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
-        if awg_package_lock.is_file():
-            pin_resolved_awg_packages(all_vars_path, awg_package_lock)
-        ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
-        ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
-        ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+        try:
+            ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
+            if awg_package_lock.is_file():
+                pin_resolved_awg_packages(all_vars_path, awg_package_lock)
+            ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+            ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
+            ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+        except SystemExit as update_error:
+            if not args.update_components:
+                raise
+            print(
+                "Обновление компонентов не прошло проверку. "
+                "Выполняется автоматический откат ENTRY и EXIT..."
+            )
+            for path, content in component_backup.items():
+                restore_file(path, content)
+            rollback_variables = dict(final_variables)
+            rollback_variables["awg_package_refresh"] = False
+            rollback_variables["awg_package_rollback"] = True
+            try:
+                ansible(
+                    repo,
+                    hosts_path,
+                    vault_password,
+                    "playbooks/site.yml",
+                    rollback_variables,
+                )
+                ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+            except SystemExit:
+                fail(
+                    "Обновление и автоматический откат завершились ошибкой. "
+                    "Не перезагружайте серверы; используйте сохранённые пакеты в "
+                    "/var/cache/awg-iac/component-rollback и повторите deploy с "
+                    "закреплённым inventory"
+                )
+            for path, content in component_backup.items():
+                restore_file(path, content)
+            cleanup_deployment(repo, hosts_path, vault_password)
+            atexit.unregister(cleanup_callback)
+            fail(f"{update_error}\nПредыдущая рабочая версия компонентов восстановлена.")
         update_saved_client_configs_mtu(state_root / "clients", mtu_result)
         cleanup_deployment(repo, hosts_path, vault_password)
         atexit.unregister(cleanup_callback)
-        print("Существующая конфигурация повторно применена и успешно проверена.")
+        if args.update_components:
+            print("Компоненты каскада обновлены транзакционно и успешно проверены.")
+        else:
+            print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)
         return
     if production.exists():
@@ -1678,7 +1857,17 @@ def main() -> None:
     exit_endpoint = prompt("Публичный адрес AWG EXIT сервера", exit_host)
     require_public_endpoint(exit_endpoint, "AWG endpoint EXIT сервера")
     exit_public_ipv4 = resolve_single_public_ipv4(exit_endpoint, "AWG endpoint EXIT сервера")
-    entry_public_endpoint = prompt("Публичный адрес AWG ENTRY сервера", entry_host)
+    entry_public_default = (
+        detect_local_public_ipv4(exit_host) if local_entry else entry_host
+    )
+    if local_entry and entry_public_default:
+        print(
+            "Автоматически определён внешний IPv4 интерфейса ENTRY: "
+            f"{entry_public_default}"
+        )
+    entry_public_endpoint = prompt(
+        "Публичный адрес AWG ENTRY сервера", entry_public_default
+    )
     require_public_endpoint(entry_public_endpoint, "AWG endpoint ENTRY сервера")
     entry_public_ipv4 = resolve_single_public_ipv4(
         entry_public_endpoint, "AWG endpoint ENTRY сервера"

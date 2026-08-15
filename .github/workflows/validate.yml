@@ -24,13 +24,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck
-          pip install -r requirements.txt yamllint==1.37.1
+          pip install --require-hashes -r requirements.lock
+          pip install yamllint==1.37.1
 
       - name: Установка коллекций Ansible
         run: ansible-galaxy collection install -r requirements.yml
 
       - name: Поиск потенциальных секретов в репозитории
         run: bash scripts/check-secrets.sh
+
+      - name: Независимая проверка истории и содержимого Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Проверка YAML
         run: >-

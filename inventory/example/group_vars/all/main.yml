@@ -16,6 +16,22 @@ awg_interserver_entry_address: 10.77.0.2/32
 # Интерактивный deploy сразу сохраняет точные версии в production inventory.
 awg_package_version_mode: candidate
 
+# Проверенный manifest AWG3 закрепляется в production inventory. Поэтому
+# обычный resume не меняет userspace-движок после обновления самого репозитория;
+# новые значения применяются только через --update-components.
+awg3_go_version: "1.25.12"
+awg3_go_archives:
+  x86_64:
+    filename: go1.25.12.linux-amd64.tar.gz
+    checksum: sha256:234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1
+  aarch64:
+    filename: go1.25.12.linux-arm64.tar.gz
+    checksum: sha256:8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2
+awg3_go_source_version: v3.0.20260805
+awg3_go_source_commit: 08d68cdae27762c3e07f36bbb12d2bad32f81926
+awg3_tools_source_version: v3.0.20260805
+awg3_tools_source_commit: 9f70177d204d5be66c5b043518a57b7d62b3f9d1
+
 # Верхний предел межсерверного MTU; клиентский MTU не превышает 1380 и всегда
 # остаётся меньше либо равен фактически выбранному межсерверному MTU.
 awg3_mtu_ceiling: 1420

@@ -1,4 +1,12 @@
 ---
+- name: Восстановление предыдущих пакетов AmneziaWG после неудачного обновления
+  ansible.builtin.include_tasks: rollback.yml
+  when: awg_package_rollback | bool
+
+- name: Завершение роли после восстановления пакетов AmneziaWG
+  ansible.builtin.meta: end_role
+  when: awg_package_rollback | bool
+
 - name: Подключение PPA-репозитория AmneziaWG
   ansible.builtin.apt_repository:
     repo: "{{ amneziawg_ppa }}"
@@ -24,7 +32,9 @@
   ansible.builtin.stat:
     path: "{{ amneziawg_package_lock_path }}"
   register: amneziawg_existing_lock
-  when: awg_package_version_mode == 'candidate'
+  when:
+    - awg_package_version_mode == 'candidate'
+    - not awg_package_refresh | bool
 
 - name: Чтение ранее закреплённого списка версий AmneziaWG
   ansible.builtin.slurp:
@@ -32,6 +42,7 @@
   register: amneziawg_existing_lock_content
   when:
     - awg_package_version_mode == 'candidate'
+    - not awg_package_refresh | bool
     - amneziawg_existing_lock.stat.exists
 
 - name: Выбор воспроизводимого списка версий AmneziaWG
@@ -41,13 +52,65 @@
          else entry_lock }}
   vars:
     local_lock: >-
-      {{ ((amneziawg_existing_lock_content.content | default('') | b64decode).splitlines() |
+      {{ [] if awg_package_refresh | bool else
+         ((amneziawg_existing_lock_content.content | default('') | b64decode).splitlines() |
           select('match', '^(amneziawg|amneziawg-dkms|amneziawg-tools)=') | list) }}
     entry_lock: >-
       {{ (hostvars[groups['entry'][0]].amneziawg_resolved_packages | default([]))
          if awg_node_role == 'exit' and groups['entry'] | default([]) | length == 1
          else [] }}
   when: awg_package_version_mode == 'candidate'
+
+- name: Очистка каталога отката перед явным обновлением AmneziaWG
+  ansible.builtin.file:
+    path: "{{ amneziawg_component_rollback_dir }}"
+    state: absent
+  when: awg_package_refresh | bool
+
+- name: Создание каталогов транзакционного обновления AmneziaWG
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ amneziawg_component_rollback_dir }}"
+    - "{{ amneziawg_component_rollback_dir }}/previous"
+    - "{{ amneziawg_component_rollback_dir }}/candidate"
+  when: awg_package_refresh | bool
+
+- name: Чтение установленных версий перед обновлением AmneziaWG
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dpkg-query
+      - -W
+      - "-f=${Package}=${Version}\n"
+      - "{{ item }}"
+  loop: "{{ amneziawg_package_names }}"
+  register: amneziawg_installed_before_update
+  changed_when: false
+  when: awg_package_refresh | bool
+
+- name: Проверка полного набора установленных пакетов перед обновлением
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - amneziawg_installed_before_update.results | length == amneziawg_package_names | length
+      - amneziawg_installed_before_update.results | selectattr('rc', 'equalto', 0) | list | length == amneziawg_package_names | length
+    fail_msg: "Нельзя безопасно обновить неполную установку AmneziaWG"
+  when: awg_package_refresh | bool
+
+- name: Предварительная загрузка предыдущих пакетов для гарантированного отката
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/usr/bin/apt-get', 'download'] +
+         (amneziawg_installed_before_update.results | map(attribute='stdout') | map('trim') | list) }}
+    chdir: "{{ amneziawg_component_rollback_dir }}/previous"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  when: awg_package_refresh | bool
 
 - name: Определение необходимости обращения к PPA AmneziaWG
   ansible.builtin.set_fact:
@@ -86,6 +149,15 @@
       - amneziawg_resolved_packages | default([]) | length == amneziawg_package_names | length
     fail_msg: "Подключённый PPA AmneziaWG не предоставляет все необходимые пакеты"
   when: awg_package_version_mode == 'candidate'
+
+- name: Предварительная загрузка новых пакетов до изменения работающей системы
+  ansible.builtin.command:
+    argv: "{{ ['/usr/bin/apt-get', 'download'] + amneziawg_resolved_packages }}"
+    chdir: "{{ amneziawg_component_rollback_dir }}/candidate"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  changed_when: false
+  when: awg_package_refresh | bool
 
 - name: Выбор проверенных закреплённых версий пакетов
   ansible.builtin.set_fact:

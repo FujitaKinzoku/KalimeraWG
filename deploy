@@ -41,7 +41,7 @@ if [[ ! -x "$controller_venv/bin/python" ]]; then
 fi
 
 "$controller_venv/bin/python" -m pip install --disable-pip-version-check -q \
-    -r "$repo_root/requirements.txt"
+    --require-hashes -r "$repo_root/requirements.lock"
 "$controller_venv/bin/ansible-galaxy" collection install \
     -r "$repo_root/requirements.yml" >/dev/null
 
