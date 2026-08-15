@@ -88,7 +88,9 @@ jobs:
         run: ansible-playbook tests/check-runtime-secrets.yml
 
       - name: Проверка восстановления Ed25519 SSH host key
-        run: ansible-playbook tests/check-ssh-host-key.yml
+        run: |
+          sudo install -d -o root -g root -m 0755 /run/sshd
+          ansible-playbook tests/check-ssh-host-key.yml
 
       - name: Проверка systemd credentials шаблонного AWG-интерфейса
         run: systemd-analyze verify tests/systemd/credential-template@demo.service
