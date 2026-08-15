@@ -21,3 +21,9 @@
     name: ssh.service
     state: reloaded
   listen: Безопасно перезагрузить SSH
+
+- name: Перезагрузка systemd-journald после изменения лимитов
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  listen: Перезагрузить journald

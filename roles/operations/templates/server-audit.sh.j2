@@ -10,6 +10,7 @@ case "${1:-}" in
     *) usage >&2; exit 2 ;;
 esac
 failures=0
+warnings=0
 
 record() {
     local label="$1"
@@ -19,6 +20,17 @@ record() {
     else
         [[ "$quiet" == true ]] || printf 'FAIL %s\n' "$label"
         failures=$((failures + 1))
+    fi
+}
+
+record_warn() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        [[ "$quiet" == true ]] || printf 'OK   %s\n' "$label"
+    else
+        [[ "$quiet" == true ]] || printf 'WARN %s\n' "$label"
+        warnings=$((warnings + 1))
     fi
 }
 
@@ -33,13 +45,102 @@ no_failed_units() {
         awk '$1 != "awg-server-audit.service" { found=1 } END { exit !found }'
 }
 
+sensitive_modes_ok() {
+    local file mode
+    while IFS= read -r file; do
+        [[ -e "$file" ]] || continue
+        mode="$(stat -c '%a' "$file")"
+        case "$mode" in
+            600|400) ;;
+            *) return 1 ;;
+        esac
+    done <<'EOF'
+/etc/awg-telegram-monitor.env
+/etc/sing-box/config.json
+EOF
+
+    for file in /etc/amnezia/amneziawg/*.conf /etc/awg/*.conf; do
+        [[ -e "$file" ]] || continue
+        mode="$(stat -c '%a' "$file")"
+        case "$mode" in
+            600|400) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+ssh_baseline_ok() {
+    local effective
+    effective="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1)"
+    grep -qx 'passwordauthentication no' <<<"$effective" &&
+        grep -qx 'kbdinteractiveauthentication no' <<<"$effective" &&
+        grep -qx 'x11forwarding no' <<<"$effective" &&
+        grep -qx 'allowagentforwarding no' <<<"$effective" &&
+        grep -qx 'allowtcpforwarding no' <<<"$effective" &&
+        grep -qx 'permituserenvironment no' <<<"$effective" &&
+        grep -qx 'permituserrc no' <<<"$effective" &&
+        grep -qx 'usedns no' <<<"$effective"
+}
+
+ppa_key_isolated() {
+    grep -Fxq 'Signed-By: /etc/apt/keyrings/amnezia-ppa.asc' \
+        /etc/apt/sources.list.d/amnezia-ppa.sources &&
+        gpg --batch --show-keys --with-colons /etc/apt/keyrings/amnezia-ppa.asc |
+        grep -Fq 'fpr:::::::::75C9DD72C799870E310542E24166F2C257290828:'
+}
+
+apparmor_enabled() {
+    command -v aa-status >/dev/null 2>&1 && aa-status --enabled
+}
+
+no_container_runtime() {
+    local service
+    for service in docker.service podman.service containerd.service; do
+        systemctl is-active --quiet "$service" && return 1
+    done
+    return 0
+}
+
+known_public_listeners_only() {
+    local proto endpoint address port
+    local known_tcp='{{ ssh_listen_port }} {{ ansible_port | default(22) }}'
+{% if awg_node_role == 'entry' %}
+    local known_udp='{{ entry_awg0_listen_port }} {{ entry_mobile_client_listen_port | default(8443) }} {{ entry_legacy_client_listen_port | default(39744) }} {{ awg3_transit_listen_port | default(39745) }}'
+{% else %}
+    local known_udp='{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) }}'
+{% endif %}
+
+    while read -r proto _ _ _ endpoint _; do
+        [[ -n "$endpoint" ]] || continue
+        port="${endpoint##*:}"
+        address="${endpoint%:*}"
+        address="${address#[}"
+        address="${address%]}"
+        case "$address" in
+            127.*|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
+        esac
+        case "$proto" in
+            tcp) [[ " $known_tcp " == *" $port "* ]] || return 1 ;;
+            udp) [[ " $known_udp " == *" $port "* ]] || return 1 ;;
+        esac
+    done < <(ss -H -lntu)
+}
+
 record 'строгая проверка AWG' {{ awg_health_script_path | quote }} --strict
 record 'корневой раздел заполнен менее чем на 90%' disk_ok
 record 'нет неисправных модулей systemd' no_failed_units
 record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
+record 'ограниченное журналирование UFW активно' bash -c "ufw status verbose | grep -Eq '^Logging:[[:space:]]+on \\(low\\)'"
 record 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
+record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
+record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
+record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
+record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled
+record_warn 'контейнерный runtime не расширяет поверхность атаки' no_container_runtime
+record_warn 'не обнаружены неожиданные внешние слушатели' known_public_listeners_only
 
-[[ "$quiet" == true ]] || printf 'Ошибок аудита: %d\n' "$failures"
+[[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then
     systemctl --failed --no-legend --plain --no-pager |
         awk '$1 != "awg-server-audit.service"' || true

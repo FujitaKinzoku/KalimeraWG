@@ -18,6 +18,12 @@ ProtectSystem=strict
 ReadWritePaths=/run
 RestrictSUIDSGID=true
 LockPersonality=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 

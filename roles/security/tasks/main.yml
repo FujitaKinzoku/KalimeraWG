@@ -22,6 +22,58 @@
     - security_manage_ssh | bool
     - security_admin_authorized_keys | length > 0
 
+- name: Проверка публичной части ключа автоматизации на управляющем узле
+  ansible.builtin.stat:
+    path: "{{ ansible_ssh_private_key_file }}.pub"
+  delegate_to: localhost
+  become: false
+  register: security_automation_public_key_file
+  when:
+    - security_manage_ssh | bool
+    - security_restrict_automation_key | bool
+    - security_automation_source_ipv4 | length > 0
+    - ansible_ssh_private_key_file is defined
+
+- name: Проверка разделения административного и автоматического SSH-ключей
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - >-
+        security_admin_authorized_keys |
+        select('search',
+          (lookup('file', ansible_ssh_private_key_file ~ '.pub').split()[1] |
+           regex_escape)) |
+        list | length == 0
+    fail_msg: >-
+      Административный ключ не должен совпадать с ключом awg-iac-production:
+      для восстановления доступа требуется отдельная ключевая пара.
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+
+- name: Удаление неограниченной записи ключа автоматизации
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    state: absent
+    manage_dir: true
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+
+- name: Установка ключа автоматизации с привязкой к управляющему адресу
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    key_options: >-
+      from="{{ security_automation_source_ipv4 }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
+    state: present
+    manage_dir: true
+    exclusive: false
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+
 - name: "Проверка основной конфигурации ifupdown перед запретом IPv6"
   ansible.builtin.stat:
     path: /etc/network/interfaces
@@ -183,6 +235,23 @@
     group: root
     mode: "0644"
   notify: Перезагрузить sysctl
+
+- name: Создание каталога ограничений systemd-journald
+  ansible.builtin.file:
+    path: "{{ security_journald_dropin_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ограничение размера и срока хранения системного журнала
+  ansible.builtin.template:
+    src: journald-limits.conf.j2
+    dest: "{{ security_journald_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить journald
 
 - name: "Проверка изоляции межсерверного канала"
   ansible.builtin.assert:
@@ -566,6 +635,95 @@
     - "{{ entry_ru_proxy_interface }}"
   when: awg_node_role == 'entry'
 
+- name: "Запрет доступа обычных AWG-клиентов к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_client_interface }}"
+    from_ip: "{{ entry_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от AWG
+  when: awg_node_role == 'entry'
+
+- name: "Запрет доступа мобильных AWG-клиентов к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_mobile_client_interface }}"
+    from_ip: "{{ entry_mobile_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от mobile AWG
+  when:
+    - awg_node_role == 'entry'
+    - entry_mobile_client_available | default(false) | bool
+
+- name: "Запрет доступа legacy-клиентов AWG к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_legacy_client_interface }}"
+    from_ip: "{{ entry_legacy_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от legacy AWG
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Запрет доступа клиентских зон к служебной подсети ENTRY-EXIT"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.subnet }}"
+    to_ip: "{{ hostvars[groups['exit'][0]].exit_awg_subnet }}"
+    comment: Изоляция служебного AWG 3+
+  loop: >-
+    {{
+      [{'interface': entry_client_interface, 'subnet': entry_client_subnet}] +
+      ([{'interface': entry_mobile_client_interface, 'subnet': entry_mobile_client_subnet}]
+       if entry_mobile_client_available | default(false) | bool else []) +
+      ([{'interface': entry_legacy_client_interface, 'subnet': entry_legacy_client_subnet}]
+       if entry_legacy_client_available | default(false) | bool else [])
+    }}
+  when: awg_node_role == 'entry'
+
+- name: "Запрет пересылки между клиентскими AWG-зонами"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.source }}"
+    to_ip: "{{ item.destination }}"
+    comment: Изоляция клиентских AWG-зон
+  loop: >-
+    {{
+      ([
+        {'interface': entry_client_interface, 'source': entry_client_subnet,
+         'destination': entry_mobile_client_subnet},
+        {'interface': entry_mobile_client_interface, 'source': entry_mobile_client_subnet,
+         'destination': entry_client_subnet}
+      ] if entry_mobile_client_available | default(false) | bool else []) +
+      ([
+        {'interface': entry_client_interface, 'source': entry_client_subnet,
+         'destination': entry_legacy_client_subnet},
+        {'interface': entry_legacy_client_interface, 'source': entry_legacy_client_subnet,
+         'destination': entry_client_subnet}
+      ] if entry_legacy_client_available | default(false) | bool else []) +
+      ([
+        {'interface': entry_mobile_client_interface, 'source': entry_mobile_client_subnet,
+         'destination': entry_legacy_client_subnet},
+        {'interface': entry_legacy_client_interface, 'source': entry_legacy_client_subnet,
+         'destination': entry_mobile_client_subnet}
+      ] if (entry_mobile_client_available | default(false) | bool and
+            entry_legacy_client_available | default(false) | bool) else [])
+    }}
+  when: awg_node_role == 'entry'
+
 - name: "Разрешение маршрутизации legacy-клиентов AWG"
   community.general.ufw:
     rule: allow
@@ -613,6 +771,10 @@
     state: enabled
     policy: deny
     direction: incoming
+
+- name: Включение ограниченного журналирования UFW
+  community.general.ufw:
+    logging: "{{ security_ufw_logging_level }}"
 
 - name: "Фиксация отпечатка применённой политики UFW"
   ansible.builtin.command:

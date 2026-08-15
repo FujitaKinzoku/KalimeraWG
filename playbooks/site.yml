@@ -487,6 +487,17 @@
     - role: health
       when: awg_adoption_mode == 'apply'
 
+- name: Фиксация контрольных сумм управляемой конфигурации
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Создание манифеста после полного применения ролей
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-managed-integrity, seal]
+      changed_when: true
+      when: awg_adoption_mode == 'apply'
+
 - name: Восстановление автоматических обновлений
   hosts: all
   gather_facts: false

@@ -661,6 +661,7 @@ AWG_CLIENT_PROFILES = {
 
 AWG_QUIC_INITIAL_SIZE = 1200
 AWG_CPS_RANDOM_TAG_MAX = 1000
+AWG_MINIMUM_OUTER_PMTU = 1280
 
 
 def random_between(bounds: tuple[int, int]) -> int:
@@ -691,6 +692,71 @@ def normalize_awg_cps_signature(signature: str) -> str:
         return awg_random_bytes_tags(size)
 
     return re.sub(r"<r ([0-9]+)>", replace, signature)
+
+
+def awg_cps_signature_size(signature: str) -> int:
+    """Проверить CPS-синтаксис и вернуть точный размер сформированного пакета."""
+    if not signature:
+        return 0
+    tags = re.findall(r"<(r [0-9]+|b 0x[0-9A-Fa-f]+)>", signature)
+    if "".join(f"<{tag}>" for tag in tags) != signature:
+        fail("AWG-профиль содержит неподдерживаемый CPS-тег")
+    size = 0
+    for tag in tags:
+        kind, value = tag.split(maxsplit=1)
+        if kind == "r":
+            random_size = int(value)
+            if not 1 <= random_size <= AWG_CPS_RANDOM_TAG_MAX:
+                fail("Размер случайного CPS-тега AWG должен быть от 1 до 1000")
+            size += random_size
+        else:
+            hexadecimal = value[2:]
+            if len(hexadecimal) == 0 or len(hexadecimal) % 2:
+                fail("Hex-значение CPS-тега AWG должно содержать целые байты")
+            size += len(hexadecimal) // 2
+    return size
+
+
+def validate_awg_obfuscation(
+    profile: dict[str, object], outer_pmtu: int = AWG_MINIMUM_OUTER_PMTU
+) -> None:
+    """Отклонить профиль, который нарушает инварианты AWG или безопасный PMTU."""
+    required = {
+        "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+        "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
+    }
+    if set(profile) != required:
+        fail("AWG-профиль содержит неполный или неизвестный набор параметров")
+
+    jc, jmin, jmax = (int(profile[name]) for name in ("jc", "jmin", "jmax"))
+    if not (1 <= jc <= 128 and 0 <= jmin <= jmax and jmax + 28 <= outer_pmtu):
+        fail("Jc/Jmin/Jmax AWG не согласованы с безопасным PMTU")
+
+    s1, s2, s3, s4 = (int(profile[name]) for name in ("s1", "s2", "s3", "s4"))
+    if any(value < 0 or value > 65535 for value in (s1, s2, s3, s4)):
+        fail("S1-S4 AWG выходят за допустимый диапазон")
+    if s1 + 56 == s2 or (s3 > 0 and s2 + 28 == s3):
+        fail("S-параметры AWG создают коллизию размеров служебных сообщений")
+
+    header_intervals: list[tuple[int, int]] = []
+    for name in ("h1", "h2", "h3", "h4"):
+        raw = str(profile[name])
+        match = re.fullmatch(r"([0-9]+)(?:-([0-9]+))?", raw)
+        if match is None:
+            fail(f"{name.upper()} AWG имеет неверный формат")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if not 1 <= start <= end <= 2_147_483_647:
+            fail(f"{name.upper()} AWG выходит за допустимый диапазон")
+        if any(start <= previous_end and previous_start <= end
+               for previous_start, previous_end in header_intervals):
+            fail("H1-H4 AWG пересекаются")
+        header_intervals.append((start, end))
+
+    for name in ("i1", "i2", "i3", "i4", "i5"):
+        packet_size = awg_cps_signature_size(str(profile[name]))
+        if packet_size and packet_size + 28 > outer_pmtu:
+            fail(f"{name.upper()} AWG превышает минимальный внешний PMTU")
 
 
 def awg_quic_initial_signature() -> str:
@@ -750,7 +816,7 @@ def awg_server_obfuscation() -> dict[str, object]:
         header_ranges.append(f"{start}-{end}")
     secrets.SystemRandom().shuffle(header_ranges)
     s1, s2, s3 = awg_message_padding()
-    return {
+    result = {
         "jc": 6,
         "jmin": 64,
         "jmax": 192,
@@ -771,13 +837,15 @@ def awg_server_obfuscation() -> dict[str, object]:
         "i4": awg_quic_short_signature((48, 128)),
         "i5": awg_quic_short_signature((32, 96)),
     }
+    validate_awg_obfuscation(result)
+    return result
 
 
 def awg_legacy_server_obfuscation() -> dict[str, object]:
     """Создать базовый ASC-профиль с одиночными H для KeeneticOS до 5.1."""
     headers = secrets.SystemRandom().sample(range(5, 2_147_483_648), 4)
     s1, s2, _ = awg_message_padding()
-    return {
+    result = {
         "jc": 4,
         "jmin": 64,
         "jmax": 96,
@@ -795,6 +863,8 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
         "i4": "",
         "i5": "",
     }
+    validate_awg_obfuscation(result)
+    return result
 
 
 def awg_mobile_dns_obfuscation() -> dict[str, object]:
@@ -804,7 +874,7 @@ def awg_mobile_dns_obfuscation() -> dict[str, object]:
     icloud.com. I2-I5 намеренно пусты: текущие мобильные клиенты принимают эти
     поля не одинаково, а сервер и клиент обязаны иметь идентичный профиль.
     """
-    return {
+    result = {
         "jc": 5,
         "jmin": 10,
         "jmax": 50,
@@ -825,6 +895,8 @@ def awg_mobile_dns_obfuscation() -> dict[str, object]:
         "i4": "",
         "i5": "",
     }
+    validate_awg_obfuscation(result)
+    return result
 
 
 def awg_mobile_quic_obfuscation() -> dict[str, object]:
@@ -836,6 +908,7 @@ def awg_mobile_quic_obfuscation() -> dict[str, object]:
     """
     result = awg_mobile_dns_obfuscation()
     result["i1"] = awg_quic_initial_signature()
+    validate_awg_obfuscation(result)
     return result
 
 
@@ -899,6 +972,7 @@ def set_mobile_i1_mode(production: Path, mode: str) -> bool:
 def awg3_transit_obfuscation() -> dict[str, object]:
     result = awg_server_obfuscation()
     result.update({"jc": 8, "jmin": 64, "jmax": 256})
+    validate_awg_obfuscation(result)
     return result
 
 
@@ -916,6 +990,7 @@ def awg_client_obfuscation(
         "i1", "i2", "i3", "i4", "i5",
     ):
         result[key] = server_profile[key]
+    validate_awg_obfuscation(result)
     return result
 
 

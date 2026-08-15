@@ -28,7 +28,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes shellcheck
           pip install --require-hashes -r requirements.lock
-          pip install yamllint==1.37.1
 
       - name: Установка коллекций Ansible
         run: ansible-galaxy collection install -r requirements.yml

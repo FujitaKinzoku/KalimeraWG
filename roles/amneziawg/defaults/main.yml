@@ -1,5 +1,11 @@
 ---
-amneziawg_ppa: ppa:amnezia/ppa
+amneziawg_ppa_legacy: ppa:amnezia/ppa
+amneziawg_ppa_uri: https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu
+amneziawg_ppa_key_url: >-
+  https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x75C9DD72C799870E310542E24166F2C257290828
+amneziawg_ppa_fingerprint: 75C9DD72C799870E310542E24166F2C257290828
+amneziawg_ppa_keyring_path: /etc/apt/keyrings/amnezia-ppa.asc
+amneziawg_ppa_source_path: /etc/apt/sources.list.d/amnezia-ppa.sources
 awg_package_version_mode: pinned
 awg_package_refresh: false
 awg_package_rollback: false
@@ -12,6 +18,8 @@ amneziawg_package_names:
   - amneziawg-tools
 amneziawg_package_lock_path: /var/lib/awg-iac/amneziawg-package-lock.txt
 amneziawg_build_packages:
+  - ca-certificates
+  - gnupg
   - build-essential
   - dkms
   - "linux-headers-{{ ansible_kernel }}"

@@ -375,7 +375,9 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("current=degraded", monitor)
         self.assertIn("PROXY_DISABLED_FLAG", monitor)
         self.assertIn("PROXY_MANUAL_FLAG", monitor)
-        self.assertIn("сервер ${host} перезапущен", monitor)
+        self.assertIn("сервер перезапущен", monitor)
+        self.assertNotIn('host="$(hostname', monitor)
+        self.assertIn("[BOT_TOKEN]", monitor)
         self.assertIn("RU-прокси восстановлен", monitor)
         self.assertIn('case "${0##*/}:${1:-}"', monitor)
         self.assertIn("telegram-test:--help", monitor)
@@ -901,6 +903,60 @@ class InteractiveDeployTests(unittest.TestCase):
             "check_value 'ответы на ICMP echo отключены'", health_template
         )
 
+    def test_security_hardening_keeps_one_compatible_baseline(self) -> None:
+        root = MODULE_PATH.parents[2]
+        security_tasks = (
+            root / "roles" / "security" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        security_defaults = (
+            root / "roles" / "security" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
+        ssh = (
+            root / "roles" / "security" / "templates" / "sshd-awg.conf.j2"
+        ).read_text(encoding="utf-8")
+        sysctl = (
+            root / "roles" / "security" / "templates" / "sysctl.conf.j2"
+        ).read_text(encoding="utf-8")
+        health = (
+            root / "roles" / "health" / "templates" / "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("security_restrict_automation_key: true", security_defaults)
+        self.assertIn('from="{{ security_automation_source_ipv4 }}"', security_tasks)
+        self.assertIn("no-port-forwarding", security_tasks)
+        self.assertIn("Banner none", ssh)
+        self.assertIn("PermitUserRC no", ssh)
+        self.assertIn("kernel.unprivileged_bpf_disabled = 1", sysctl)
+        self.assertNotIn("kernel.modules_disabled", sysctl)
+        self.assertIn("169.254.0.0/16", security_tasks)
+        self.assertIn("Изоляция служебного AWG 3+", security_tasks)
+        self.assertIn("взаимно изолированы", health)
+
+    def test_amnezia_ppa_and_managed_integrity_are_verified(self) -> None:
+        root = MODULE_PATH.parents[2]
+        awg_defaults = (
+            root / "roles" / "amneziawg" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
+        awg_tasks = (
+            root / "roles" / "amneziawg" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        source = (
+            root / "roles" / "amneziawg" / "templates" /
+            "amnezia-ppa.sources.j2"
+        ).read_text(encoding="utf-8")
+        audit = (
+            root / "roles" / "operations" / "templates" /
+            "server-audit.sh.j2"
+        ).read_text(encoding="utf-8")
+        site = (root / "playbooks" / "site.yml").read_text(encoding="utf-8")
+
+        fingerprint = "75C9DD72C799870E310542E24166F2C257290828"
+        self.assertIn(fingerprint, awg_defaults)
+        self.assertIn("Проверка полного отпечатка", awg_tasks)
+        self.assertIn("Signed-By: {{ amneziawg_ppa_keyring_path }}", source)
+        self.assertIn("awg_managed_integrity_path", audit)
+        self.assertIn("argv: [/usr/local/sbin/awg-managed-integrity, seal]", site)
+
     def test_awg_key_material_has_wireguard_shape(self) -> None:
         private = MODULE.awg_private_key()
         public = MODULE.awg_public_key(private)
@@ -965,6 +1021,39 @@ class InteractiveDeployTests(unittest.TestCase):
             6 + 8 + 1 + 8 + 3 + 1000 + 174,
             MODULE.AWG_QUIC_INITIAL_SIZE,
         )
+        self.assertEqual(
+            MODULE.awg_cps_signature_size(signature),
+            MODULE.AWG_QUIC_INITIAL_SIZE,
+        )
+
+    def test_generated_profiles_fit_minimum_outer_pmtu(self) -> None:
+        profiles = (
+            MODULE.awg_server_obfuscation(),
+            MODULE.awg_legacy_server_obfuscation(),
+            MODULE.awg_mobile_dns_obfuscation(),
+            MODULE.awg_mobile_quic_obfuscation(),
+            MODULE.awg3_transit_obfuscation(),
+        )
+        for profile in profiles:
+            MODULE.validate_awg_obfuscation(profile)
+            for index in range(1, 6):
+                packet_size = MODULE.awg_cps_signature_size(str(profile[f"i{index}"]))
+                self.assertLessEqual(
+                    packet_size + 28,
+                    MODULE.AWG_MINIMUM_OUTER_PMTU,
+                )
+
+    def test_profile_validator_rejects_overlapping_headers(self) -> None:
+        profile = MODULE.awg_server_obfuscation()
+        profile["h2"] = profile["h1"]
+        with self.assertRaises(SystemExit):
+            MODULE.validate_awg_obfuscation(profile)
+
+    def test_profile_validator_rejects_oversized_cps_packet(self) -> None:
+        profile = MODULE.awg_server_obfuscation()
+        profile["i1"] = "<r 1000><r 300>"
+        with self.assertRaises(SystemExit):
+            MODULE.validate_awg_obfuscation(profile)
 
     def test_oversized_cps_random_tags_are_migrated_without_size_change(self) -> None:
         signature = "<b 0xc10000000110><r 16><b 0x00><r 1161>"

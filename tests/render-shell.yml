@@ -42,6 +42,7 @@
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
         awg_node_role: entry
+        ansible_port: 56777
         terminal_summary_entry_host: 192.0.2.10
         terminal_summary_exit_host: 192.0.2.20
         terminal_summary_entry_user: root
@@ -84,6 +85,8 @@
               dest: awg-ru-proxy-watch
             - src: roles/operations/templates/server-audit.sh.j2
               dest: server-audit-entry
+            - src: roles/operations/templates/awg-managed-integrity.sh.j2
+              dest: awg-managed-integrity-entry
             - src: roles/operations/templates/telegram-monitor.sh.j2
               dest: telegram-monitor-entry
             - src: roles/operations/templates/awg-kernel-guard.sh.j2
@@ -258,6 +261,7 @@
               - "{{ rendered_shell_root }}/awg-ru-zone-update"
               - "{{ rendered_shell_root }}/awg-ru-proxy-watch"
               - "{{ rendered_shell_root }}/server-audit-entry"
+              - "{{ rendered_shell_root }}/awg-managed-integrity-entry"
               - "{{ rendered_shell_root }}/telegram-monitor-entry"
               - "{{ rendered_shell_root }}/awg-kernel-guard"
               - "{{ rendered_shell_root }}/maintenance"

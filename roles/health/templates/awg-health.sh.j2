@@ -101,6 +101,17 @@ ufw_interserver_has_no_broad_allow() {
     )
 }
 
+ufw_client_destination_denied() {
+    local interface="$1" source="$2" destination="$3"
+    iptables -w 10 -C ufw-user-forward -i "$interface" \
+        -s "$source" -d "$destination" -j DROP
+}
+
+ufw_client_zones_isolated() {
+    ufw_client_destination_denied "$1" "$2" "$3" &&
+        ufw_client_destination_denied "$4" "$5" "$6"
+}
+
 route_uses_interface() {
     local destination="$1" mark="$2" interface="$3"
     ip -4 route get "$destination" mark "$mark" | grep -Eq " dev ${interface}( |$)"
@@ -245,16 +256,36 @@ check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
 check 'ipset российских сетей' ipset list ru
 check 'цепочка маршрутизации ENTRY сервера' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -j AWG_RU_PROXY
+check 'клиенты AWG изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_client_interface | quote }} \
+    {{ entry_client_subnet | quote }} 169.254.0.0/16
+check 'клиенты AWG изолированы от служебной сети ENTRY-EXIT' \
+    ufw_client_destination_denied {{ entry_client_interface | quote }} \
+    {{ entry_client_subnet | quote }} {{ hostvars[groups['exit'][0]].exit_awg_subnet | quote }}
 {% if entry_legacy_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     check 'цепочка маршрутизации совместимого интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_legacy_client_interface | quote }} -s {{ entry_legacy_client_subnet | quote }} -j AWG_RU_PROXY
 fi
+check 'legacy-клиенты изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_legacy_client_interface | quote }} \
+    {{ entry_legacy_client_subnet | quote }} 169.254.0.0/16
+check 'обычные и legacy-клиенты взаимно изолированы' ufw_client_zones_isolated \
+    {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
+    {{ entry_legacy_client_subnet | quote }} {{ entry_legacy_client_interface | quote }} \
+    {{ entry_legacy_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
     check 'цепочка маршрутизации мобильного интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -j AWG_RU_PROXY
     check 'принудительный DNS мобильного интерфейса' iptables -w 10 -t nat -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_mobile_client_listen_address ~ ':53') | quote }}
 fi
+check 'mobile-клиенты изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_mobile_client_interface | quote }} \
+    {{ entry_mobile_client_subnet | quote }} 169.254.0.0/16
+check 'обычные и mobile-клиенты взаимно изолированы' ufw_client_zones_isolated \
+    {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
+    {{ entry_mobile_client_subnet | quote }} {{ entry_mobile_client_interface | quote }} \
+    {{ entry_mobile_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 check 'принудительное перенаправление DNS UDP' iptables -w 10 -t nat -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_client_listen_address ~ ':53') | quote }}
 direct_ports_present=false

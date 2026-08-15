@@ -3,6 +3,8 @@ awg_server_audit_path: /usr/local/sbin/server-audit
 awg_health_script_path: /usr/local/sbin/awg-health
 awg_server_audit_service_name: awg-server-audit.service
 awg_server_audit_timer_name: awg-server-audit.timer
+awg_managed_integrity_path: /usr/local/sbin/awg-managed-integrity
+awg_managed_integrity_manifest: /var/lib/awg-iac/security/managed-files.sha256
 awg_telegram_monitor_path: /usr/local/sbin/awg-telegram-monitor
 awg_telegram_monitor_env_path: /etc/awg-telegram-monitor.env
 awg_telegram_monitor_service_name: awg-telegram-monitor.service

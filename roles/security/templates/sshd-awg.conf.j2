@@ -9,9 +9,17 @@ KbdInteractiveAuthentication no
 PubkeyAuthentication yes
 PermitRootLogin {{ ssh_root_login }}
 PermitEmptyPasswords no
+AllowUsers {{ ansible_user }}
+Banner none
+DebianBanner no
 X11Forwarding no
 AllowAgentForwarding no
 AllowTcpForwarding no
 GatewayPorts no
+PermitUserEnvironment no
+PermitUserRC no
+GSSAPIAuthentication no
+UseDNS no
 MaxAuthTries 3
 LoginGraceTime 30
+MaxStartups 10:30:60

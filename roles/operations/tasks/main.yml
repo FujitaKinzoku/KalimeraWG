@@ -50,6 +50,14 @@
     group: root
     mode: "0750"
 
+- name: Установка проверки целостности управляемых файлов
+  ansible.builtin.template:
+    src: awg-managed-integrity.sh.j2
+    dest: "{{ awg_managed_integrity_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
 - name: "Установка: администрирование — этап 6"
   ansible.builtin.template:
     src: "{{ item.src }}"

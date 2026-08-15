@@ -17,6 +17,16 @@ security_manage_ssh: false
 security_allow_ssh_port_change: false
 security_admin_authorized_keys: []
 security_require_admin_authorized_key: false
+security_restrict_automation_key: true
+security_automation_source_ipv4: >-
+  {{
+    '127.0.0.1'
+    if awg_node_role == 'entry' and
+       (ansible_host | default('')) in ['127.0.0.1', 'localhost', '::1']
+    else security_interserver_peer_ipv4
+    if awg_node_role == 'exit'
+    else ''
+  }}
 security_ssh_dropin_path: /etc/ssh/sshd_config.d/00-awg-managed.conf
 security_ssh_legacy_dropin_path: /etc/ssh/sshd_config.d/99-awg-managed.conf
 security_ssh_candidate_path: /run/ansible-sshd-awg.conf.candidate
@@ -26,3 +36,8 @@ security_interserver_listen_port: "{{ awg3_transit_listen_port | default(exit_aw
 security_ufw_authoritative: true
 security_ufw_state_dir: /var/lib/awg-iac/security
 security_ufw_policy_marker: "{{ security_ufw_state_dir }}/ufw-policy.sha256"
+security_journald_dropin_path: /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
+security_journal_system_max_use: 256M
+security_journal_runtime_max_use: 64M
+security_journal_max_retention: 14day
+security_ufw_logging_level: low

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 readonly ENV_FILE={{ awg_telegram_monitor_env_path | quote }}
 readonly STATE_DIR={{ awg_telegram_monitor_state_dir | quote }}
@@ -65,10 +66,9 @@ send_message() {
 }
 
 node="${NODE_ROLE^^}"
-host="$(hostname --fqdn 2>/dev/null || hostname)"
 
 if [[ "$test_mode" == true ]]; then
-    send_message "AWG ${node}: тестовое уведомление получено; мониторинг ${host} доступен"
+    send_message "AWG ${node}: тестовое уведомление получено; мониторинг доступен"
     echo 'Тестовое уведомление Telegram отправлено.'
     exit 0
 fi
@@ -79,7 +79,10 @@ audit_output=''
 if ! audit_output="$({{ awg_server_audit_path | quote }} 2>&1)"; then
     current=failed
     reason="$(printf '%s\n' "$audit_output" |
-        awk '/^FAIL / {print; count++} count == 8 {exit}')"
+        awk '/^FAIL / {print; count++} count == 8 {exit}' |
+        sed -E \
+            -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[IP]/g' \
+            -e 's/[0-9]{6,20}:[A-Za-z0-9_-]{20,}/[BOT_TOKEN]/g')"
 elif [[ "$PROXY_MONITORED" == true &&
         -e "$PROXY_DISABLED_FLAG" && ! -e "$PROXY_MANUAL_FLAG" ]]; then
     current=degraded
@@ -99,13 +102,13 @@ message=''
 if [[ "$boot_changed" == true ]]; then
     case "$current" in
         healthy)
-            message="AWG ${node}: сервер ${host} перезапущен; состояние исправно"
+            message="AWG ${node}: сервер перезапущен; состояние исправно"
             ;;
         degraded)
-            message="AWG ${node}: сервер ${host} перезапущен\n${reason}"
+            message="AWG ${node}: сервер перезапущен\n${reason}"
             ;;
         failed)
-            message="AWG ${node}: сервер ${host} перезапущен; проверка состояния не пройдена\n${reason}"
+            message="AWG ${node}: сервер перезапущен; проверка состояния не пройдена\n${reason}"
             ;;
     esac
 elif [[ "$current" != "$previous" ]]; then
@@ -132,3 +135,4 @@ fi
 
 printf '%s\n' "$current" >"$STATE_DIR/status"
 printf '%s\n' "$boot_id" >"$STATE_DIR/boot-id"
+chmod 0600 "$STATE_DIR/status" "$STATE_DIR/boot-id" "$STATE_DIR/lock"
