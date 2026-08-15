@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Приватное сообщение об уязвимости
+    url: https://github.com/FujitaKinzoku/KalimeraWG/security/advisories/new
+    about: Не публикуйте технические детали уязвимости в обычном Issue.
+  - name: Документация и приёмочная проверка
+    url: https://github.com/FujitaKinzoku/KalimeraWG/tree/main/docs
+    about: Проверьте инструкции и известные границы перед созданием Issue.
