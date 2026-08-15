@@ -69,15 +69,9 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
 
 ## Как устроен каскад
 
-```mermaid
-flowchart LR
-    C["VPN-клиент"] -->|"AmneziaWG<br/>UDP/443 или UDP/8443"| E["ENTRY"]
-    E -->|"обычный и иностранный трафик<br/>AWG 3+"| X["EXIT"]
-    X --> I["Интернет"]
-    E -->|"RU-маршрут"| R{"Выход RU"}
-    R --> W["WAN ENTRY"]
-    R --> P["SOAX / SOCKS5 TUN"]
-```
+<p align="center">
+  <img src="assets/cascade-ru.svg" alt="Схема маршрутизации KalimeraWG" width="100%">
+</p>
 
 | Сегмент | Назначение | Состояние по умолчанию |
 |---|---|---|
