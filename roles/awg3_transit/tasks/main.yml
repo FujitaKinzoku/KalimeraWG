@@ -336,6 +336,10 @@
         enabled: true
         state: started
         daemon_reload: true
+      register: awg3_transit_start_result
+      until: awg3_transit_start_result is succeeded
+      retries: 3
+      delay: 5
 
   rescue:
     - name: "Сбор безопасной диагностики запуска AWG 3+"

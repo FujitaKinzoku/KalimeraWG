@@ -52,6 +52,8 @@ class InstallResilienceTests(unittest.TestCase):
         )
 
         self.assertIn('rescue:', tasks)
+        self.assertIn('until: awg3_transit_start_result is succeeded', tasks)
+        self.assertIn('retries: 3', tasks)
         self.assertIn('journalctl -u "{{ awg3_transit_service_name }}"', tasks)
         self.assertIn('-p ExecMainStatus', tasks)
         self.assertIn('ss -H -lunp', tasks)
