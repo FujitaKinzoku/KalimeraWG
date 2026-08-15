@@ -46,6 +46,20 @@ class InstallResilienceTests(unittest.TestCase):
             content = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn("Acquire::Retries=5", content, relative_path)
 
+    def test_awg3_start_failure_reports_only_sanitized_diagnostics(self) -> None:
+        tasks = (ROOT / "roles/awg3_transit/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('rescue:', tasks)
+        self.assertIn('journalctl -u "{{ awg3_transit_service_name }}"', tasks)
+        self.assertIn('-p ExecMainStatus', tasks)
+        self.assertIn('ss -H -lunp', tasks)
+        self.assertIn('[КЛЮЧ СКРЫТ]', tasks)
+        self.assertIn('Конфигурация и ключевой материал не выводились.', tasks)
+        self.assertNotIn('cat "{{ awg3_transit_config_path }}"', tasks)
+        self.assertNotIn('slurp:', tasks)
+
 
 if __name__ == "__main__":
     unittest.main()
