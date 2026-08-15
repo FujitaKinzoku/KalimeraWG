@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 TIMEOUT = 7
 EXIT_NO_HOST = 68
 EXIT_UNAVAILABLE = 69
+EXIT_NO_PERMISSION = 77
 EXIT_CONFIG = 78
 
 
@@ -76,7 +77,7 @@ def authenticate_socks5(
     connection.sendall(bytes([5, len(methods), *methods]))
     version, method = receive_exact(connection, 2)
     if version != 5 or method == 255:
-        raise RuntimeError("SOCKS5 отклонил доступные методы аутентификации")
+        raise PermissionError("SOCKS5 отклонил доступные методы аутентификации")
     if method == 2:
         user = username.encode("utf-8")
         secret = password.encode("utf-8")
@@ -86,7 +87,7 @@ def authenticate_socks5(
         if receive_exact(connection, 2) != b"\x01\x00":
             raise PermissionError("SOCKS5 отклонил имя пользователя или пароль")
     elif method != 0:
-        raise RuntimeError("SOCKS5 выбрал неподдерживаемый метод аутентификации")
+        raise PermissionError("SOCKS5 выбрал неподдерживаемый метод аутентификации")
 
 
 def udp_supported(config: Path, timeout: int = TIMEOUT) -> bool:
@@ -226,6 +227,9 @@ def main() -> int:
                 arguments.tcp_probe_url,
                 arguments.expected_ip,
             )
+    except PermissionError as error:
+        print(f"Проверка SOCKS5 не выполнена: {error}", file=sys.stderr)
+        return EXIT_NO_PERMISSION
     except socket.gaierror as error:
         print(f"Проверка SOCKS5 не выполнена: {error}", file=sys.stderr)
         return EXIT_NO_HOST

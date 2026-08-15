@@ -133,8 +133,19 @@ class Socks5CapabilityTests(unittest.TestCase):
                      "--state", str(state), "--update-state"],
                 ),
             ):
-                self.assertEqual(MODULE.main(), MODULE.EXIT_UNAVAILABLE)
+                self.assertEqual(MODULE.main(), MODULE.EXIT_NO_PERMISSION)
             self.assertFalse(state.exists())
+
+    def test_operations_role_accepts_only_transient_proxy_errors(self) -> None:
+        tasks = (
+            ROOT / "roles" / "operations" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "operations_ru_proxy_capability.rc not in [0, 68, 69]",
+            tasks,
+        )
+        self.assertIn("content: \"direct\\n\"", tasks)
+        self.assertNotIn("operations_ru_proxy_capability.rc not in [0, 2]", tasks)
 
     def test_explicit_udp_rejection_selects_direct_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

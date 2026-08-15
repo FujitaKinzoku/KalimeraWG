@@ -436,18 +436,26 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("path: /etc/ufw/sysctl.conf", security)
         self.assertIn("line: net/ipv4/icmp_echo_ignore_all=1", security)
 
-    def test_resume_tolerates_only_a_previously_verified_proxy_timeout(self) -> None:
+    def test_deploy_uses_fail_open_only_for_transient_proxy_errors(self) -> None:
         repository = MODULE_PATH.parents[2]
         operations = (repository / "roles/operations/tasks/main.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("operations_ru_proxy_udp_existing_state", operations)
-        self.assertIn("operations_ru_proxy_capability.rc == 2", operations)
+        self.assertIn(
+            "operations_ru_proxy_capability.rc not in [0, 68, 69]",
+            operations,
+        )
+        self.assertIn(
+            "operations_ru_proxy_capability.rc | default(0) in [68, 69]",
+            operations,
+        )
         self.assertIn(
             "not operations_ru_proxy_udp_existing_state.stat.exists", operations
         )
-        self.assertIn("watchdog применит fail-open через ENTRY", operations)
+        self.assertIn("content: \"direct\\n\"", operations)
+        self.assertIn("watchdog применит общий fail-open", operations)
 
     def test_non_tty_ui_never_emits_escape_sequences(self) -> None:
         with (
