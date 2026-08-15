@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallResilienceTests(unittest.TestCase):
+    def test_release_version_is_used_by_installer_and_deploy(self) -> None:
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        deploy = (ROOT / "deploy").read_text(encoding="utf-8")
+
+        self.assertEqual(version, "1.0.0")
+        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v1.0.0}"', installer)
+        self.assertIn('installed_version', installer)
+        self.assertIn('if [[ $# -eq 1 && $1 == --version ]]', deploy)
+
     def test_dns_guard_precedes_apt_timer_changes(self) -> None:
         site = (ROOT / "playbooks/site.yml").read_text(encoding="utf-8")
 

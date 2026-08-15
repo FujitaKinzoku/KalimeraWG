@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly REPOSITORY_URL="https://github.com/FujitaKinzoku/KalimeraWG.git"
-readonly REPOSITORY_BRANCH="main"
+readonly REPOSITORY_REF="${KALIMERA_VERSION:-v1.0.0}"
 readonly INSTALL_DIR="${KALIMERA_DIR:-/root/KalimeraWG}"
 
 fail() {
@@ -29,9 +29,15 @@ apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 \
     install -y --no-install-recommends git ca-certificates
 
 printf '%s\n' 'Загрузка KalimeraWG...'
-git clone --depth 1 --branch "$REPOSITORY_BRANCH" "$REPOSITORY_URL" "$INSTALL_DIR"
+git clone --depth 1 --branch "$REPOSITORY_REF" "$REPOSITORY_URL" "$INSTALL_DIR"
+
+installed_version="$(tr -d '[:space:]' < "$INSTALL_DIR/VERSION")"
+expected_version="${REPOSITORY_REF#v}"
+[[ "$installed_version" == "$expected_version" ]] ||
+    fail "версия файлов $installed_version не совпадает с выбранным выпуском $REPOSITORY_REF"
+
 chmod 0755 "$INSTALL_DIR/deploy"
 
-printf '%s\n' 'Запуск интерактивного развёртывания...'
+printf 'Запуск KalimeraWG v%s...\n' "$installed_version"
 cd "$INSTALL_DIR"
 exec ./deploy
