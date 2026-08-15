@@ -1,0 +1,133 @@
+---
+- name: Проверка восстановления Ed25519 SSH host key
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Создание изолированного временного каталога
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: kalimerawg-ssh-host-key.
+      register: ssh_host_key_test_root
+
+    - name: Испытание создания и восстановления ключа
+      block:
+        - name: Создание временного Ed25519 host key
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -q
+              - -t
+              - ed25519
+              - -N
+              - ""
+              - -f
+              - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key"
+
+        - name: Удаление публичной части для имитации неполного образа VPS
+          ansible.builtin.file:
+            path: "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key.pub"
+            state: absent
+
+        - name: Получение публичной части из закрытой
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -y
+              - -f
+              - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key"
+          register: ssh_host_key_test_public
+          changed_when: false
+          no_log: true
+
+        - name: Восстановление публичного файла
+          ansible.builtin.copy:
+            dest: "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key.pub"
+            content: "{{ ssh_host_key_test_public.stdout | trim }} localhost\n"
+            mode: "0644"
+
+        - name: Проверка fingerprint восстановленного ключа
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -l
+              - -E
+              - sha256
+              - -f
+              - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key.pub"
+          register: ssh_host_key_test_fingerprint
+          changed_when: false
+
+        - name: Проверка прав файлов ключа
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key"
+            - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key.pub"
+          register: ssh_host_key_test_files
+
+        - name: Подтверждение типа, fingerprint и прав
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - ssh_host_key_test_fingerprint.rc == 0
+              - "'ED25519' in ssh_host_key_test_fingerprint.stdout"
+              - ssh_host_key_test_files.results[0].stat.mode == '0600'
+              - ssh_host_key_test_files.results[1].stat.mode == '0644'
+
+        - name: Формирование SSH-конфигурации с проверенным host key
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/security/templates/sshd-awg.conf.j2"
+            dest: "{{ ssh_host_key_test_root.path }}/sshd_config"
+            mode: "0600"
+          vars:
+            security_ssh_host_key_paths:
+              - "{{ ssh_host_key_test_root.path }}/ssh_host_ed25519_key"
+            ssh_listen_port: 2222
+            security_allow_ssh_port_change: false
+            ansible_port: 2222
+            ssh_password_authentication: false
+            ssh_root_login: prohibit-password
+            ansible_user: root
+
+        - name: Проверка синтаксиса конфигурации штатным sshd
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/sshd
+              - -t
+              - -f
+              - "{{ ssh_host_key_test_root.path }}/sshd_config"
+          changed_when: false
+
+        - name: Получение эффективной SSH-политики
+          ansible.builtin.command:
+            argv:
+              - /usr/sbin/sshd
+              - -T
+              - -f
+              - "{{ ssh_host_key_test_root.path }}/sshd_config"
+              - -C
+              - user=root,host=localhost,addr=127.0.0.1
+          register: ssh_host_key_test_effective
+          changed_when: false
+
+        - name: Подтверждение применения Ed25519 host key
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - >-
+                ('hostkey ' ~ ssh_host_key_test_root.path ~
+                 '/ssh_host_ed25519_key') in
+                ssh_host_key_test_effective.stdout_lines
+              - "'port 2222' in ssh_host_key_test_effective.stdout_lines"
+              - >-
+                'passwordauthentication no' in
+                ssh_host_key_test_effective.stdout_lines
+
+      always:
+        - name: Удаление временного ключевого материала
+          ansible.builtin.file:
+            path: "{{ ssh_host_key_test_root.path }}"
+            state: absent
+          changed_when: false

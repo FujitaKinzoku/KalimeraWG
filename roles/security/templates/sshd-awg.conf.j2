@@ -1,4 +1,7 @@
 # Управляется Ansible. Private keys должны находиться за пределами репозитория.
+{% for host_key_path in security_ssh_host_key_paths %}
+HostKey {{ host_key_path }}
+{% endfor %}
 Port {{ ssh_listen_port }}
 {% if (security_allow_ssh_port_change | bool) and ((ansible_port | default(22) | int) != (ssh_listen_port | int)) %}
 # Временный listener двухэтапного перехода. После проверки обновите ansible_port.

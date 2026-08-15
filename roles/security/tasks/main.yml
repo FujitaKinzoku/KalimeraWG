@@ -950,6 +950,88 @@
         group: root
         mode: "0755"
 
+    - name: Проверка наличия закрытого Ed25519 host key
+      ansible.builtin.stat:
+        path: /etc/ssh/ssh_host_ed25519_key
+      register: security_ssh_ed25519_private_key
+
+    - name: Создание отсутствующего Ed25519 host key
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key
+      when: not security_ssh_ed25519_private_key.stat.exists
+      notify: Безопасно перезагрузить SSH
+
+    - name: Ограничение прав закрытого Ed25519 host key
+      ansible.builtin.file:
+        path: /etc/ssh/ssh_host_ed25519_key
+        state: file
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Получение публичной части Ed25519 host key из закрытой
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -y
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key
+      register: security_ssh_ed25519_public_material
+      changed_when: false
+      no_log: true
+
+    - name: Согласование публичной части Ed25519 host key
+      ansible.builtin.copy:
+        dest: /etc/ssh/ssh_host_ed25519_key.pub
+        content: "{{ security_ssh_ed25519_public_material.stdout | trim }} {{ inventory_hostname }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Проверка fingerprint Ed25519 host key
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -l
+          - -E
+          - sha256
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key.pub
+      register: security_ssh_ed25519_fingerprint
+      changed_when: false
+      failed_when: >-
+        security_ssh_ed25519_fingerprint.rc != 0 or
+        'ED25519' not in security_ssh_ed25519_fingerprint.stdout
+
+    - name: Поиск доступных закрытых SSH host keys
+      ansible.builtin.find:
+        paths: /etc/ssh
+        recurse: false
+        file_type: file
+        patterns: ssh_host_*_key
+      register: security_ssh_host_key_files
+
+    - name: Формирование совместимого списка SSH host keys
+      ansible.builtin.set_fact:
+        security_ssh_host_key_paths: >-
+          {{ security_ssh_host_key_files.files |
+             map(attribute='path') | sort | list }}
+
+    - name: Проверка обязательного Ed25519 и доступных host keys
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - security_ssh_host_key_paths | length >= 1
+          - "'/etc/ssh/ssh_host_ed25519_key' in security_ssh_host_key_paths"
+
     - name: "Проверка: безопасность — этап 17"
       ansible.builtin.stat:
         path: "{{ security_ssh_dropin_path }}"
@@ -1111,6 +1193,9 @@
         that:
           - "('port ' ~ (ssh_listen_port | string)) in security_sshd_effective.stdout_lines"
           - "'passwordauthentication no' in security_sshd_effective.stdout_lines"
+          - >-
+            'hostkey /etc/ssh/ssh_host_ed25519_key' in
+            security_sshd_effective.stdout_lines
           - >-
             (ssh_root_login == 'no' and
              'permitrootlogin no' in security_sshd_effective.stdout_lines) or

@@ -26,7 +26,7 @@ jobs:
       - name: Установка инструментов проверки
         run: |
           sudo apt-get update
-          sudo apt-get install --yes shellcheck ssss unbound
+          sudo apt-get install --yes openssh-server shellcheck ssss unbound
           pip install --require-hashes -r requirements.lock
 
       - name: Установка коллекций Ansible
@@ -86,6 +86,9 @@ jobs:
 
       - name: Проверка порогового шифрования, перезагрузки и fail-closed
         run: ansible-playbook tests/check-runtime-secrets.yml
+
+      - name: Проверка восстановления Ed25519 SSH host key
+        run: ansible-playbook tests/check-ssh-host-key.yml
 
       - name: Проверка systemd credentials шаблонного AWG-интерфейса
         run: systemd-analyze verify tests/systemd/credential-template@demo.service
