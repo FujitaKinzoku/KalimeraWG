@@ -43,7 +43,7 @@
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
         runtime_secrets_enabled: true
-        runtime_secrets_cluster_id: 0123456789abcdef0123456789abcdef
+        runtime_secrets_cluster_id: "00000000000000000000000000000000"
         runtime_secrets_peer_inventory_hosts:
           - exit.example.invalid
         vault_runtime_secret_key_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
