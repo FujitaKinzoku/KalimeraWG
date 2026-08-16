@@ -45,7 +45,10 @@
         awg3_transit_enabled: true
         runtime_secrets_enabled: true
         security_manage_admin_account: true
+        security_finalize_admin_access: true
         security_admin_user: kalimera
+        security_ssh_host_key_paths:
+          - "{{ rendered_shell_root }}/ssh_host_ed25519_key"
         runtime_secrets_cluster_id: "00000000000000000000000000000000"
         runtime_secrets_peer_inventory_hosts:
           - exit.example.invalid
@@ -128,6 +131,44 @@
             grep -Fq '/usr/local/libexec/kalimera-admin-command *' "$sudoers_path"
             grep -Fq '/usr/local/libexec/kalimera-share-export get-share' "$sudoers_path"
             ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' "$sudoers_path"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Создание временного Ed25519 host key для проверки SSH
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -q
+              - -t
+              - ed25519
+              - -N
+              - ""
+              - -f
+              - "{{ rendered_shell_root }}/ssh_host_ed25519_key"
+          args:
+            creates: "{{ rendered_shell_root }}/ssh_host_ed25519_key"
+
+        - name: Формирование строгой конфигурации SSH
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/security/templates/sshd-awg.conf.j2"
+            dest: "{{ rendered_shell_root }}/sshd-awg.conf"
+            mode: "0600"
+
+        - name: Проверка синтаксиса и результирующей политики SSH
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            config={{ (rendered_shell_root ~ '/sshd-awg.conf') | quote }}
+            /usr/sbin/sshd -t -f "$config"
+            effective="$(/usr/sbin/sshd -T -f "$config" \
+              -C user=kalimera,host=localhost,addr=127.0.0.1)"
+            grep -qx 'authenticationmethods publickey' <<<"$effective"
+            grep -qx 'authorizedkeysfile .ssh/authorized_keys' <<<"$effective"
+            grep -qx 'requiredrsasize 2048' <<<"$effective"
+            grep -qx 'disableforwarding yes' <<<"$effective"
+            grep -qx 'allowstreamlocalforwarding no' <<<"$effective"
+            ! grep -Eq '^pubkeyacceptedalgorithms .*([,[:space:]])ssh-rsa([,[:space:]]|$)' \
+              <<<"$effective"
           args:
             executable: /bin/bash
           changed_when: false

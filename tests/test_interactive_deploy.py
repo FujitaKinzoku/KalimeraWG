@@ -1167,6 +1167,12 @@ class InteractiveDeployTests(unittest.TestCase):
         )
         self.assertIn("Banner none", ssh)
         self.assertIn("PermitUserRC no", ssh)
+        self.assertIn("AuthenticationMethods publickey", ssh)
+        self.assertIn("AuthorizedKeysFile .ssh/authorized_keys", ssh)
+        self.assertIn("PubkeyAcceptedAlgorithms -ssh-rsa", ssh)
+        self.assertIn("RequiredRSASize 2048", ssh)
+        self.assertIn("DisableForwarding yes", ssh)
+        self.assertIn("AllowStreamLocalForwarding no", ssh)
         self.assertIn("HostKey {{ host_key_path }}", ssh)
         self.assertIn("Создание отсутствующего Ed25519 host key", security_tasks)
         self.assertIn("Получение публичной части Ed25519 host key", security_tasks)
@@ -1183,6 +1189,15 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("169.254.0.0/16", security_tasks)
         self.assertIn("Изоляция служебного AWG 3+", security_tasks)
         self.assertIn("взаимно изолированы", health)
+
+        fail2ban_jail = (
+            root / "roles/fail2ban/templates/fail2ban-sshd.local.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("mode = aggressive", fail2ban_jail)
+        self.assertIn("banaction = ufw", fail2ban_jail)
+        self.assertIn("usedns = no", fail2ban_jail)
+        self.assertIn("ignoreip = 127.0.0.1/8 ::1", fail2ban_jail)
+        self.assertIn("fail2ban_sshd_policy_is_strict", health)
 
     def test_no_logs_baseline_keeps_only_volatile_operational_state(self) -> None:
         root = MODULE_PATH.parents[2]

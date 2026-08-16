@@ -90,13 +90,31 @@ ssh_baseline_ok() {
     effective="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1)"
     grep -qx 'passwordauthentication no' <<<"$effective" &&
         grep -qx 'kbdinteractiveauthentication no' <<<"$effective" &&
+        grep -qx 'authenticationmethods publickey' <<<"$effective" &&
+        grep -qx 'authorizedkeysfile .ssh/authorized_keys' <<<"$effective" &&
+        grep -qx 'requiredrsasize 2048' <<<"$effective" &&
+        ! grep -Eq '^pubkeyacceptedalgorithms .*([,[:space:]])ssh-rsa([,[:space:]]|$)' <<<"$effective" &&
         grep -qx 'x11forwarding no' <<<"$effective" &&
+        grep -qx 'disableforwarding yes' <<<"$effective" &&
         grep -qx 'allowagentforwarding no' <<<"$effective" &&
         grep -qx 'allowtcpforwarding no' <<<"$effective" &&
+        grep -qx 'allowstreamlocalforwarding no' <<<"$effective" &&
         grep -qx 'permituserenvironment no' <<<"$effective" &&
         grep -qx 'permituserrc no' <<<"$effective" &&
         grep -qx 'usedns no' <<<"$effective" &&
         ! grep -qx 'hostkey /etc/ssh/ssh_host_dsa_key' <<<"$effective"
+}
+
+fail2ban_sshd_policy_ok() {
+    local jail=/etc/fail2ban/jail.d/zz-awg-sshd.local
+    fail2ban-client -t >/dev/null 2>&1 &&
+        fail2ban-client status sshd >/dev/null 2>&1 &&
+        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry }}" ]] &&
+        grep -Eq '^[[:space:]]*mode[[:space:]]*=[[:space:]]*aggressive[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
 }
 
 {% if security_manage_admin_account | default(false) | bool %}
@@ -243,6 +261,7 @@ record 'нет неисправных модулей systemd' no_failed_units
 record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
 record 'журналирование UFW отключено' bash -c "ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'"
 record 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+record 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_ok
 record 'systemd journal хранится только в RAM' journald_is_volatile
 record 'постоянный rsyslog отключён' rsyslog_is_disabled
 record 'coredump не сохраняются' coredump_storage_is_disabled

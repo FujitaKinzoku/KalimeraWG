@@ -26,6 +26,14 @@
   when: awg_enable_fail2ban | bool
   notify: Перезапустить итоговый Fail2Ban
 
+- name: "Проверка строгой конфигурации Fail2Ban до перезапуска"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/fail2ban-client
+      - -t
+  changed_when: false
+  when: awg_enable_fail2ban | bool
+
 - name: "Включение: защита Fail2Ban — этап 4"
   ansible.builtin.systemd_service:
     name: fail2ban.service
@@ -35,6 +43,15 @@
 
 - name: "Применение: защита Fail2Ban — этап 5"
   ansible.builtin.meta: flush_handlers
+  when: awg_enable_fail2ban | bool
+
+- name: "Проверка активной защиты SSH через Fail2Ban"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/fail2ban-client
+      - status
+      - sshd
+  changed_when: false
   when: awg_enable_fail2ban | bool
 
 - name: Поиск прежних постоянных журналов Fail2Ban

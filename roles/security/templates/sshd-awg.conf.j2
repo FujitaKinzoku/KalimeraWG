@@ -10,6 +10,10 @@ Port {{ ansible_port | default(22) }}
 PasswordAuthentication {{ ssh_password_authentication | ternary('yes', 'no') }}
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAcceptedAlgorithms -ssh-rsa
+RequiredRSASize 2048
 {% set manage_admin = security_manage_admin_account | default(false) | bool %}
 {% set finalize_admin = security_finalize_admin_access | default(false) | bool %}
 {% set managed_admin = security_admin_user if manage_admin else ansible_user %}
@@ -26,8 +30,10 @@ AllowUsers {{ managed_admin }}
 Banner none
 DebianBanner no
 X11Forwarding no
+DisableForwarding yes
 AllowAgentForwarding no
 AllowTcpForwarding no
+AllowStreamLocalForwarding no
 GatewayPorts no
 PermitUserEnvironment no
 PermitUserRC no

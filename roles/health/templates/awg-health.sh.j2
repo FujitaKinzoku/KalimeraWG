@@ -94,6 +94,19 @@ fail2ban_state_is_volatile() {
             /etc/fail2ban/fail2ban.local
 }
 
+
+fail2ban_sshd_policy_is_strict() {
+    local jail=/etc/fail2ban/jail.d/zz-awg-sshd.local
+    fail2ban-client -t >/dev/null 2>&1 &&
+        fail2ban-client status sshd >/dev/null 2>&1 &&
+        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry }}" ]] &&
+        grep -Eq '^[[:space:]]*mode[[:space:]]*=[[:space:]]*aggressive[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+}
+
 ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
@@ -271,6 +284,7 @@ check 'UFW не разрешает межсерверный AWG для всех 
 {% endif %}
 {% if awg_enable_fail2ban | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
 check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 {% else %}
 printf 'OK   включение Fail2Ban намеренно отложено\n'
