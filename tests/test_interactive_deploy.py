@@ -933,6 +933,11 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("Проверка fingerprint Ed25519 host key", security_tasks)
         self.assertIn("Поиск доступных закрытых SSH host keys", security_tasks)
         self.assertIn("security_ssh_host_key_paths", security_tasks)
+        self.assertNotIn("patterns: ssh_host_*_key", security_tasks)
+        self.assertIn("ssh_host_ed25519_key", security_tasks)
+        self.assertIn("ssh_host_ecdsa_key", security_tasks)
+        self.assertIn("ssh_host_rsa_key", security_tasks)
+        self.assertIn("ssh_host_dsa_key' not in", security_tasks)
         self.assertIn("kernel.unprivileged_bpf_disabled = 1", sysctl)
         self.assertNotIn("kernel.modules_disabled", sysctl)
         self.assertIn("169.254.0.0/16", security_tasks)
@@ -982,9 +987,21 @@ class InteractiveDeployTests(unittest.TestCase):
             root / "roles" / "operations" / "templates" /
             "server-audit.sh.j2"
         ).read_text(encoding="utf-8")
+        health = (
+            root / "roles" / "health" / "templates" /
+            "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+        security_defaults = (
+            root / "roles" / "security" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("Storage=volatile", journal)
         self.assertIn("ForwardToSyslog=no", journal)
+        self.assertIn("zz-kalimerawg-no-logs.conf", security_defaults)
+        self.assertIn("systemd_config_last_value", health)
+        self.assertIn("ForwardToSyslog)\" == no", health)
+        self.assertIn("systemd_config_last_value", audit)
+        self.assertIn("ForwardToSyslog)\" == no", audit)
         self.assertNotIn("SystemMaxUse", journal)
         self.assertIn("Storage=none", coredump)
         self.assertIn("ProcessSizeMax=0", coredump)

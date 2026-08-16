@@ -14,7 +14,7 @@ managed_files() {
         [[ -f "$path" ]] && printf '%s\n' "$path"
     done <<'EOF'
 /etc/sysctl.d/90-awg-managed.conf
-/etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
+{{ security_journald_dropin_path | default('/etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf') }}
 /etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf
 /etc/tmpfiles.d/90-kalimerawg-volatile-accounting.conf
 /etc/fail2ban/fail2ban.local

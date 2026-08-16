@@ -36,7 +36,8 @@ security_interserver_listen_port: "{{ awg3_transit_listen_port | default(exit_aw
 security_ufw_authoritative: true
 security_ufw_state_dir: /var/lib/awg-iac/security
 security_ufw_policy_marker: "{{ security_ufw_state_dir }}/ufw-policy.sha256"
-security_journald_dropin_path: /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
+security_journald_dropin_path: /etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf
+security_journald_legacy_dropin_path: /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
 security_journal_runtime_max_use: 32M
 security_journal_max_retention: 2h
 security_coredump_dropin_path: /etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf

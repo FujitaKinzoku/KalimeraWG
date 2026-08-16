@@ -172,7 +172,7 @@ def ssh_key_only() -> bool:
 
 def no_logs_baseline() -> bool:
     expected = {
-        Path("/etc/systemd/journald.conf.d/90-kalimerawg-limits.conf"): (
+        Path("{{ security_journald_dropin_path | default('/etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf') }}"): (
             "Storage=volatile",
             "ForwardToSyslog=no",
         ),

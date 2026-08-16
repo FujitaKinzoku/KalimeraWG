@@ -45,10 +45,26 @@ service_inactive() {
     ! systemctl is-active --quiet "$1"
 }
 
+systemd_config_last_value() {
+    local config="$1" key="$2"
+    systemd-analyze cat-config "$config" |
+        awk -F= -v wanted="$key" '
+            {
+                name = $1
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+                if (name == wanted) {
+                    value = substr($0, index($0, "=") + 1)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                    last = value
+                }
+            }
+            END { if (last != "") print last }
+        '
+}
+
 journald_is_volatile() {
-    local effective
-    effective="$(systemd-analyze cat-config systemd/journald.conf)"
-    grep -Fxq 'Storage=volatile' <<<"$effective"
+    [[ "$(systemd_config_last_value systemd/journald.conf Storage)" == volatile ]] &&
+        [[ "$(systemd_config_last_value systemd/journald.conf ForwardToSyslog)" == no ]]
 }
 
 rsyslog_is_disabled() {
@@ -59,9 +75,8 @@ rsyslog_is_disabled() {
 }
 
 coredump_storage_is_disabled() {
-    local effective
-    effective="$(systemd-analyze cat-config systemd/coredump.conf)"
-    grep -Fxq 'Storage=none' <<<"$effective"
+    [[ "$(systemd_config_last_value systemd/coredump.conf Storage)" == none ]] &&
+        [[ "$(systemd_config_last_value systemd/coredump.conf ProcessSizeMax)" == 0 ]]
 }
 
 login_accounting_is_volatile() {

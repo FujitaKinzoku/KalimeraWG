@@ -253,6 +253,13 @@
     mode: "0644"
   notify: Перезагрузить journald
 
+- name: Удаление прежнего drop-in с более низким приоритетом journald
+  ansible.builtin.file:
+    path: "{{ security_journald_legacy_dropin_path }}"
+    state: absent
+  when: security_journald_legacy_dropin_path != security_journald_dropin_path
+  notify: Перезагрузить journald
+
 - name: Создание каталога политики coredump
   ansible.builtin.file:
     path: "{{ security_coredump_dropin_path | dirname }}"
@@ -1016,7 +1023,10 @@
         paths: /etc/ssh
         recurse: false
         file_type: file
-        patterns: ssh_host_*_key
+        patterns:
+          - ssh_host_ed25519_key
+          - ssh_host_ecdsa_key
+          - ssh_host_rsa_key
       register: security_ssh_host_key_files
 
     - name: Формирование совместимого списка SSH host keys
@@ -1195,6 +1205,9 @@
           - "'passwordauthentication no' in security_sshd_effective.stdout_lines"
           - >-
             'hostkey /etc/ssh/ssh_host_ed25519_key' in
+            security_sshd_effective.stdout_lines
+          - >-
+            'hostkey /etc/ssh/ssh_host_dsa_key' not in
             security_sshd_effective.stdout_lines
           - >-
             (ssh_root_login == 'no' and
