@@ -159,7 +159,6 @@
           ansible.builtin.shell: |
             set -Eeuo pipefail
             config={{ (rendered_shell_root ~ '/sshd-awg.conf') | quote }}
-            /usr/sbin/sshd -t -f "$config"
             effective="$(/usr/sbin/sshd -T -f "$config" \
               -C user=kalimera,host=localhost,addr=127.0.0.1)"
             grep -qx 'authenticationmethods publickey' <<<"$effective"
