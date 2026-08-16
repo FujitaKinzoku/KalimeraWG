@@ -155,6 +155,14 @@
             dest: "{{ rendered_shell_root }}/sshd-awg.conf"
             mode: "0600"
 
+        - name: Подготовка штатного runtime-каталога OpenSSH
+          ansible.builtin.file:
+            path: /run/sshd
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
         - name: Проверка синтаксиса и результирующей политики SSH
           ansible.builtin.shell: |
             set -Eeuo pipefail
