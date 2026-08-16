@@ -37,8 +37,8 @@ interface_is_up() {
 }
 
 wait_for_interface_up() {
-    local interface="$1" attempt
-    for attempt in {1..50}; do
+    local interface="$1" _
+    for _ in {1..50}; do
         interface_is_up "$interface" && return 0
         sleep 0.1
     done
