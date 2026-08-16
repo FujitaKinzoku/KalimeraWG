@@ -7,7 +7,7 @@ command_name="${1:-}"
 shift
 
 case "$command_name" in
-    kalimera-status|awg-health|server-audit|maintenance|update-all|vpn-user|awg-mobile|awg-old|dns-status|dot-switch|doh-switch|ru-domain|se-domain|entry-domain|ru-proxy|ru-proxy-set|ru-direct-ports|f2b-reset|telegram-test|kalimera-secretctl)
+    kalimera-status|awg-health|server-audit|maintenance|update-all|vpn-user|awg-mobile|awg-old|dns-status|dot-switch|doh-switch|ru-domain|se-domain|entry-domain|ru-proxy|ru-proxy-set|ru-direct-ports|f2b-reset|ssh-key-audit|telegram-test|kalimera-secretctl)
         executable="/usr/local/sbin/$command_name"
         [[ -x "$executable" ]] || { echo "Команда $command_name не установлена на этом сервере." >&2; exit 127; }
         exec "$executable" "$@"

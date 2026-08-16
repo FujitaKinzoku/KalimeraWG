@@ -22,6 +22,7 @@ security_admin_password_hash: ""
 security_root_password_hash: ""
 security_finalize_admin_access: false
 security_controller_repo_path: /root/KalimeraWG
+security_root_authorized_keys_path: /root/.ssh/authorized_keys
 security_admin_command_path: /usr/local/libexec/kalimera-admin-command
 security_runtime_secrets_export_path: >-
   {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}

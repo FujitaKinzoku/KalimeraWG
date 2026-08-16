@@ -72,6 +72,7 @@
     - {src: maintenance.sh.j2, dest: maintenance}
     - {src: update-all.sh.j2, dest: update-all}
     - {src: f2b-reset.sh.j2, dest: f2b-reset}
+    - {src: ssh-key-audit.sh.j2, dest: ssh-key-audit}
 
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard

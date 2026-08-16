@@ -1013,6 +1013,9 @@ class InteractiveDeployTests(unittest.TestCase):
         doh = (templates / "doh-switch.sh.j2").read_text(encoding="utf-8")
         dns_status = (templates / "dns-status.sh.j2").read_text(encoding="utf-8")
         fail2ban = (templates / "f2b-reset.sh.j2").read_text(encoding="utf-8")
+        ssh_key_audit = (templates / "ssh-key-audit.sh.j2").read_text(
+            encoding="utf-8"
+        )
         update_all = (templates / "update-all.sh.j2").read_text(encoding="utf-8")
         maintenance = (templates / "maintenance.sh.j2").read_text(encoding="utf-8")
         entry_dns_tasks = (root / "roles/entry_dns/tasks/main.yml").read_text(
@@ -1067,11 +1070,18 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("{{ awg_server_audit_path | quote }}", update_all)
         self.assertNotIn("systemctl reset-failed", update_all)
         self.assertIn("{{ awg_server_audit_path | quote }} --quiet", maintenance)
+        self.assertIn("ssh-key-audit.sh.j2", operations)
+        self.assertIn("ssh-key-audit delete SHA256:FINGERPRINT", ssh_key_audit)
+        self.assertIn("Для подтверждения введите DELETE", ssh_key_audit)
+        self.assertIn("ssh-key-audit status", terminal_status)
+        self.assertIn("function ssh-key-audit", shell_tools)
 
         telegram = (templates / "telegram-monitor.sh.j2").read_text(
             encoding="utf-8"
         )
         self.assertIn("Использование: telegram-test", telegram)
+        self.assertIn("current=security", telegram)
+        self.assertIn("ssh-key-audit status", telegram)
 
         self.assertIn("kalimera-help.sh.j2", terminal_tasks)
         self.assertIn("kalimera-status.py.j2", terminal_tasks)

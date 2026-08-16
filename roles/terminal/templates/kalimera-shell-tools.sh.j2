@@ -61,6 +61,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function ru-direct-ports { _kalimera_admin ru-direct-ports "$@"; }
     function fail2ban-client { _kalimera_admin fail2ban-client "$@"; }
     function f2b-reset { _kalimera_admin f2b-reset "$@"; }
+    function ssh-key-audit { _kalimera_admin ssh-key-audit "$@"; }
     function telegram-test { _kalimera_admin telegram-test "$@"; }
     function kalimera-secretctl { _kalimera_admin kalimera-secretctl "$@"; }
     function kalimera-deploy { _kalimera_admin kalimera-deploy "$@"; }

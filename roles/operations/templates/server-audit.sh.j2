@@ -135,6 +135,16 @@ root_ssh_policy_ok() {
     grep -qx 'permitrootlogin no' <<<"$effective" &&
         ! grep -Eq '^allowusers .*root(@|[[:space:]]|$)' <<<"$effective"
 }
+
+root_authorized_keys_clean() {
+    local keys={{ security_root_authorized_keys_path | quote }}
+    [[ ! -s "$keys" ]] ||
+        ! awk '
+            /^[[:space:]]*($|#)/ { next }
+            { found=1; exit }
+            END { exit !found }
+        ' "$keys"
+}
 {% endif %}
 
 ppa_key_isolated() {
@@ -276,6 +286,7 @@ record 'усиленная конфигурация SSH применяется' 
 {% if security_manage_admin_account | default(false) | bool %}
 record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
 record 'root SSH полностью отключён' root_ssh_policy_ok
+record_warn 'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' root_authorized_keys_clean
 {% endif %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check

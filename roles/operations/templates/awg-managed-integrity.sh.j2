@@ -27,6 +27,7 @@ managed_files() {
 /usr/local/sbin/awg-kernel-guard
 /usr/local/sbin/maintenance
 /usr/local/sbin/update-all
+/usr/local/sbin/ssh-key-audit
 /etc/systemd/system/awg-server-audit.service
 /etc/systemd/system/awg-server-audit.timer
 {% if runtime_secrets_enabled | default(false) | bool %}

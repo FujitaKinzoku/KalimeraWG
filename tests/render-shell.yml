@@ -47,6 +47,7 @@
         security_manage_admin_account: true
         security_finalize_admin_access: true
         security_admin_user: kalimera
+        security_root_authorized_keys_path: "{{ rendered_shell_root }}/root-authorized_keys"
         security_ssh_host_key_paths:
           - "{{ rendered_shell_root }}/ssh_host_ed25519_key"
         runtime_secrets_cluster_id: "00000000000000000000000000000000"
@@ -212,6 +213,8 @@
               dest: update-all
             - src: roles/operations/templates/f2b-reset.sh.j2
               dest: f2b-reset
+            - src: roles/operations/templates/ssh-key-audit.sh.j2
+              dest: ssh-key-audit
             - src: roles/operations/templates/domain-admin.sh.j2
               dest: domain-admin
             - src: roles/operations/templates/ru-proxy.sh.j2
@@ -318,6 +321,27 @@
               - "{{ playbook_dir }}/../roles/operations/files/ru-proxy-capability.py"
           changed_when: false
 
+        - name: Исполняемая проверка обнаружения постороннего root SSH-ключа
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            root_keys={{ (rendered_shell_root ~ '/root-authorized_keys') | quote }}
+            cp {{ (rendered_shell_root ~ '/ssh_host_ed25519_key.pub') | quote }} "$root_keys"
+            chmod 0600 "$root_keys"
+            if {{ (rendered_shell_root ~ '/ssh-key-audit') | quote }} status >status.out 2>&1; then
+                echo 'Посторонний тестовый root-ключ не был обнаружен.' >&2
+                exit 1
+            fi
+            grep -Fq 'WARN строка 1: 256 SHA256:' status.out
+            grep -Fq 'удалить: ssh-key-audit delete SHA256:' status.out
+            : >"$root_keys"
+            {{ (rendered_shell_root ~ '/ssh-key-audit') | quote }} status |
+                grep -Fq 'не содержит активных ключей'
+            rm -f status.out "$root_keys"
+          args:
+            executable: /bin/bash
+            chdir: "{{ rendered_shell_root }}"
+          changed_when: false
+
         - name: Формирование конфигурации Unbound для Ubuntu 24.04
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/entry_dns/templates/90-awg-dot.conf.j2"
@@ -404,6 +428,7 @@
               - "{{ rendered_shell_root }}/maintenance"
               - "{{ rendered_shell_root }}/update-all"
               - "{{ rendered_shell_root }}/f2b-reset"
+              - "{{ rendered_shell_root }}/ssh-key-audit"
               - "{{ rendered_shell_root }}/domain-admin"
               - "{{ rendered_shell_root }}/ru-proxy"
               - "{{ rendered_shell_root }}/ru-proxy-set"
