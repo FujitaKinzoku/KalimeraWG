@@ -190,6 +190,8 @@
               dest: awg-dns-policy
             - src: roles/awg3_transit/templates/transit-setup.sh.j2
               dest: awg3-transit-setup
+            - src: roles/awg3_transit/templates/transit-restart.sh.j2
+              dest: awg3-transit-restart
             - src: roles/awg3_transit/templates/validate-config.sh.j2
               dest: awg3-validate-config
             - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
@@ -365,6 +367,7 @@
               - "{{ rendered_shell_root }}/awg-local-peer-apply"
               - "{{ rendered_shell_root }}/awg-dns-policy"
               - "{{ rendered_shell_root }}/awg3-transit-setup"
+              - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
               - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/awg-health-entry"

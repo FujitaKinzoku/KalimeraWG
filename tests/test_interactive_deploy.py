@@ -1614,6 +1614,94 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertFalse(all_vars["security_finalize_admin_access"])
             self.assertTrue(all_vars["security_require_admin_authorized_key"])
 
+    def test_undelivered_account_passwords_are_rotated_and_deferred_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_admin_authorized_keys": [
+                        "ssh-ed25519 AAAAfixture admin@example"
+                    ],
+                    "security_manage_admin_account": True,
+                    "security_account_passwords_delivered": False,
+                },
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {"hosts": {"entry-managed": {}}},
+                            "exit": {"hosts": {"exit-managed": {}}},
+                        }
+                    }
+                },
+            )
+            old_hashes = {
+                "vault_entry_kalimera_password_hash": "$6$old$entry-admin",
+                "vault_entry_root_password_hash": "$6$old$entry-root",
+                "vault_exit_kalimera_password_hash": "$6$old$exit-admin",
+                "vault_exit_root_password_hash": "$6$old$exit-root",
+            }
+            vault = VaultLib([("default", VaultSecret(b"test-vault-password"))])
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump(old_hashes).encode("utf-8"))
+            )
+            generated = iter(
+                [
+                    "Aa2!" + "a" * 26,
+                    "Bb3@" + "b" * 26,
+                    "Cc4#" + "c" * 26,
+                    "Dd5$" + "d" * 26,
+                ]
+            )
+            pending: dict[str, str] = {}
+            with (
+                mock.patch.object(
+                    MODULE, "generate_account_password", side_effect=lambda: next(generated)
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$new${password[:4]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords") as show,
+            ):
+                self.assertTrue(
+                    MODULE.ensure_admin_account_material(
+                        production,
+                        password_path,
+                        root / "repo",
+                        pending_passwords=pending,
+                        regenerate_undelivered=True,
+                    )
+                )
+            show.assert_not_called()
+            self.assertEqual(len(pending), 4)
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertTrue(all(value.startswith("$6$new$") for value in decrypted.values()))
+
+            MODULE.mark_account_passwords_delivered(production)
+            second_pending: dict[str, str] = {}
+            self.assertFalse(
+                MODULE.ensure_admin_account_material(
+                    production,
+                    password_path,
+                    root / "repo",
+                    pending_passwords=second_pending,
+                    regenerate_undelivered=True,
+                )
+            )
+            self.assertEqual(second_pending, {})
+
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1793,6 +1881,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertTrue(all_vars["security_manage_admin_account"])
             self.assertEqual(all_vars["security_admin_user"], "kalimera")
             self.assertTrue(all_vars["security_finalize_admin_access"])
+            self.assertTrue(all_vars["security_account_passwords_delivered"])
             self.assertEqual(all_vars["awg_package_version_mode"], "pinned")
             self.assertEqual(all_vars["awg_package_versions"]["amneziawg"], "1.0")
             self.assertTrue(all_vars["runtime_secrets_enabled"])

@@ -935,7 +935,12 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
 
 
 def ensure_admin_account_material(
-    production: Path, vault_password: Path, repo: Path
+    production: Path,
+    vault_password: Path,
+    repo: Path,
+    *,
+    pending_passwords: dict[str, str] | None = None,
+    regenerate_undelivered: bool = False,
 ) -> bool:
     """Добавить рабочие учётные записи в старый inventory без хранения паролей."""
     vault_path = production / "group_vars" / "all" / "vault.yml"
@@ -953,6 +958,11 @@ def ensure_admin_account_material(
     if not isinstance(vault_document, dict):
         fail("Production Vault должен содержать словарь переменных")
 
+    all_vars = load_yaml(all_path)
+    passwords_delivered = all_vars.get("security_account_passwords_delivered")
+    regenerate_all = bool(
+        regenerate_undelivered and passwords_delivered is False
+    )
     required = {
         "vault_entry_kalimera_password_hash": "ENTRY · kalimera",
         "vault_entry_root_password_hash": "ENTRY · root",
@@ -961,11 +971,10 @@ def ensure_admin_account_material(
     }
     generated: dict[str, str] = {}
     for vault_key, label in required.items():
-        if not str(vault_document.get(vault_key, "")).startswith("$6$"):
+        if regenerate_all or not str(vault_document.get(vault_key, "")).startswith("$6$"):
             generated[label] = generate_account_password()
             vault_document[vault_key] = hash_account_password(generated[label])
 
-    all_vars = load_yaml(all_path)
     hosts_document = load_yaml(hosts_path)
     changed = bool(generated)
     transition_required = bool(generated) or not bool(
@@ -1032,9 +1041,21 @@ def ensure_admin_account_material(
         finally:
             temporary.unlink(missing_ok=True)
     if generated:
-        show_generated_account_passwords(generated)
+        if pending_passwords is None:
+            show_generated_account_passwords(generated)
+        else:
+            pending_passwords.update(generated)
         generated.clear()
     return changed
+
+
+def mark_account_passwords_delivered(production: Path) -> None:
+    """Запомнить только факт одноразового показа, не сохраняя сами пароли."""
+    all_path = production / "group_vars" / "all" / "main.yml"
+    values = load_yaml(all_path)
+    if values.get("security_account_passwords_delivered") is not True:
+        values["security_account_passwords_delivered"] = True
+        yaml_write(all_path, values)
 
 
 def remove_bootstrap_become_passwords(
@@ -1827,7 +1848,8 @@ def show_deployment_summary(production: Path) -> None:
         "KALIMERAWG · ИТОГОВАЯ КОНФИГУРАЦИЯ",
         [
             "Установка завершена. Ниже показаны только безопасные данные.",
-            "Закрытые ключи, PSK, пароли и содержимое клиентских конфигураций не выводятся.",
+            "Закрытые ключи, PSK и содержимое клиентских конфигураций не выводятся.",
+            "Одноразовые пароли следуют отдельным блоком после этой сводки.",
         ],
         "green",
     )
@@ -2054,7 +2076,14 @@ def main() -> None:
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
         ensure_runtime_secret_material(production, vault_password)
-        ensure_admin_account_material(production, vault_password, repo)
+        pending_account_passwords: dict[str, str] = {}
+        ensure_admin_account_material(
+            production,
+            vault_password,
+            repo,
+            pending_passwords=pending_account_passwords,
+            regenerate_undelivered=True,
+        )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
         if args.mobile_i1_mode:
@@ -2166,6 +2195,10 @@ def main() -> None:
         else:
             print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)
+        if pending_account_passwords:
+            show_generated_account_passwords(pending_account_passwords)
+            mark_account_passwords_delivered(production)
+            pending_account_passwords.clear()
         return
     if production.exists():
         fail(
@@ -2607,7 +2640,6 @@ def main() -> None:
         label: hash_account_password(password)
         for label, password in account_passwords.items()
     }
-    show_generated_account_passwords(account_passwords)
 
     for key in ("ansible_user", "ansible_port", "ssh_listen_port"):
         all_vars.pop(key, None)
@@ -2622,6 +2654,7 @@ def main() -> None:
             "security_controller_repo_path": str(repo),
             "security_admin_authorized_keys": [admin_public_key],
             "security_require_admin_authorized_key": True,
+            "security_account_passwords_delivered": False,
             "awg_interserver_entry_address": f"{entry_transit_ip}/32",
             "awg_telegram_monitor_enabled": telegram_enabled,
             "runtime_secrets_enabled": True,
@@ -2874,7 +2907,6 @@ def main() -> None:
     plaintext = yaml.safe_dump(vault_document, sort_keys=False).encode()
     encrypted = VaultLib([("default", VaultSecret(vault_secret))]).encrypt(plaintext)
     secure_write(staging / "group_vars" / "all" / "vault.yml", encrypted)
-    del account_passwords
     del account_password_hashes
     obfuscation = initial_client_obfuscation
     client_server_private = (
@@ -3027,6 +3059,9 @@ def main() -> None:
 
     ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")
     show_deployment_summary(production)
+    show_generated_account_passwords(account_passwords)
+    mark_account_passwords_delivered(production)
+    account_passwords.clear()
 
 
 if __name__ == "__main__":

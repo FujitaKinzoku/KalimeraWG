@@ -52,6 +52,7 @@ managed_files() {
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool or awg_node_role == 'exit' %}
 {{ awg3_transit_setup_path }}
+{{ awg3_transit_restart_path | default('/usr/local/sbin/awg3-transit-restart') }}
 /etc/systemd/system/{{ awg3_transit_service_name }}
 {% endif %}
 EOF

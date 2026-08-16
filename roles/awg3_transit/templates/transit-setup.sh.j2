@@ -8,7 +8,24 @@ if [[ -n "${CREDENTIALS_DIRECTORY:-}" &&
     config="${CREDENTIALS_DIRECTORY}/awg3.conf"
 fi
 peer={{ awg3_peer_tunnel_address | quote }}
-if [[ "$mode" == up ]]; then
+socket="/var/run/amneziawg/${iface}.sock"
+
+cleanup_interface() {
+    ip link delete dev "$iface" >/dev/null 2>&1 || true
+    for _ in {1..50}; do
+        ip link show "$iface" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    if ip link show "$iface" >/dev/null 2>&1; then
+        echo "Интерфейс ${iface} не освободился после остановки предыдущего процесса." >&2
+        return 1
+    fi
+    rm -f -- "$socket"
+}
+
+if [[ "$mode" == prepare ]]; then
+    cleanup_interface
+elif [[ "$mode" == up ]]; then
     for _ in {1..50}; do
         ip link show "$iface" >/dev/null 2>&1 && break
         sleep 0.1
@@ -35,7 +52,8 @@ elif [[ "$mode" == down ]]; then
     iptables -w 10 -t mangle -D FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -w 10 -D FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || true
 {% endif %}
+    cleanup_interface
 else
-    echo 'Использование: awg3-transit-setup {up|down}' >&2
+    echo 'Использование: awg3-transit-setup {prepare|up|down}' >&2
     exit 2
 fi

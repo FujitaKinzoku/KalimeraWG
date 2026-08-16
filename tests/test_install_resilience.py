@@ -86,6 +86,47 @@ class InstallResilienceTests(unittest.TestCase):
         self.assertNotIn('cat "{{ awg3_transit_config_path }}"', tasks)
         self.assertNotIn('slurp:', tasks)
 
+    def test_awg3_restart_cleans_stale_userspace_state_and_retries(self) -> None:
+        setup = (ROOT / "roles/awg3_transit/templates/transit-setup.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        unit = (ROOT / "roles/awg3_transit/templates/awg3-transit.service.j2").read_text(
+            encoding="utf-8"
+        )
+        restart = (ROOT / "roles/awg3_transit/templates/transit-restart.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        handler = (ROOT / "roles/awg3_transit/handlers/main.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('cleanup_interface()', setup)
+        self.assertIn('ip link delete dev "$iface"', setup)
+        self.assertIn('rm -f -- "$socket"', setup)
+        self.assertIn('ExecStartPre={{ awg3_transit_setup_path }} prepare', unit)
+        self.assertIn('KillMode=mixed', unit)
+        self.assertIn('for attempt in 1 2 3', restart)
+        self.assertIn('systemctl daemon-reload', restart)
+        self.assertIn('[КЛЮЧ СКРЫТ]', restart)
+        self.assertIn('awg3_transit_restart_path', handler)
+
+    def test_one_time_passwords_are_shown_only_after_successful_summary(self) -> None:
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
+            encoding="utf-8"
+        )
+        generation = installer.index('account_passwords = {')
+        success = installer.rindex(
+            'ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")'
+        )
+        summary = installer.rindex('show_deployment_summary(production)')
+        display = installer.rindex('show_generated_account_passwords(account_passwords)')
+
+        self.assertLess(generation, success)
+        self.assertLess(success, summary)
+        self.assertLess(summary, display)
+        self.assertIn('"security_account_passwords_delivered": False', installer)
+        self.assertIn('mark_account_passwords_delivered(production)', installer)
+
 
 if __name__ == "__main__":
     unittest.main()

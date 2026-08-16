@@ -8,6 +8,7 @@ awg3_transit_service_name: awg3-transit.service
 awg3_transit_config_dir: /etc/amnezia/amneziawg-v3
 awg3_transit_config_path: "{{ awg3_transit_config_dir }}/{{ awg3_transit_interface }}.conf"
 awg3_transit_setup_path: /usr/local/sbin/awg3-transit-setup
+awg3_transit_restart_path: /usr/local/sbin/awg3-transit-restart
 awg3_transit_validate_path: /usr/local/sbin/awg3-validate-config
 awg3_transit_binary_path: /usr/local/sbin/amneziawg-go
 awg3_tools_binary_path: /usr/local/sbin/awg-v3
