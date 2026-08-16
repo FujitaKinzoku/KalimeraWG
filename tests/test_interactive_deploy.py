@@ -609,6 +609,7 @@ class InteractiveDeployTests(unittest.TestCase):
         maintenance = (
             repository / "roles/operations/templates/maintenance.sh.j2"
         ).read_text(encoding="utf-8")
+        verify = (repository / "playbooks/verify.yml").read_text(encoding="utf-8")
         security = (repository / "roles/security/tasks/main.yml").read_text(
             encoding="utf-8"
         )
@@ -629,6 +630,11 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('modinfo -k "$kernel_release" amneziawg', guard)
         self.assertIn("/usr/local/sbin/awg-kernel-guard", update_all)
         self.assertIn("/usr/local/sbin/awg-kernel-guard", maintenance)
+        self.assertIn("/usr/local/sbin/awg-kernel-guard", verify)
+        self.assertIn('APT::Periodic::Unattended-Upgrade "0"', operations)
+        self.assertIn('awg_maintenance_calendar: "*-*-* 05:20:00"', (
+            repository / "roles/operations/defaults/main.yml"
+        ).read_text(encoding="utf-8"))
         self.assertIn("path: /etc/ufw/sysctl.conf", security)
         self.assertIn("line: net/ipv4/icmp_echo_ignore_all=1", security)
 

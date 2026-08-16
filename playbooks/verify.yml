@@ -4,6 +4,10 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Подготовка DKMS для текущего и следующего загрузочного ядра
+      ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
+      changed_when: false
+
     - name: Запуск строгой проверки состояния сервера
       ansible.builtin.command:
         argv:
