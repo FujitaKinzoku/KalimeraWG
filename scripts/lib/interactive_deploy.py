@@ -1683,6 +1683,107 @@ def check_ssh(host: str, user: str, port: int, private_key: Path) -> None:
     )
 
 
+def ssh_connection_works(host: str, user: str, port: int, private_key: Path) -> bool:
+    """Проверить управляющий SSH без вывода диагностики и изменения сервера."""
+    result = subprocess.run(
+        [
+            require_command("ssh"),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ConnectionAttempts=1",
+            "-i",
+            str(private_key),
+            "-p",
+            str(port),
+            f"{user}@{host}",
+            "true",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def remote_observed_ssh_source_ipv4(
+    host: str,
+    user: str,
+    port: int,
+    private_key: Path,
+) -> str:
+    """Получить реальный source IPv4 так, как его видит удалённый sshd.
+
+    Значение интерфейса управляющей VPS может отличаться от адреса после SNAT.
+    Ограничивать ключ ``from=`` безопасно только фактически наблюдаемым адресом.
+    """
+    result = subprocess.run(
+        [
+            require_command("ssh"),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ConnectionAttempts=1",
+            "-i",
+            str(private_key),
+            "-p",
+            str(port),
+            f"{user}@{host}",
+            "printf '%s\\n' \"$SSH_CONNECTION\"",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return ""
+    fields = result.stdout.strip().split()
+    if len(fields) != 4:
+        return ""
+    candidate = fields[0]
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return ""
+    return candidate if isinstance(address, ipaddress.IPv4Address) and address.is_global else ""
+
+
+def verify_saved_inventory_access(hosts_document: dict) -> None:
+    """Не запускать resume и cleanup через уже недоступную учётную запись."""
+    inaccessible: list[str] = []
+    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
+        variables = hosts_document["all"]["children"][group]["hosts"][name]
+        if variables.get("ansible_connection") == "local":
+            continue
+        private_key = Path(str(variables["ansible_ssh_private_key_file"]))
+        if not ssh_connection_works(
+            str(variables["ansible_host"]),
+            str(variables["ansible_user"]),
+            int(variables["ansible_port"]),
+            private_key,
+        ):
+            inaccessible.append(
+                f"{name}: {variables['ansible_user']}@{variables['ansible_host']}:"
+                f"{variables['ansible_port']}"
+            )
+    if inaccessible:
+        fail(
+            "Сохранённый управляющий SSH-канал недоступен:\n  - "
+            + "\n  - ".join(inaccessible)
+            + "\nAnsible и аварийная очистка не запускались. "
+            "Восстановите служебный ключ через консоль хостинга либо "
+            "административный вход kalimera, затем повторите './deploy --resume'."
+        )
+
+
 def require_operator_ssh_confirmation() -> None:
     print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
     print("Проверьте вход пользователем kalimera по вашему закрытому ключу на ENTRY и EXIT через новые SSH-порты.")
@@ -2111,6 +2212,7 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        verify_saved_inventory_access(hosts_document)
         if args.update_components:
             transitioning = [
                 variables
@@ -2464,18 +2566,6 @@ def main() -> None:
     entry_public_ipv4 = resolve_single_public_ipv4(
         entry_public_endpoint, "AWG endpoint ENTRY сервера"
     )
-    controller_source_ipv4 = (
-        entry_public_ipv4 if local_entry else detect_local_public_ipv4(exit_public_ipv4)
-    )
-    if not controller_source_ipv4:
-        controller_source_ipv4 = prompt(
-            "Публичный IPv4 управляющей машины для ограниченного SSH-ключа"
-        )
-    try:
-        if not ipaddress.IPv4Address(controller_source_ipv4).is_global:
-            raise ValueError
-    except ValueError:
-        fail("Адрес управляющей машины должен быть публичным IPv4")
     ui_section(
         6,
         "ПЕРВЫЙ VPN-КЛИЕНТ",
@@ -2603,6 +2693,41 @@ def main() -> None:
         exit_password,
         ssh_public,
         "EXIT сервер",
+    )
+
+    # Не полагаться на адрес локального интерфейса: при SNAT, floating IP или
+    # сложной сети хостинга удалённый sshd может видеть другой source IPv4.
+    exit_observed_source_ipv4 = remote_observed_ssh_source_ipv4(
+        exit_host,
+        exit_user,
+        exit_current_port,
+        ssh_private,
+    )
+    if not exit_observed_source_ipv4:
+        fail(
+            "EXIT сервер не подтвердил исходный IPv4 управляющего SSH-сеанса. "
+            "Ограничение служебного ключа не применяется, чтобы не потерять доступ."
+        )
+    exit_automation_source_ipv4 = exit_observed_source_ipv4
+    if local_entry:
+        entry_automation_source_ipv4 = entry_public_ipv4
+    else:
+        entry_observed_source_ipv4 = remote_observed_ssh_source_ipv4(
+            entry_host,
+            entry_user,
+            entry_current_port,
+            ssh_private,
+        )
+        if not entry_observed_source_ipv4:
+            fail(
+                "ENTRY сервер не подтвердил исходный IPv4 управляющего SSH-сеанса. "
+                "Ограничение служебного ключа не применяется, чтобы не потерять доступ."
+            )
+        entry_automation_source_ipv4 = entry_observed_source_ipv4
+    observed_sources = {entry_automation_source_ipv4, exit_automation_source_ipv4}
+    print(
+        "Фактический IPv4 управляющего SSH подтверждён серверами: "
+        + ", ".join(sorted(observed_sources))
     )
 
     staging.parent.mkdir(parents=True, exist_ok=True)
@@ -2788,7 +2913,7 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": entry_new_port,
             "security_allow_ssh_port_change": entry_current_port != entry_new_port,
-            "security_automation_source_ipv4": controller_source_ipv4,
+            "security_automation_source_ipv4": entry_automation_source_ipv4,
             "security_admin_password_hash": "{{ vault_entry_kalimera_password_hash }}",
             "security_root_password_hash": "{{ vault_entry_root_password_hash }}",
             "runtime_secrets_share_index": 1,
@@ -2801,7 +2926,7 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": exit_new_port,
             "security_allow_ssh_port_change": exit_current_port != exit_new_port,
-            "security_automation_source_ipv4": controller_source_ipv4,
+            "security_automation_source_ipv4": exit_automation_source_ipv4,
             "security_admin_password_hash": "{{ vault_exit_kalimera_password_hash }}",
             "security_root_password_hash": "{{ vault_exit_root_password_hash }}",
             "runtime_secrets_share_index": 2,

@@ -25,6 +25,53 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_remote_observed_source_uses_ssh_connection_ipv4(self) -> None:
+        with (
+            mock.patch.object(MODULE, "require_command", return_value="ssh"),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=mock.Mock(
+                    returncode=0,
+                    stdout="8.8.8.8 49152 198.51.100.20 22\n",
+                ),
+            ) as run,
+        ):
+            observed = MODULE.remote_observed_ssh_source_ipv4(
+                "exit.invalid", "root", 22, Path("automation-key")
+            )
+
+        self.assertEqual(observed, "8.8.8.8")
+        self.assertIn("$SSH_CONNECTION", run.call_args.args[0][-1])
+
+    def test_saved_inventory_preflight_stops_before_ansible(self) -> None:
+        hosts = {
+            "all": {
+                "children": {
+                    "entry": {
+                        "hosts": {
+                            "entry-managed": {
+                                "ansible_connection": "local",
+                            }
+                        }
+                    },
+                    "exit": {
+                        "hosts": {
+                            "exit-managed": {
+                                "ansible_host": "198.51.100.20",
+                                "ansible_user": "root",
+                                "ansible_port": 56777,
+                                "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        with mock.patch.object(MODULE, "ssh_connection_works", return_value=False):
+            with self.assertRaisesRegex(SystemExit, "Ansible и аварийная очистка не запускались"):
+                MODULE.verify_saved_inventory_access(hosts)
+
     def test_local_entry_public_ipv4_uses_route_source_not_loopback(self) -> None:
         connection = mock.Mock()
         connection.getsockname.return_value = ("198.51.100.44", 49152)
@@ -306,6 +353,7 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch.object(MODULE, "migrate_production_inventory"),
                 mock.patch.object(MODULE, "ensure_runtime_secret_material"),
                 mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
                 mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
                 mock.patch.object(
                     MODULE,
@@ -1858,6 +1906,11 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch.object(
                     MODULE,
                     "detect_local_public_ipv4",
+                    return_value="8.8.8.8",
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "remote_observed_ssh_source_ipv4",
                     return_value="8.8.8.8",
                 ),
                 mock.patch.object(
