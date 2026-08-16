@@ -1784,6 +1784,39 @@ def verify_saved_inventory_access(hosts_document: dict) -> None:
         )
 
 
+def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> bool:
+    """Актуализировать ``from=`` по уже проверенному управляющему SSH-сеансу."""
+    changed = False
+    observed_values: set[str] = set()
+    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
+        variables = hosts_document["all"]["children"][group]["hosts"][name]
+        if variables.get("ansible_connection") == "local":
+            continue
+        observed = remote_observed_ssh_source_ipv4(
+            str(variables["ansible_host"]),
+            str(variables["ansible_user"]),
+            int(variables["ansible_port"]),
+            Path(str(variables["ansible_ssh_private_key_file"])),
+        )
+        if not observed:
+            fail(
+                f"{name} не подтвердил исходный IPv4 проверенного SSH-сеанса. "
+                "Конфигурация не изменялась."
+            )
+        observed_values.add(observed)
+        if variables.get("security_automation_source_ipv4") != observed:
+            variables["security_automation_source_ipv4"] = observed
+            changed = True
+    if changed:
+        yaml_write(hosts_path, hosts_document)
+        print(
+            "Production inventory обновлён: фактический IPv4 служебного SSH — "
+            + ", ".join(sorted(observed_values))
+            + "."
+        )
+    return changed
+
+
 def require_operator_ssh_confirmation() -> None:
     print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
     print("Проверьте вход пользователем kalimera по вашему закрытому ключу на ENTRY и EXIT через новые SSH-порты.")
@@ -2213,6 +2246,7 @@ def main() -> None:
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
         verify_saved_inventory_access(hosts_document)
+        refresh_saved_automation_sources(hosts_document, hosts_path)
         if args.update_components:
             transitioning = [
                 variables

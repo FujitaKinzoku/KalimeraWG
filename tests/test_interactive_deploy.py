@@ -72,6 +72,49 @@ class InteractiveDeployTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Ansible и аварийная очистка не запускались"):
                 MODULE.verify_saved_inventory_access(hosts)
 
+    def test_resume_refreshes_observed_automation_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {
+                                    "ansible_connection": "local",
+                                }
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    "security_automation_source_ipv4": "9.9.9.9",
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            with mock.patch.object(
+                MODULE, "remote_observed_ssh_source_ipv4", return_value="8.8.8.8"
+            ):
+                self.assertTrue(
+                    MODULE.refresh_saved_automation_sources(hosts, hosts_path)
+                )
+
+            updated = MODULE.load_yaml(hosts_path)
+            self.assertEqual(
+                updated["all"]["children"]["exit"]["hosts"]["exit-managed"][
+                    "security_automation_source_ipv4"
+                ],
+                "8.8.8.8",
+            )
+
     def test_local_entry_public_ipv4_uses_route_source_not_loopback(self) -> None:
         connection = mock.Mock()
         connection.getsockname.return_value = ("198.51.100.44", 49152)
@@ -354,6 +397,7 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch.object(MODULE, "ensure_runtime_secret_material"),
                 mock.patch.object(MODULE, "ensure_admin_account_material"),
                 mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
                 mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
                 mock.patch.object(
                     MODULE,
