@@ -67,6 +67,81 @@ class InteractiveDeployTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.detect_local_public_ipv4("unresolved.invalid"), "")
 
+    def test_ssh_transition_skips_root_loopback_probe_for_local_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            hosts_path = production / "hosts.yml"
+            vault_password = root / "vault.pass"
+            private_key = root / "automation-key"
+            vault_password.write_text("fixture\n", encoding="utf-8")
+            private_key.write_text("fixture\n", encoding="utf-8")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_manage_admin_account": True,
+                    "security_finalize_admin_access": False,
+                },
+            )
+            hosts_document = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {
+                                    "ansible_host": "127.0.0.1",
+                                    "ansible_connection": "local",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": str(private_key),
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56778,
+                                    "ansible_ssh_private_key_file": str(private_key),
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts_document)
+            with (
+                mock.patch.object(MODULE, "ansible"),
+                mock.patch.object(MODULE, "check_ssh") as check_ssh,
+                mock.patch.object(MODULE, "require_operator_ssh_confirmation"),
+                mock.patch.object(MODULE, "remove_bootstrap_become_passwords"),
+            ):
+                self.assertTrue(
+                    MODULE.complete_ssh_transition(
+                        root / "repo",
+                        hosts_path,
+                        vault_password,
+                        hosts_document,
+                        root / "mtu.yml",
+                        root / "package-lock.txt",
+                    )
+                )
+
+            check_ssh.assert_called_once_with(
+                "198.51.100.20", "root", 56778, private_key
+            )
+            updated = MODULE.load_yaml(hosts_path)
+            entry = updated["all"]["children"]["entry"]["hosts"]["entry-managed"]
+            self.assertEqual(entry["ansible_port"], 56777)
+            self.assertTrue(entry["ansible_connection"] == "local")
+
     def test_generated_account_password_has_all_required_character_classes(self) -> None:
         password = MODULE.generate_account_password(30)
         self.assertEqual(len(password), 30)

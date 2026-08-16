@@ -1961,7 +1961,8 @@ def complete_ssh_transition(
     transitioning_names = {name for _group, name, _variables in transitioning}
     for group, name in managed_hosts:
         variables = children[group]["hosts"][name]
-        if admin_transition_pending or name in transitioning_names:
+        local_connection = variables.get("ansible_connection") == "local"
+        if (admin_transition_pending or name in transitioning_names) and not local_connection:
             automation_user = (
                 "root"
                 if all_vars.get("security_manage_admin_account", False)
@@ -1972,6 +1973,11 @@ def complete_ssh_transition(
                 automation_user,
                 int(variables["ssh_listen_port"]),
                 Path(str(variables["ansible_ssh_private_key_file"])),
+            )
+        elif (admin_transition_pending or name in transitioning_names) and local_connection:
+            print(
+                f"{name}: локальный Ansible-канал уже проверен; "
+                "root SSH через loopback не требуется."
             )
         if name in transitioning_names:
             current = int(variables["ansible_port"])
@@ -3009,7 +3015,13 @@ def main() -> None:
         production / "group_vars" / "all" / "main.yml", awg_package_lock
     )
 
-    check_ssh(entry_host, "root", entry_new_port, ssh_private)
+    if not local_entry:
+        check_ssh(entry_host, "root", entry_new_port, ssh_private)
+    else:
+        print(
+            "ENTRY сервер: локальный Ansible-канал проверен; "
+            "root SSH через 127.0.0.1 не используется."
+        )
     check_ssh(exit_host, "root", exit_new_port, ssh_private)
     require_operator_ssh_confirmation()
 

@@ -127,6 +127,13 @@ class InstallResilienceTests(unittest.TestCase):
         self.assertIn('"security_account_passwords_delivered": False', installer)
         self.assertIn('mark_account_passwords_delivered(production)', installer)
 
+    def test_fresh_local_entry_never_probes_root_over_loopback_ssh(self) -> None:
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if not local_entry:\n        check_ssh(entry_host', installer)
+        self.assertIn('variables.get("ansible_connection") == "local"', installer)
+
 
 if __name__ == "__main__":
     unittest.main()
