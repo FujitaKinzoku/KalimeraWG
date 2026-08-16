@@ -165,7 +165,21 @@
   when:
     - security_automation_public_key_file.stat.exists | default(false)
 
-- name: Удаление неограниченной записи ключа автоматизации
+- name: Сохранение неограниченного ключа автоматизации до подтверждения администратора
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    state: present
+    manage_dir: true
+    exclusive: false
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+    - security_manage_admin_account | bool
+    - not security_finalize_admin_access | bool
+    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
+
+- name: Удаление неограниченной записи ключа автоматизации в финальной фазе
   ansible.posix.authorized_key:
     user: root
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
@@ -174,8 +188,10 @@
   no_log: true
   when:
     - security_automation_public_key_file.stat.exists | default(false)
+    - security_manage_admin_account | bool
+    - security_finalize_admin_access | bool
 
-- name: Установка ключа автоматизации с привязкой к управляющему адресу
+- name: Установка ключа автоматизации с привязкой к управляющему адресу в финальной фазе
   ansible.posix.authorized_key:
     user: root
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
@@ -189,6 +205,9 @@
   no_log: true
   when:
     - security_automation_public_key_file.stat.exists | default(false)
+    - security_manage_admin_account | bool
+    - security_finalize_admin_access | bool
+    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
 
 - name: "Проверка основной конфигурации ifupdown перед запретом IPv6"
   ansible.builtin.stat:

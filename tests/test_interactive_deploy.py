@@ -1106,6 +1106,18 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("security_restrict_automation_key: true", security_defaults)
         self.assertIn('from="{{ security_automation_source_ipv4 }}"', security_tasks)
         self.assertIn("no-port-forwarding", security_tasks)
+        self.assertIn(
+            "Сохранение неограниченного ключа автоматизации до подтверждения администратора",
+            security_tasks,
+        )
+        self.assertIn(
+            "Установка ключа автоматизации с привязкой к управляющему адресу в финальной фазе",
+            security_tasks,
+        )
+        self.assertGreaterEqual(
+            security_tasks.count("security_finalize_admin_access | bool"), 3
+        )
+        self.assertIn("not security_finalize_admin_access | bool", security_tasks)
         self.assertIn("Banner none", ssh)
         self.assertIn("PermitUserRC no", ssh)
         self.assertIn("HostKey {{ host_key_path }}", ssh)
