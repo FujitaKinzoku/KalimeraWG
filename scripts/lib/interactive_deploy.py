@@ -963,17 +963,33 @@ def ensure_admin_account_material(
     regenerate_all = bool(
         regenerate_undelivered and passwords_delivered is False
     )
-    required = {
-        "vault_entry_kalimera_password_hash": "ENTRY · kalimera",
-        "vault_entry_root_password_hash": "ENTRY · root",
-        "vault_exit_kalimera_password_hash": "EXIT · kalimera",
-        "vault_exit_root_password_hash": "EXIT · root",
-    }
+    required = (
+        (
+            "vault_entry_kalimera_password_hash",
+            "vault_entry_kalimera_password",
+            "ENTRY · kalimera",
+        ),
+        ("vault_entry_root_password_hash", None, "ENTRY · root"),
+        (
+            "vault_exit_kalimera_password_hash",
+            "vault_exit_kalimera_password",
+            "EXIT · kalimera",
+        ),
+        ("vault_exit_root_password_hash", None, "EXIT · root"),
+    )
     generated: dict[str, str] = {}
-    for vault_key, label in required.items():
-        if regenerate_all or not str(vault_document.get(vault_key, "")).startswith("$6$"):
-            generated[label] = generate_account_password()
-            vault_document[vault_key] = hash_account_password(generated[label])
+    for hash_key, automation_password_key, label in required:
+        missing_hash = not str(vault_document.get(hash_key, "")).startswith("$6$")
+        missing_automation_password = bool(
+            automation_password_key
+            and not str(vault_document.get(automation_password_key, ""))
+        )
+        if regenerate_all or missing_hash or missing_automation_password:
+            password = generate_account_password()
+            generated[label] = password
+            vault_document[hash_key] = hash_account_password(password)
+            if automation_password_key:
+                vault_document[automation_password_key] = password
 
     hosts_document = load_yaml(hosts_path)
     changed = bool(generated)
@@ -993,6 +1009,8 @@ def ensure_admin_account_material(
         "security_controller_repo_path": str(repo),
         "security_require_admin_authorized_key": True,
     }
+    if generated and passwords_delivered is not False:
+        expected_all["security_account_passwords_delivered"] = False
     if transition_required:
         expected_all["security_finalize_admin_access"] = False
     for key, value in expected_all.items():
@@ -1061,7 +1079,11 @@ def mark_account_passwords_delivered(production: Path) -> None:
 def remove_bootstrap_become_passwords(
     production: Path, vault_password: Path
 ) -> bool:
-    """Удалить больше не нужные пароли первоначальных SSH-пользователей."""
+    """Удалить только пароли первоначальных SSH-пользователей.
+
+    Пароли ``kalimera`` остаются исключительно внутри Ansible Vault: они нужны
+    для ``sudo`` при повторном deploy, но не выводятся после первого показа.
+    """
     vault_path = production / "group_vars" / "all" / "vault.yml"
     if not vault_path.is_file() or not vault_password.is_file():
         fail("Production Vault недоступен для удаления bootstrap-паролей")
@@ -1937,7 +1959,10 @@ def show_deployment_summary(production: Path) -> None:
             f"UDP/{exit_vars.get('security_interserver_listen_port')} только от "
             f"{exit_vars.get('security_interserver_peer_ipv4')}",
         ),
-        ("Доступ SSH", f"{admin_user} по ключу; root-автоматизация — только с IPv4 controller"),
+        (
+            "Доступ SSH",
+            f"только {admin_user}; root SSH отключён; автоматизация через sudo + Vault",
+        ),
         ("Fail2Ban", "включён после подтверждения нового SSH-доступа"),
     ]
 
@@ -2093,25 +2118,21 @@ def complete_ssh_transition(
     )
 
     transitioning_names = {name for _group, name, _variables in transitioning}
+    admin_user = str(all_vars.get("security_admin_user", "kalimera"))
     for group, name in managed_hosts:
         variables = children[group]["hosts"][name]
         local_connection = variables.get("ansible_connection") == "local"
         if (admin_transition_pending or name in transitioning_names) and not local_connection:
-            automation_user = (
-                "root"
-                if all_vars.get("security_manage_admin_account", False)
-                else str(variables["ansible_user"])
-            )
             check_ssh(
                 str(variables["ansible_host"]),
-                automation_user,
+                admin_user,
                 int(variables["ssh_listen_port"]),
                 Path(str(variables["ansible_ssh_private_key_file"])),
             )
         elif (admin_transition_pending or name in transitioning_names) and local_connection:
             print(
                 f"{name}: локальный Ansible-канал уже проверен; "
-                "root SSH через loopback не требуется."
+                "SSH root через loopback не используется."
             )
         if name in transitioning_names:
             current = int(variables["ansible_port"])
@@ -2119,8 +2140,14 @@ def complete_ssh_transition(
             variables["security_allow_ssh_port_change"] = False
             variables["security_previous_ssh_port"] = current
         if all_vars.get("security_manage_admin_account", False):
-            variables["ansible_user"] = "root"
-            variables.pop("ansible_become_password", None)
+            variables["ansible_user"] = admin_user
+            variables["ansible_become"] = True
+            variables["ansible_become_method"] = "sudo"
+            variables["ansible_become_password"] = (
+                "{{ vault_entry_kalimera_password }}"
+                if group == "entry"
+                else "{{ vault_exit_kalimera_password }}"
+            )
 
     require_operator_ssh_confirmation()
     all_vars["security_finalize_admin_access"] = True
@@ -3000,8 +3027,10 @@ def main() -> None:
     entry_exchange_private, entry_exchange_public = ssh_exchange_keypair()
     exit_exchange_private, exit_exchange_public = ssh_exchange_keypair()
     vault_document: dict[str, object] = {
+        "vault_entry_kalimera_password": account_passwords["ENTRY · kalimera"],
         "vault_entry_kalimera_password_hash": account_password_hashes["ENTRY · kalimera"],
         "vault_entry_root_password_hash": account_password_hashes["ENTRY · root"],
+        "vault_exit_kalimera_password": account_passwords["EXIT · kalimera"],
         "vault_exit_kalimera_password_hash": account_password_hashes["EXIT · kalimera"],
         "vault_exit_root_password_hash": account_password_hashes["EXIT · root"],
         "vault_awg_entry_private_key": entry_private,
@@ -3175,25 +3204,31 @@ def main() -> None:
     )
 
     if not local_entry:
-        check_ssh(entry_host, "root", entry_new_port, ssh_private)
+        check_ssh(entry_host, "kalimera", entry_new_port, ssh_private)
     else:
         print(
             "ENTRY сервер: локальный Ansible-канал проверен; "
-            "root SSH через 127.0.0.1 не используется."
+            "SSH root через 127.0.0.1 не используется."
         )
-    check_ssh(exit_host, "root", exit_new_port, ssh_private)
+    check_ssh(exit_host, "kalimera", exit_new_port, ssh_private)
     require_operator_ssh_confirmation()
 
     all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     all_vars["security_finalize_admin_access"] = True
     yaml_write(production / "group_vars" / "all" / "main.yml", all_vars)
 
-    for name, current, desired in (
-        ("entry-managed", entry_current_port, entry_new_port),
-        ("exit-managed", exit_current_port, exit_new_port),
+    for name, group, current, desired in (
+        ("entry-managed", "entry", entry_current_port, entry_new_port),
+        ("exit-managed", "exit", exit_current_port, exit_new_port),
     ):
-        host_vars[name]["ansible_user"] = "root"
-        host_vars[name].pop("ansible_become_password", None)
+        host_vars[name]["ansible_user"] = "kalimera"
+        host_vars[name]["ansible_become"] = True
+        host_vars[name]["ansible_become_method"] = "sudo"
+        host_vars[name]["ansible_become_password"] = (
+            "{{ vault_entry_kalimera_password }}"
+            if group == "entry"
+            else "{{ vault_exit_kalimera_password }}"
+        )
         host_vars[name]["ansible_port"] = desired
         host_vars[name]["security_allow_ssh_port_change"] = False
         host_vars[name]["security_previous_ssh_port"] = current

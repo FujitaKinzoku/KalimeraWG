@@ -157,7 +157,7 @@ class InteractiveDeployTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.detect_local_public_ipv4("unresolved.invalid"), "")
 
-    def test_ssh_transition_skips_root_loopback_probe_for_local_entry(self) -> None:
+    def test_ssh_transition_uses_kalimera_and_skips_local_entry_probe(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             production = root / "inventory" / "production"
@@ -225,12 +225,25 @@ class InteractiveDeployTests(unittest.TestCase):
                 )
 
             check_ssh.assert_called_once_with(
-                "198.51.100.20", "root", 56778, private_key
+                "198.51.100.20", "kalimera", 56778, private_key
             )
             updated = MODULE.load_yaml(hosts_path)
             entry = updated["all"]["children"]["entry"]["hosts"]["entry-managed"]
+            exit_node = updated["all"]["children"]["exit"]["hosts"]["exit-managed"]
             self.assertEqual(entry["ansible_port"], 56777)
             self.assertTrue(entry["ansible_connection"] == "local")
+            self.assertEqual(entry["ansible_user"], "kalimera")
+            self.assertTrue(entry["ansible_become"])
+            self.assertEqual(
+                entry["ansible_become_password"],
+                "{{ vault_entry_kalimera_password }}",
+            )
+            self.assertEqual(exit_node["ansible_user"], "kalimera")
+            self.assertTrue(exit_node["ansible_become"])
+            self.assertEqual(
+                exit_node["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
 
     def test_generated_account_password_has_all_required_character_classes(self) -> None:
         password = MODULE.generate_account_password(30)
@@ -1107,17 +1120,18 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('from="{{ security_automation_source_ipv4 }}"', security_tasks)
         self.assertIn("no-port-forwarding", security_tasks)
         self.assertIn(
-            "Сохранение неограниченного ключа автоматизации до подтверждения администратора",
+            "Установка адресно ограниченного ключа автоматизации пользователю KalimeraWG",
             security_tasks,
         )
         self.assertIn(
-            "Установка ключа автоматизации с привязкой к управляющему адресу в финальной фазе",
+            "Удаление служебного ключа из root в финальной фазе",
             security_tasks,
         )
-        self.assertGreaterEqual(
-            security_tasks.count("security_finalize_admin_access | bool"), 3
-        )
-        self.assertIn("not security_finalize_admin_access | bool", security_tasks)
+        self.assertIn('user: "{{ security_admin_user }}"', security_tasks)
+        self.assertIn("security_finalize_admin_access | bool", security_tasks)
+        self.assertIn("PermitRootLogin {{ effective_root_login }}", ssh)
+        self.assertIn("AllowUsers {{ managed_admin }}", ssh)
+        self.assertNotIn("root@{{ security_automation_source_ipv4 }}", ssh)
         self.assertIn("Banner none", ssh)
         self.assertIn("PermitUserRC no", ssh)
         self.assertIn("HostKey {{ host_key_path }}", ssh)
@@ -1783,8 +1797,22 @@ class InteractiveDeployTests(unittest.TestCase):
             decrypted = yaml.safe_load(
                 vault.decrypt((all_root / "vault.yml").read_bytes())
             )
-            self.assertEqual(len(decrypted), 4)
-            self.assertTrue(all(value.startswith("$6$") for value in decrypted.values()))
+            self.assertEqual(len(decrypted), 6)
+            self.assertTrue(
+                all(
+                    value.startswith("$6$")
+                    for key, value in decrypted.items()
+                    if key.endswith("_hash")
+                )
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password"],
+                "Aa2!" + "a" * 26,
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password"],
+                "Cc4#" + "c" * 26,
+            )
             self.assertNotIn("Aa2!", (all_root / "vault.yml").read_text(encoding="utf-8"))
             all_vars = yaml.safe_load(
                 (all_root / "main.yml").read_text(encoding="utf-8")
@@ -1866,7 +1894,21 @@ class InteractiveDeployTests(unittest.TestCase):
             decrypted = yaml.safe_load(
                 vault.decrypt((all_root / "vault.yml").read_bytes())
             )
-            self.assertTrue(all(value.startswith("$6$new$") for value in decrypted.values()))
+            self.assertTrue(
+                all(
+                    value.startswith("$6$new$")
+                    for key, value in decrypted.items()
+                    if key.endswith("_hash")
+                )
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password"],
+                "Aa2!" + "a" * 26,
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password"],
+                "Cc4#" + "c" * 26,
+            )
 
             MODULE.mark_account_passwords_delivered(production)
             second_pending: dict[str, str] = {}
@@ -2015,10 +2057,20 @@ class InteractiveDeployTests(unittest.TestCase):
             exit_node = inventory["all"]["children"]["exit"]["hosts"]["exit-managed"]
             self.assertEqual(entry["ansible_port"], 56777)
             self.assertEqual(exit_node["ansible_port"], 56778)
-            self.assertEqual(entry["ansible_user"], "root")
-            self.assertEqual(exit_node["ansible_user"], "root")
-            self.assertNotIn("ansible_become_password", entry)
-            self.assertNotIn("ansible_become_password", exit_node)
+            self.assertEqual(entry["ansible_user"], "kalimera")
+            self.assertEqual(exit_node["ansible_user"], "kalimera")
+            self.assertTrue(entry["ansible_become"])
+            self.assertTrue(exit_node["ansible_become"])
+            self.assertEqual(entry["ansible_become_method"], "sudo")
+            self.assertEqual(exit_node["ansible_become_method"], "sudo")
+            self.assertEqual(
+                entry["ansible_become_password"],
+                "{{ vault_entry_kalimera_password }}",
+            )
+            self.assertEqual(
+                exit_node["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
             self.assertFalse(entry["security_allow_ssh_port_change"])
             self.assertEqual(entry["security_previous_ssh_port"], 22)
             self.assertEqual(entry["security_automation_source_ipv4"], "8.8.8.8")
@@ -2087,6 +2139,14 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertRegex(vault["vault_entry_root_password_hash"], r"^[$]6[$]")
             self.assertRegex(vault["vault_exit_kalimera_password_hash"], r"^[$]6[$]")
             self.assertRegex(vault["vault_exit_root_password_hash"], r"^[$]6[$]")
+            self.assertRegex(
+                vault["vault_entry_kalimera_password"],
+                r"^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#$%^&*_+=-]).{30}$",
+            )
+            self.assertRegex(
+                vault["vault_exit_kalimera_password"],
+                r"^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#$%^&*_+=-]).{30}$",
+            )
             self.assertNotIn("vault_entry_become_password", vault)
             self.assertNotIn("vault_exit_become_password", vault)
             self.assertIn("vault_awg_entry_legacy_private_key", vault)

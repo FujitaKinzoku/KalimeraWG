@@ -165,10 +165,12 @@
   when:
     - security_automation_public_key_file.stat.exists | default(false)
 
-- name: Сохранение неограниченного ключа автоматизации до подтверждения администратора
+- name: Установка адресно ограниченного ключа автоматизации пользователю KalimeraWG
   ansible.posix.authorized_key:
-    user: root
+    user: "{{ security_admin_user }}"
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    key_options: >-
+      from="{{ security_automation_source_ipv4 }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
     state: present
     manage_dir: true
     exclusive: false
@@ -176,10 +178,9 @@
   when:
     - security_automation_public_key_file.stat.exists | default(false)
     - security_manage_admin_account | bool
-    - not security_finalize_admin_access | bool
     - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
 
-- name: Удаление неограниченной записи ключа автоматизации в финальной фазе
+- name: Удаление служебного ключа из root в финальной фазе
   ansible.posix.authorized_key:
     user: root
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
@@ -190,24 +191,6 @@
     - security_automation_public_key_file.stat.exists | default(false)
     - security_manage_admin_account | bool
     - security_finalize_admin_access | bool
-
-- name: Установка ключа автоматизации с привязкой к управляющему адресу в финальной фазе
-  ansible.posix.authorized_key:
-    user: root
-    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
-    key_options: >-
-      from="{{ security_automation_source_ipv4 }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
-    state: present
-    manage_dir: true
-    exclusive: >-
-      {{ security_manage_admin_account | bool and
-         security_finalize_admin_access | bool }}
-  no_log: true
-  when:
-    - security_automation_public_key_file.stat.exists | default(false)
-    - security_manage_admin_account | bool
-    - security_finalize_admin_access | bool
-    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
 
 - name: "Проверка основной конфигурации ifupdown перед запретом IPv6"
   ansible.builtin.stat:

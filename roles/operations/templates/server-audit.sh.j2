@@ -114,12 +114,8 @@ managed_admin_ok() {
 root_ssh_policy_ok() {
     local effective
     effective="$(sshd -T -C user=root,host=localhost,addr={{ security_automation_source_ipv4 | quote }})"
-{% if awg_node_role == 'entry' and (ansible_connection | default('ssh')) == 'local' %}
-    grep -qx 'permitrootlogin no' <<<"$effective"
-{% else %}
-    grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$effective" &&
-        grep -Eq '^allowusers .*root@{{ security_automation_source_ipv4 | regex_escape }}([[:space:]]|$)' <<<"$effective"
-{% endif %}
+    grep -qx 'permitrootlogin no' <<<"$effective" &&
+        ! grep -Eq '^allowusers .*root(@|[[:space:]]|$)' <<<"$effective"
 }
 {% endif %}
 
@@ -260,7 +256,7 @@ record 'пороговое хранилище runtime-секретов испр�
 record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
 {% if security_manage_admin_account | default(false) | bool %}
 record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
-record 'root SSH ограничен отдельным ключом и IPv4 управляющего узла' root_ssh_policy_ok
+record 'root SSH полностью отключён' root_ssh_policy_ok
 {% endif %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
