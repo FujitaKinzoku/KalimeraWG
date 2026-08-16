@@ -23,6 +23,7 @@ usage() {
     cat <<'EOF'
 Использование:
   vpn-user list
+  vpn-user export NAME
   vpn-user delete NAME [--yes]
   vpn-user NAME [performance|balanced|masking|mobile|old]
 EOF
@@ -130,6 +131,25 @@ inventory_has_user() {
     return 1
 }
 
+export_user_config() {
+    local name="$1" output="$output_dir/$1.conf"
+    if [[ ! -f "$output" || -L "$output" ]]; then
+        if inventory_has_user "$name"; then
+            echo "Пользователь $name управляется зашифрованным inventory." >&2
+            echo 'Закрытый ключ первоначального клиента хранится только на управляющем узле; ENTRY не может восстановить его конфиг.' >&2
+            return 2
+        fi
+        echo "Локальный VPN-пользователь $name или его конфигурация не найдены." >&2
+        return 1
+    fi
+    [[ -r "$output" ]] || {
+        echo "Конфигурация пользователя $name недоступна для чтения." >&2
+        return 1
+    }
+    printf 'Конфигурация %s показана только в текущем терминале; не сохраняйте сеанс с секретами.\n' "$name" >&2
+    cat -- "$output"
+}
+
 delete_user() {
     local name="$1" assume_yes="$2" specification directory iface peer_file='' public_key
     local output backup_dir timestamp optional_controller='' answer remaining
@@ -221,6 +241,12 @@ case "${1:-}" in
         [[ $# -eq 1 ]] || { usage >&2; exit 2; }
         list_users
         exit 0
+        ;;
+    export|show)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        valid_name "$2" || { echo 'Недопустимое имя пользователя.' >&2; exit 2; }
+        export_user_config "$2"
+        exit $?
         ;;
     delete|del|remove)
         [[ $# -ge 2 && $# -le 3 ]] || { usage >&2; exit 2; }
@@ -447,4 +473,7 @@ stage='обновление зашифрованного runtime-пакета'
 legacy_started=false
 mobile_started=false
 completed=true
+trap - ERR
 echo "VPN-пользователь создан. Профиль: $profile. Защищённая конфигурация: $output"
+printf '%s\n' 'Скопируйте конфигурацию между строками [Interface] и PersistentKeepalive.' >&2
+export_user_config "$name"

@@ -1021,7 +1021,11 @@ class InteractiveDeployTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("vpn-user list", vpn_user)
+        self.assertIn("vpn-user export NAME", vpn_user)
         self.assertIn("vpn-user delete NAME [--yes]", vpn_user)
+        self.assertIn('export_user_config "$2"', vpn_user)
+        self.assertIn('cat -- "$output"', vpn_user)
+        self.assertIn('export_user_config "$name"', vpn_user)
         self.assertIn('awg set "$iface" peer "$public_key" remove', vpn_user)
         self.assertIn("config-backups/entry/clients/deleted", vpn_user)
         self.assertIn("управляется зашифрованным inventory", vpn_user)
