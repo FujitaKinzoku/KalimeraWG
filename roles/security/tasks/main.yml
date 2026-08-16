@@ -1330,13 +1330,9 @@
           - >-
             (security_manage_admin_account | bool and
              security_finalize_admin_access | bool and
-             awg_node_role == 'entry' and
-             (ansible_connection | default('ssh')) == 'local' and
              'permitrootlogin no' in security_sshd_effective.stdout_lines) or
             ((not (security_manage_admin_account | bool and
-                   security_finalize_admin_access | bool and
-                   awg_node_role == 'entry' and
-                   (ansible_connection | default('ssh')) == 'local')) and
+                   security_finalize_admin_access | bool)) and
              ssh_root_login == 'prohibit-password' and
              (('permitrootlogin prohibit-password' in security_sshd_effective.stdout_lines) or
               ('permitrootlogin without-password' in security_sshd_effective.stdout_lines)))

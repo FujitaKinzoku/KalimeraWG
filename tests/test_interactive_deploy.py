@@ -1132,6 +1132,10 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("PermitRootLogin {{ effective_root_login }}", ssh)
         self.assertIn("AllowUsers {{ managed_admin }}", ssh)
         self.assertNotIn("root@{{ security_automation_source_ipv4 }}", ssh)
+        self.assertNotIn(
+            "security_finalize_admin_access | bool and\n             awg_node_role == 'entry'",
+            security_tasks,
+        )
         self.assertIn("Banner none", ssh)
         self.assertIn("PermitUserRC no", ssh)
         self.assertIn("HostKey {{ host_key_path }}", ssh)
