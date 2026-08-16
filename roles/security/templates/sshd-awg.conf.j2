@@ -10,17 +10,20 @@ Port {{ ansible_port | default(22) }}
 PasswordAuthentication {{ ssh_password_authentication | ternary('yes', 'no') }}
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-{% set managed_admin = security_admin_user if security_manage_admin_account | bool else ansible_user %}
-{% set local_entry_automation = (awg_node_role == 'entry' and (ansible_connection | default('ssh')) == 'local') %}
-{% set root_automation_required = (awg_node_role == 'exit' or not local_entry_automation) %}
-{% set effective_root_login = 'no' if (security_manage_admin_account | bool and security_finalize_admin_access | bool and not root_automation_required) else ssh_root_login %}
+{% set manage_admin = security_manage_admin_account | default(false) | bool %}
+{% set finalize_admin = security_finalize_admin_access | default(false) | bool %}
+{% set managed_admin = security_admin_user if manage_admin else ansible_user %}
+{% set node_role = awg_node_role | default('entry') %}
+{% set local_entry_automation = (node_role == 'entry' and (ansible_connection | default('ssh')) == 'local') %}
+{% set root_automation_required = (node_role == 'exit' or not local_entry_automation) %}
+{% set effective_root_login = 'no' if (manage_admin and finalize_admin and not root_automation_required) else ssh_root_login %}
 PermitRootLogin {{ effective_root_login }}
 PermitEmptyPasswords no
-{% if security_manage_admin_account | bool and security_finalize_admin_access | bool and root_automation_required %}
+{% if manage_admin and finalize_admin and root_automation_required %}
 AllowUsers {{ managed_admin }} root@{{ security_automation_source_ipv4 }}
-{% elif security_manage_admin_account | bool and security_finalize_admin_access | bool %}
+{% elif manage_admin and finalize_admin %}
 AllowUsers {{ managed_admin }}
-{% elif security_manage_admin_account | bool %}
+{% elif manage_admin %}
 AllowUsers {{ managed_admin }} root{% if ansible_user not in [managed_admin, 'root'] %} {{ ansible_user }}{% endif %}
 {% else %}
 AllowUsers {{ managed_admin }}
