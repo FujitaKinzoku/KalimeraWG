@@ -926,6 +926,7 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertNotIn("--dports", routing)
         self.assertIn("flock -w 30 9", routing)
         self.assertNotIn("flock -n 9 || exit 0", routing)
+        self.assertIn('wait_for_interface_up "$PROXY_IF"', routing)
         self.assertIn('for direct_port in "${DIRECT_PORTS[@]}"', routing)
         self.assertIn('PROXY_UDP_MODE" == direct', routing)
 
@@ -977,9 +978,16 @@ class InteractiveDeployTests(unittest.TestCase):
             sing_box_tasks.index("Связывание запуска sing-box"),
             sing_box_tasks.index("Применение: прокси sing-box — этап 17"),
         )
-        self.assertIn("ExecStartPost=+/bin/sh -c", dropin)
-        self.assertIn("try-restart awg-entry-routing.service", dropin)
-        self.assertIn("|| true", dropin)
+        self.assertIn("awg-entry-routing-reconcile", dropin)
+        self.assertNotIn("try-restart awg-entry-routing.service", dropin)
+
+        reconcile = (
+            root
+            / "roles/entry_routing/templates/awg-entry-routing-reconcile.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("activating|deactivating|reloading", reconcile)
+        self.assertIn('systemctl --no-block reload "$service"', reconcile)
+        self.assertNotIn("try-restart", reconcile)
 
     def test_administrative_commands_are_safe_and_runtime_state_is_persistent(self) -> None:
         root = MODULE_PATH.parents[2]

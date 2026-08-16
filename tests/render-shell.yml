@@ -140,6 +140,8 @@
           loop:
             - src: roles/entry_routing/templates/awg-entry-routing.sh.j2
               dest: awg-entry-routing
+            - src: roles/entry_routing/templates/awg-entry-routing-reconcile.sh.j2
+              dest: awg-entry-routing-reconcile
             - src: roles/entry_routing/templates/awg-ru-zone-update.sh.j2
               dest: awg-ru-zone-update
             - src: roles/entry_watchdog/templates/awg-ru-proxy-watch.sh.j2
@@ -342,6 +344,7 @@
               - shellcheck
               - --exclude=SC2317
               - "{{ rendered_shell_root }}/awg-entry-routing"
+              - "{{ rendered_shell_root }}/awg-entry-routing-reconcile"
               - "{{ rendered_shell_root }}/awg-ru-zone-update"
               - "{{ rendered_shell_root }}/awg-ru-proxy-watch"
               - "{{ rendered_shell_root }}/server-audit-entry"

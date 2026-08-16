@@ -35,7 +35,7 @@ elif [[ "$mode" == up ]]; then
     ip link set mtu {{ awg3_transit_effective_mtu }} up dev "$iface"
     ip -4 route replace "${peer}/32" dev "$iface"
 {% if awg_node_role == 'entry' %}
-    systemctl --no-block try-restart awg-entry-routing.service >/dev/null 2>&1 || true
+    {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') | quote }}
     systemctl --no-block try-restart awg-local-peer-apply.service >/dev/null 2>&1 || true
 {% endif %}
 {% if awg_node_role == 'exit' %}
