@@ -4,4 +4,4 @@
 # На чистой установке служба маршрутизации создаётся позже роли sing-box.
 # Восстановление policy routing является best-effort: его отсутствие не должно
 # превращать успешно запущенный sing-box в неисправную службу.
-ExecStartPost=+{{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }}
+ExecStartPost=+/bin/sh -c 'test ! -x {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }} || {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }}'

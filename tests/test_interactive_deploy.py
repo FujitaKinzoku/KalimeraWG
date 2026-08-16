@@ -979,7 +979,13 @@ class InteractiveDeployTests(unittest.TestCase):
             sing_box_tasks.index("Применение: прокси sing-box — этап 17"),
         )
         self.assertIn("awg-entry-routing-reconcile", dropin)
+        self.assertIn("test ! -x", dropin)
         self.assertNotIn("try-restart awg-entry-routing.service", dropin)
+
+        transit_setup = (
+            root / "roles/awg3_transit/templates/transit-setup.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn('if [[ -x "$routing_reconcile" ]]', transit_setup)
 
         reconcile = (
             root
