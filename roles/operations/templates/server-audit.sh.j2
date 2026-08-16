@@ -81,7 +81,7 @@ EOF
 runtime_secrets_ok() {
     systemctl is-enabled --quiet {{ runtime_secrets_service_name | quote }} &&
         systemctl is-active --quiet {{ runtime_secrets_service_name | quote }} &&
-        {{ runtime_secrets_ctl_path | quote }} check >/dev/null 2>&1
+        {{ runtime_secrets_ctl_path | quote }} verify >/dev/null 2>&1
 }
 {% endif %}
 
@@ -98,6 +98,30 @@ ssh_baseline_ok() {
         grep -qx 'usedns no' <<<"$effective" &&
         ! grep -qx 'hostkey /etc/ssh/ssh_host_dsa_key' <<<"$effective"
 }
+
+{% if security_manage_admin_account | default(false) | bool %}
+managed_admin_ok() {
+    id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
+        id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
+        passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
+        passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
+        test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
+        test -x {{ security_admin_command_path | quote }} &&
+        visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
+        ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
+}
+
+root_ssh_policy_ok() {
+    local effective
+    effective="$(sshd -T -C user=root,host=localhost,addr={{ security_automation_source_ipv4 | quote }})"
+{% if awg_node_role == 'entry' and (ansible_connection | default('ssh')) == 'local' %}
+    grep -qx 'permitrootlogin no' <<<"$effective"
+{% else %}
+    grep -Eq '^permitrootlogin (prohibit-password|without-password)$' <<<"$effective" &&
+        grep -Eq '^allowusers .*root@{{ security_automation_source_ipv4 | regex_escape }}([[:space:]]|$)' <<<"$effective"
+{% endif %}
+}
+{% endif %}
 
 ppa_key_isolated() {
     grep -Fxq 'Signed-By: /etc/apt/keyrings/amnezia-ppa.asc' \
@@ -234,6 +258,10 @@ record 'секретные конфигурации имеют права 0600/0
 record 'пороговое хранилище runtime-секретов исправно' runtime_secrets_ok
 {% endif %}
 record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
+{% if security_manage_admin_account | default(false) | bool %}
+record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
+record 'root SSH ограничен отдельным ключом и IPv4 управляющего узла' root_ssh_policy_ok
+{% endif %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
 record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled

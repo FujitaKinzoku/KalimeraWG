@@ -14,6 +14,7 @@
 {% for peer in runtime_secrets_peer_inventory_hosts %}
     {
       "name": {{ peer | to_json }},
+      "user": {{ runtime_secrets_ssh_user | to_json }},
       "host": {{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) | to_json }},
       "port": {{ hostvars[peer].ssh_listen_port | default(hostvars[peer].ansible_port | default(22)) | int }}
     }{{ "," if not loop.last else "" }}

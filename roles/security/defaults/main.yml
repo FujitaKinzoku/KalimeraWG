@@ -15,6 +15,16 @@ security_ifupdown_ipv6_hook_regexp_parts:
 security_fail2ban_file: /etc/fail2ban/jail.d/zz-awg-sshd.local
 security_manage_ssh: false
 security_allow_ssh_port_change: false
+security_manage_admin_account: false
+security_admin_user: kalimera
+security_admin_shell: /bin/bash
+security_admin_password_hash: ""
+security_root_password_hash: ""
+security_finalize_admin_access: false
+security_controller_repo_path: /root/KalimeraWG
+security_admin_command_path: /usr/local/libexec/kalimera-admin-command
+security_runtime_secrets_export_path: >-
+  {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
 security_admin_authorized_keys: []
 security_require_admin_authorized_key: false
 security_restrict_automation_key: true

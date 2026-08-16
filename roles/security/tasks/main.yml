@@ -1,4 +1,57 @@
 ---
+- name: Установка sudo для управляемого администратора
+  ansible.builtin.apt:
+    name: sudo
+    state: present
+    lock_timeout: 600
+  when: security_manage_admin_account | bool
+
+- name: Проверка материала учётных записей
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_admin_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - security_admin_user != 'root'
+      - security_admin_password_hash is match('^[$]6[$]')
+      - security_root_password_hash is match('^[$]6[$]')
+    fail_msg: >-
+      Для управляемых учётных записей требуются отдельный пользователь и
+      SHA-512 crypt-хеши двух сгенерированных паролей.
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Создание рабочего администратора KalimeraWG
+  ansible.builtin.user:
+    name: "{{ security_admin_user }}"
+    comment: KalimeraWG administrator
+    shell: "{{ security_admin_shell }}"
+    create_home: true
+    groups: sudo
+    append: true
+    password: "{{ security_admin_password_hash }}"
+    update_password: always
+    state: present
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Замена локального пароля root
+  ansible.builtin.user:
+    name: root
+    password: "{{ security_root_password_hash }}"
+    update_password: always
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Запрет постоянной истории рабочего администратора
+  ansible.builtin.file:
+    src: /dev/null
+    dest: "/home/{{ security_admin_user }}/.bash_history"
+    state: link
+    force: true
+    owner: "{{ security_admin_user }}"
+    group: "{{ security_admin_user }}"
+  when: security_manage_admin_account | bool
+
 - name: "Проверка: безопасность — этап 1"
   ansible.builtin.assert:
     quiet: true
@@ -11,7 +64,7 @@
 
 - name: "Установка: безопасность — этап 2"
   ansible.posix.authorized_key:
-    user: "{{ ansible_user }}"
+    user: "{{ security_admin_user if security_manage_admin_account | bool else ansible_user }}"
     key: "{{ item }}"
     state: present
     manage_dir: true
@@ -21,6 +74,52 @@
   when:
     - security_manage_ssh | bool
     - security_admin_authorized_keys | length > 0
+
+- name: Создание каталога ограниченных административных программ
+  ansible.builtin.file:
+    path: "{{ security_admin_command_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: security_manage_admin_account | bool
+
+- name: Установка ограниченного шлюза административных команд
+  ansible.builtin.template:
+    src: kalimera-admin-command.sh.j2
+    dest: "{{ security_admin_command_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
+  when: security_manage_admin_account | bool
+
+- name: Разрешение только управляемых команд без пароля sudo
+  ansible.builtin.template:
+    src: kalimera-admin.sudoers.j2
+    dest: /etc/sudoers.d/90-kalimera-admin
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: security_manage_admin_account | bool
+
+- name: Подключение терминального оформления рабочего администратора
+  ansible.builtin.blockinfile:
+    path: "/home/{{ security_admin_user }}/.bashrc"
+    create: true
+    owner: "{{ security_admin_user }}"
+    group: "{{ security_admin_user }}"
+    mode: "0644"
+    marker: "# {mark} KALIMERA ADMIN TERMINAL"
+    insertafter: EOF
+    block: |
+      if [[ $- == *i* ]]; then
+          source /etc/profile.d/kalimera-shell-tools.sh
+          source /etc/profile.d/kalimera-prompt.sh
+          [[ ! -r /etc/blesh.sh ]] || source /etc/blesh.sh
+      fi
+  when: security_manage_admin_account | bool
 
 - name: Проверка публичной части ключа автоматизации на управляющем узле
   ansible.builtin.stat:
@@ -33,6 +132,21 @@
     - security_restrict_automation_key | bool
     - security_automation_source_ipv4 | length > 0
     - ansible_ssh_private_key_file is defined
+
+- name: Проверка сохранения управляемого канала автоматизации
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_automation_source_ipv4 | length > 0
+      - security_automation_public_key_file.stat.exists | default(false)
+    fail_msg: >-
+      Финальная SSH-политика не применяется без отдельного ключа автоматизации
+      и подтверждённого исходного IPv4 управляющей машины.
+  when:
+    - security_manage_ssh | bool
+    - security_manage_admin_account | bool
+    - security_finalize_admin_access | bool
+    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
 
 - name: Проверка разделения административного и автоматического SSH-ключей
   ansible.builtin.assert:
@@ -53,7 +167,7 @@
 
 - name: Удаление неограниченной записи ключа автоматизации
   ansible.posix.authorized_key:
-    user: "{{ ansible_user }}"
+    user: root
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
     state: absent
     manage_dir: true
@@ -63,13 +177,15 @@
 
 - name: Установка ключа автоматизации с привязкой к управляющему адресу
   ansible.posix.authorized_key:
-    user: "{{ ansible_user }}"
+    user: root
     key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
     key_options: >-
       from="{{ security_automation_source_ipv4 }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
     state: present
     manage_dir: true
-    exclusive: false
+    exclusive: >-
+      {{ security_manage_admin_account | bool and
+         security_finalize_admin_access | bool }}
   no_log: true
   when:
     - security_automation_public_key_file.stat.exists | default(false)
@@ -1210,11 +1326,24 @@
             'hostkey /etc/ssh/ssh_host_dsa_key' not in
             security_sshd_effective.stdout_lines
           - >-
-            (ssh_root_login == 'no' and
+            (security_manage_admin_account | bool and
+             security_finalize_admin_access | bool and
+             awg_node_role == 'entry' and
+             (ansible_connection | default('ssh')) == 'local' and
              'permitrootlogin no' in security_sshd_effective.stdout_lines) or
-            (ssh_root_login == 'prohibit-password' and
+            ((not (security_manage_admin_account | bool and
+                   security_finalize_admin_access | bool and
+                   awg_node_role == 'entry' and
+                   (ansible_connection | default('ssh')) == 'local')) and
+             ssh_root_login == 'prohibit-password' and
              (('permitrootlogin prohibit-password' in security_sshd_effective.stdout_lines) or
               ('permitrootlogin without-password' in security_sshd_effective.stdout_lines)))
+          - >-
+            (not security_manage_admin_account | bool) or
+            (security_sshd_effective.stdout_lines |
+             select('match', '^allowusers .*') |
+             select('search', '(^| )' ~ security_admin_user ~ '( |$)') |
+             list | length == 1)
 
     - name: "Применение: безопасность — этап 36"
       ansible.builtin.meta: flush_handlers

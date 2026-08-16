@@ -15,7 +15,8 @@ Ansible `terminal`.
   подключений, DNS, MTU и защиты узла;
 - `/etc/kalimera/blesh-init.sh` — подсветка синтаксиса и поведение редактора;
 - `/etc/blesh.sh` — безопасная загрузка BLE только в интерактивном Bash;
-- управляемые блоки в конце `/etc/bash.bashrc` и `/root/.bashrc`.
+- управляемые блоки в конце `/etc/bash.bashrc`, `/root/.bashrc` и
+  `/home/kalimera/.bashrc`.
 
 Исходный `/etc/bash.bashrc` один раз копируется в
 `/root/config-backups/terminal/bash.bashrc.before-kalimera`; исходный root
@@ -46,6 +47,12 @@ RU-прокси, UFW, SSH и Fail2Ban, а затем запускает огра
 командами `kalimera-help` или `kalimera`, только сводку — `kalimera-status`.
 На EXIT удалённые режимы DNS и RU-прокси честно помечаются как управляемые на
 ENTRY, поскольку EXIT не хранит и не проверяет их локальное состояние.
+
+Под `kalimera` эксплуатационные команды автоматически передаются ограниченному
+root-owned dispatcher. Поэтому `awg-health`, `vpn-user`, `ru-proxy`, DNS и
+обновления запускаются привычными именами без явного `sudo`. Dispatcher не
+принимает произвольные программы или shell; полный `sudo` остаётся доступен
+члену группы `sudo` только после ввода его пароля.
 
 ## Совместимость и отключение
 

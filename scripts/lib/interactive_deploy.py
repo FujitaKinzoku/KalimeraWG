@@ -506,6 +506,57 @@ def prompt_admin_public_key() -> str:
         return value
 
 
+def generate_account_password(length: int = 30) -> str:
+    """Создать пароль без неоднозначных символов, гарантируя все классы знаков."""
+    if length < 25:
+        raise ValueError("Пароль учётной записи должен содержать не менее 25 символов")
+    lower = "abcdefghijkmnopqrstuvwxyz"
+    upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    digits = "23456789"
+    special = "!@#$%^&*_-+="
+    chooser = secrets.SystemRandom()
+    characters = [
+        chooser.choice(lower),
+        chooser.choice(upper),
+        chooser.choice(digits),
+        chooser.choice(special),
+    ]
+    alphabet = lower + upper + digits + special
+    characters.extend(chooser.choice(alphabet) for _ in range(length - len(characters)))
+    chooser.shuffle(characters)
+    return "".join(characters)
+
+
+def hash_account_password(password: str) -> str:
+    """Получить совместимый SHA-512 crypt-хеш, не передавая пароль в argv."""
+    result = subprocess.run(
+        [require_command("openssl"), "passwd", "-6", "-stdin"],
+        input=password + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    password_hash = result.stdout.strip()
+    if result.returncode != 0 or not password_hash.startswith("$6$"):
+        fail("Не удалось безопасно сформировать хеш пароля учётной записи")
+    return password_hash
+
+
+def show_generated_account_passwords(passwords: dict[str, str]) -> None:
+    ui_panel(
+        "ПАРОЛИ УЧЁТНЫХ ЗАПИСЕЙ · ПОКАЗЫВАЮТСЯ ОДИН РАЗ",
+        [
+            "Сохраните значения сейчас в менеджере паролей.",
+            "SSH использует ключи; эти пароли предназначены для sudo и аварийной консоли.",
+            "",
+            *[f"{label}: {value}" for label, value in passwords.items()],
+            "",
+            "В inventory сохраняются только необратимые хеши; повторный показ невозможен.",
+        ],
+        "yellow",
+    )
+
+
 def require_public_endpoint(value: str, label: str) -> None:
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(value, None, socket.AF_INET)}
@@ -881,6 +932,142 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
             "runtime-секретов 2-of-5."
         )
     return changed
+
+
+def ensure_admin_account_material(
+    production: Path, vault_password: Path, repo: Path
+) -> bool:
+    """Добавить рабочие учётные записи в старый inventory без хранения паролей."""
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    hosts_path = production / "hosts.yml"
+    if not all(path.is_file() for path in (vault_path, all_path, hosts_path)):
+        fail("Production inventory неполон для создания рабочего администратора")
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(vault_document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+
+    required = {
+        "vault_entry_kalimera_password_hash": "ENTRY · kalimera",
+        "vault_entry_root_password_hash": "ENTRY · root",
+        "vault_exit_kalimera_password_hash": "EXIT · kalimera",
+        "vault_exit_root_password_hash": "EXIT · root",
+    }
+    generated: dict[str, str] = {}
+    for vault_key, label in required.items():
+        if not str(vault_document.get(vault_key, "")).startswith("$6$"):
+            generated[label] = generate_account_password()
+            vault_document[vault_key] = hash_account_password(generated[label])
+
+    all_vars = load_yaml(all_path)
+    hosts_document = load_yaml(hosts_path)
+    changed = bool(generated)
+    transition_required = bool(generated) or not bool(
+        all_vars.get("security_manage_admin_account", False)
+    )
+    admin_keys = all_vars.get("security_admin_authorized_keys", [])
+    if not isinstance(admin_keys, list) or not any(
+        isinstance(key, str) and key.strip() for key in admin_keys
+    ):
+        all_vars["security_admin_authorized_keys"] = [prompt_admin_public_key()]
+        transition_required = True
+        changed = True
+    expected_all = {
+        "security_manage_admin_account": True,
+        "security_admin_user": "kalimera",
+        "security_controller_repo_path": str(repo),
+        "security_require_admin_authorized_key": True,
+    }
+    if transition_required:
+        expected_all["security_finalize_admin_access"] = False
+    for key, value in expected_all.items():
+        if all_vars.get(key) != value:
+            all_vars[key] = value
+            changed = True
+
+    children = hosts_document.get("all", {}).get("children", {})
+    host_mappings = (
+        (
+            children.get("entry", {}).get("hosts", {}),
+            "{{ vault_entry_kalimera_password_hash }}",
+            "{{ vault_entry_root_password_hash }}",
+        ),
+        (
+            children.get("exit", {}).get("hosts", {}),
+            "{{ vault_exit_kalimera_password_hash }}",
+            "{{ vault_exit_root_password_hash }}",
+        ),
+    )
+    for hosts, admin_hash, root_hash in host_mappings:
+        if not isinstance(hosts, dict) or len(hosts) != 1:
+            fail("Для миграции учётных записей требуется один ENTRY и один EXIT")
+        values = next(iter(hosts.values()))
+        if not isinstance(values, dict):
+            fail("Некорректные host variables production inventory")
+        for key, value in (
+            ("security_admin_password_hash", admin_hash),
+            ("security_root_password_hash", root_hash),
+        ):
+            if values.get(key) != value:
+                values[key] = value
+                changed = True
+
+    if changed:
+        yaml_write(all_path, all_vars)
+        yaml_write(hosts_path, hosts_document)
+        plaintext = yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
+        temporary = vault_path.with_name(
+            f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            secure_write(temporary, vault_lib.encrypt(plaintext))
+            os.replace(temporary, vault_path)
+            vault_path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if generated:
+        show_generated_account_passwords(generated)
+        generated.clear()
+    return changed
+
+
+def remove_bootstrap_become_passwords(
+    production: Path, vault_password: Path
+) -> bool:
+    """Удалить больше не нужные пароли первоначальных SSH-пользователей."""
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not vault_path.is_file() or not vault_password.is_file():
+        fail("Production Vault недоступен для удаления bootstrap-паролей")
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    changed = False
+    for key in ("vault_entry_become_password", "vault_exit_become_password"):
+        if key in document:
+            del document[key]
+            changed = True
+    if not changed:
+        return False
+    plaintext = yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+    temporary = vault_path.with_name(f".{vault_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        secure_write(temporary, vault_lib.encrypt(plaintext))
+        os.replace(temporary, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 AWG_CLIENT_PROFILES = {
@@ -1477,13 +1664,15 @@ def check_ssh(host: str, user: str, port: int, private_key: Path) -> None:
 
 def require_operator_ssh_confirmation() -> None:
     print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
-    print("Проверьте вход по вашему закрытому ключу на ENTRY сервер и EXIT сервер через новые SSH-порты.")
-    if not prompt_bool("Вход по административному ключу проверен на обоих серверах", False):
+    print("Проверьте вход пользователем kalimera по вашему закрытому ключу на ENTRY и EXIT через новые SSH-порты.")
+    print("Не подтверждайте этап, пока оба независимых SSH-сеанса не открылись.")
+    if not prompt_bool("Вход kalimera по административному ключу проверен на обоих серверах", False):
         fail("Установка безопасно остановлена: старые SSH-порты сохранены, Fail2Ban не включён")
 
 
 def show_deployment_summary(production: Path) -> None:
     hosts = load_yaml(production / "hosts.yml")
+    all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     entry_vars = load_yaml(production / "group_vars" / "entry.yml")
     exit_vars = load_yaml(production / "group_vars" / "exit.yml")
     children = hosts["all"]["children"]
@@ -1504,15 +1693,16 @@ def show_deployment_summary(production: Path) -> None:
     clients_dir = Path.home() / ".local" / "share" / "awg-iac" / "production" / "clients"
     mtu_file = clients_dir.parent / "mtu.yml"
     client_files = sorted(clients_dir.glob("*.conf")) if clients_dir.is_dir() else []
+    admin_user = str(all_vars.get("security_admin_user", "kalimera"))
 
     access_rows: list[tuple[str, object]] = [
         (
             "SSH ENTRY",
-            f"{entry['ansible_user']}@{entry_public}:{entry['ansible_port']}",
+            f"{admin_user}@{entry_public}:{entry['ansible_port']}",
         ),
         (
             "SSH EXIT",
-            f"{exit_node['ansible_user']}@{exit_public}:{exit_node['ansible_port']}",
+            f"{admin_user}@{exit_public}:{exit_node['ansible_port']}",
         ),
         (
             "VPN-клиенты",
@@ -1592,7 +1782,7 @@ def show_deployment_summary(production: Path) -> None:
             f"UDP/{exit_vars.get('security_interserver_listen_port')} только от "
             f"{exit_vars.get('security_interserver_peer_ipv4')}",
         ),
-        ("Доступ SSH", "только по административному публичному ключу"),
+        ("Доступ SSH", f"{admin_user} по ключу; root-автоматизация — только с IPv4 controller"),
         ("Fail2Ban", "включён после подтверждения нового SSH-доступа"),
     ]
 
@@ -1654,7 +1844,7 @@ def show_deployment_summary(production: Path) -> None:
             "Клиенты:    vpn-user list/create/delete · awg-old · awg-mobile",
             "Маршруты:   ru-domain · se-domain · entry-domain · ru-direct-ports",
             "Прокси/DNS: ru-proxy · ru-proxy-set · dot-switch · doh-switch",
-            "Система:    maintenance · update-all · ./deploy --resume --update-components · f2b-reset",
+            "Система:    maintenance · update-all · kalimera-deploy --resume --update-components · f2b-reset",
         ],
         "blue",
     )
@@ -1719,7 +1909,14 @@ def complete_ssh_transition(
         if variables.get("security_allow_ssh_port_change", False):
             transitioning.append((group, name, variables))
 
-    if not transitioning:
+    all_vars_path = hosts_path.parent / "group_vars" / "all" / "main.yml"
+    all_vars = load_yaml(all_vars_path)
+    admin_transition_pending = bool(
+        all_vars.get("security_manage_admin_account", False)
+        and not all_vars.get("security_finalize_admin_access", False)
+    )
+
+    if not transitioning and not admin_transition_pending:
         return False
 
     print("Продолжается переход SSH: временно работают старый и новый порты...")
@@ -1739,20 +1936,36 @@ def complete_ssh_transition(
         },
     )
 
-    for _group, _name, variables in transitioning:
-        check_ssh(
-            str(variables["ansible_host"]),
-            str(variables["ansible_user"]),
-            int(variables["ssh_listen_port"]),
-            Path(str(variables["ansible_ssh_private_key_file"])),
-        )
-        current = int(variables["ansible_port"])
-        variables["ansible_port"] = int(variables["ssh_listen_port"])
-        variables["security_allow_ssh_port_change"] = False
-        variables["security_previous_ssh_port"] = current
+    transitioning_names = {name for _group, name, _variables in transitioning}
+    for group, name in managed_hosts:
+        variables = children[group]["hosts"][name]
+        if admin_transition_pending or name in transitioning_names:
+            automation_user = (
+                "root"
+                if all_vars.get("security_manage_admin_account", False)
+                else str(variables["ansible_user"])
+            )
+            check_ssh(
+                str(variables["ansible_host"]),
+                automation_user,
+                int(variables["ssh_listen_port"]),
+                Path(str(variables["ansible_ssh_private_key_file"])),
+            )
+        if name in transitioning_names:
+            current = int(variables["ansible_port"])
+            variables["ansible_port"] = int(variables["ssh_listen_port"])
+            variables["security_allow_ssh_port_change"] = False
+            variables["security_previous_ssh_port"] = current
+        if all_vars.get("security_manage_admin_account", False):
+            variables["ansible_user"] = "root"
+            variables.pop("ansible_become_password", None)
 
     require_operator_ssh_confirmation()
+    all_vars["security_finalize_admin_access"] = True
+    yaml_write(all_vars_path, all_vars)
     yaml_write(hosts_path, hosts_document)
+    if all_vars.get("security_manage_admin_account", False):
+        remove_bootstrap_become_passwords(hosts_path.parent, vault_password)
     return True
 
 
@@ -1841,6 +2054,7 @@ def main() -> None:
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
         ensure_runtime_secret_material(production, vault_password)
+        ensure_admin_account_material(production, vault_password, repo)
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
         if args.mobile_i1_mode:
@@ -1966,6 +2180,7 @@ def main() -> None:
         "ssh-copy-id",
         "ssh-keygen",
         "sshpass",
+        "openssl",
         "ssss-split",
         "ssss-combine",
     ):
@@ -2210,6 +2425,18 @@ def main() -> None:
     entry_public_ipv4 = resolve_single_public_ipv4(
         entry_public_endpoint, "AWG endpoint ENTRY сервера"
     )
+    controller_source_ipv4 = (
+        entry_public_ipv4 if local_entry else detect_local_public_ipv4(exit_public_ipv4)
+    )
+    if not controller_source_ipv4:
+        controller_source_ipv4 = prompt(
+            "Публичный IPv4 управляющей машины для ограниченного SSH-ключа"
+        )
+    try:
+        if not ipaddress.IPv4Address(controller_source_ipv4).is_global:
+            raise ValueError
+    except ValueError:
+        fail("Адрес управляющей машины должен быть публичным IPv4")
     ui_section(
         6,
         "ПЕРВЫЙ VPN-КЛИЕНТ",
@@ -2370,6 +2597,18 @@ def main() -> None:
         client_profile_name, initial_server_obfuscation
     )
 
+    account_passwords = {
+        "ENTRY · kalimera": generate_account_password(),
+        "ENTRY · root": generate_account_password(),
+        "EXIT · kalimera": generate_account_password(),
+        "EXIT · root": generate_account_password(),
+    }
+    account_password_hashes = {
+        label: hash_account_password(password)
+        for label, password in account_passwords.items()
+    }
+    show_generated_account_passwords(account_passwords)
+
     for key in ("ansible_user", "ansible_port", "ssh_listen_port"):
         all_vars.pop(key, None)
     all_vars.update(
@@ -2377,6 +2616,10 @@ def main() -> None:
             "awg_adoption_mode": "apply",
             "awg_package_version_mode": "candidate",
             "security_manage_ssh": True,
+            "security_manage_admin_account": True,
+            "security_admin_user": "kalimera",
+            "security_finalize_admin_access": False,
+            "security_controller_repo_path": str(repo),
             "security_admin_authorized_keys": [admin_public_key],
             "security_require_admin_authorized_key": True,
             "awg_interserver_entry_address": f"{entry_transit_ip}/32",
@@ -2506,6 +2749,9 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": entry_new_port,
             "security_allow_ssh_port_change": entry_current_port != entry_new_port,
+            "security_automation_source_ipv4": controller_source_ipv4,
+            "security_admin_password_hash": "{{ vault_entry_kalimera_password_hash }}",
+            "security_root_password_hash": "{{ vault_entry_root_password_hash }}",
             "runtime_secrets_share_index": 1,
         },
         "exit-managed": {
@@ -2516,6 +2762,9 @@ def main() -> None:
             "ansible_ssh_private_key_file": str(ssh_private),
             "ssh_listen_port": exit_new_port,
             "security_allow_ssh_port_change": exit_current_port != exit_new_port,
+            "security_automation_source_ipv4": controller_source_ipv4,
+            "security_admin_password_hash": "{{ vault_exit_kalimera_password_hash }}",
+            "security_root_password_hash": "{{ vault_exit_root_password_hash }}",
             "runtime_secrets_share_index": 2,
         },
     }
@@ -2553,6 +2802,10 @@ def main() -> None:
     entry_exchange_private, entry_exchange_public = ssh_exchange_keypair()
     exit_exchange_private, exit_exchange_public = ssh_exchange_keypair()
     vault_document: dict[str, object] = {
+        "vault_entry_kalimera_password_hash": account_password_hashes["ENTRY · kalimera"],
+        "vault_entry_root_password_hash": account_password_hashes["ENTRY · root"],
+        "vault_exit_kalimera_password_hash": account_password_hashes["EXIT · kalimera"],
+        "vault_exit_root_password_hash": account_password_hashes["EXIT · root"],
         "vault_awg_entry_private_key": entry_private,
         "vault_awg_entry_legacy_private_key": legacy_entry_private,
         "vault_awg_entry_mobile_private_key": mobile_entry_private,
@@ -2621,6 +2874,8 @@ def main() -> None:
     plaintext = yaml.safe_dump(vault_document, sort_keys=False).encode()
     encrypted = VaultLib([("default", VaultSecret(vault_secret))]).encrypt(plaintext)
     secure_write(staging / "group_vars" / "all" / "vault.yml", encrypted)
+    del account_passwords
+    del account_password_hashes
     obfuscation = initial_client_obfuscation
     client_server_private = (
         legacy_entry_private if client_mode == "legacy" else entry_private
@@ -2722,20 +2977,27 @@ def main() -> None:
         production / "group_vars" / "all" / "main.yml", awg_package_lock
     )
 
-    check_ssh(entry_host, entry_user, entry_new_port, ssh_private)
-    check_ssh(exit_host, exit_user, exit_new_port, ssh_private)
+    check_ssh(entry_host, "root", entry_new_port, ssh_private)
+    check_ssh(exit_host, "root", exit_new_port, ssh_private)
     require_operator_ssh_confirmation()
+
+    all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
+    all_vars["security_finalize_admin_access"] = True
+    yaml_write(production / "group_vars" / "all" / "main.yml", all_vars)
 
     for name, current, desired in (
         ("entry-managed", entry_current_port, entry_new_port),
         ("exit-managed", exit_current_port, exit_new_port),
     ):
+        host_vars[name]["ansible_user"] = "root"
+        host_vars[name].pop("ansible_become_password", None)
         host_vars[name]["ansible_port"] = desired
         host_vars[name]["security_allow_ssh_port_change"] = False
         host_vars[name]["security_previous_ssh_port"] = current
     hosts_document["all"]["children"]["entry"]["hosts"]["entry-managed"] = host_vars["entry-managed"]
     hosts_document["all"]["children"]["exit"]["hosts"]["exit-managed"] = host_vars["exit-managed"]
     yaml_write(hosts_path, hosts_document)
+    remove_bootstrap_become_passwords(production, vault_password)
 
     ui_step(
         "ЭТАП 2 · ФИНАЛЬНАЯ ПОЛИТИКА",

@@ -5,8 +5,8 @@
       {{ hostvars[groups['entry'][0]].entry_public_endpoint |
          default(hostvars[groups['entry'][0]].ansible_host) }}
     terminal_summary_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
-    terminal_summary_entry_user: "{{ hostvars[groups['entry'][0]].ansible_user | default('root') }}"
-    terminal_summary_exit_user: "{{ hostvars[groups['exit'][0]].ansible_user | default('root') }}"
+    terminal_summary_entry_user: "{{ security_admin_user | default('kalimera') }}"
+    terminal_summary_exit_user: "{{ security_admin_user | default('kalimera') }}"
     terminal_summary_entry_ssh_port: >-
       {{ hostvars[groups['entry'][0]].ssh_listen_port |
          default(hostvars[groups['entry'][0]].ansible_port | default(22)) }}

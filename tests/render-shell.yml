@@ -34,6 +34,7 @@
         - roles/operations/defaults/main.yml
         - roles/awg3_transit/defaults/main.yml
         - roles/runtime_secrets/defaults/main.yml
+        - roles/security/defaults/main.yml
 
     - name: Включение preview-ветвей логики для проверки шаблонов
       ansible.builtin.set_fact:
@@ -43,6 +44,8 @@
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
         runtime_secrets_enabled: true
+        security_manage_admin_account: true
+        security_admin_user: kalimera
         runtime_secrets_cluster_id: "00000000000000000000000000000000"
         runtime_secrets_peer_inventory_hosts:
           - exit.example.invalid
@@ -112,6 +115,23 @@
               - "{{ rendered_shell_root }}/runtime-config.json"
           changed_when: false
 
+        - name: Формирование ограниченной политики sudo рабочего администратора
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/security/templates/kalimera-admin.sudoers.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-admin.sudoers"
+            mode: "0440"
+
+        - name: Проверка отсутствия неограниченного passwordless sudo
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            sudoers_path={{ (rendered_shell_root ~ '/kalimera-admin.sudoers') | quote }}
+            grep -Fq '/usr/local/libexec/kalimera-admin-command *' "$sudoers_path"
+            grep -Fq '/usr/local/libexec/kalimera-share-export get-share' "$sudoers_path"
+            ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' "$sudoers_path"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
         - name: Формирование исполняемых шаблонов ENTRY
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../{{ item.src }}"
@@ -132,6 +152,10 @@
               dest: telegram-monitor-entry
             - src: roles/operations/templates/awg-kernel-guard.sh.j2
               dest: awg-kernel-guard
+            - src: roles/security/templates/kalimera-admin-command.sh.j2
+              dest: kalimera-admin-command
+            - src: roles/runtime_secrets/templates/share-export.sh.j2
+              dest: kalimera-share-export
             - src: roles/operations/templates/maintenance.sh.j2
               dest: maintenance
             - src: roles/operations/templates/update-all.sh.j2
@@ -322,6 +346,8 @@
               - "{{ rendered_shell_root }}/awg-managed-integrity-entry"
               - "{{ rendered_shell_root }}/telegram-monitor-entry"
               - "{{ rendered_shell_root }}/awg-kernel-guard"
+              - "{{ rendered_shell_root }}/kalimera-admin-command"
+              - "{{ rendered_shell_root }}/kalimera-share-export"
               - "{{ rendered_shell_root }}/maintenance"
               - "{{ rendered_shell_root }}/update-all"
               - "{{ rendered_shell_root }}/f2b-reset"

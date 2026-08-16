@@ -102,17 +102,30 @@
     mode: "0750"
   when: runtime_secrets_enabled | bool
 
-- name: Разрешение только текущим peer-узлам получить локальную долю
+- name: Удаление прежнего root-доступа обмена долями
   ansible.builtin.blockinfile:
     path: /root/.ssh/authorized_keys
+    marker: "# {mark} KALIMERAWG RUNTIME SHARE EXCHANGE"
+    state: absent
+  no_log: true
+  when:
+    - runtime_secrets_enabled | bool
+    - runtime_secrets_ssh_user != 'root'
+
+- name: Разрешение только текущим peer-узлам получить локальную долю
+  ansible.builtin.blockinfile:
+    path: >-
+      {{ '/home/' ~ runtime_secrets_ssh_user ~ '/.ssh/authorized_keys'
+         if runtime_secrets_ssh_user != 'root'
+         else '/root/.ssh/authorized_keys' }}
     create: true
-    owner: root
-    group: root
+    owner: "{{ runtime_secrets_ssh_user }}"
+    group: "{{ runtime_secrets_ssh_user }}"
     mode: "0600"
     marker: "# {mark} KALIMERAWG RUNTIME SHARE EXCHANGE"
     block: |
       {% for peer in runtime_secrets_peer_inventory_hosts %}
-      from="{{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) }}",restrict,command="{{ runtime_secrets_export_path }}" {{ vault_runtime_exchange_public_keys[peer] | regex_replace(' kalimerawg-share-exchange$', '') }} kalimerawg-share-exchange-{{ peer }}
+      from="{{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) }}",restrict,command="{{ '/usr/bin/sudo -n ' if runtime_secrets_ssh_user != 'root' else '' }}{{ runtime_secrets_export_path }} get-share {{ runtime_secrets_cluster_id }}" {{ vault_runtime_exchange_public_keys[peer] | regex_replace(' kalimerawg-share-exchange$', '') }} kalimerawg-share-exchange-{{ peer }}
       {% endfor %}
   no_log: true
   when: runtime_secrets_enabled | bool

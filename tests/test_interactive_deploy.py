@@ -67,6 +67,16 @@ class InteractiveDeployTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.detect_local_public_ipv4("unresolved.invalid"), "")
 
+    def test_generated_account_password_has_all_required_character_classes(self) -> None:
+        password = MODULE.generate_account_password(30)
+        self.assertEqual(len(password), 30)
+        self.assertRegex(password, r"[a-z]")
+        self.assertRegex(password, r"[A-Z]")
+        self.assertRegex(password, r"[0-9]")
+        self.assertRegex(password, r"[!@#$%^&*_+=-]")
+        with self.assertRaises(ValueError):
+            MODULE.generate_account_password(24)
+
     def test_component_update_uses_candidate_awg_and_stable_sing_box(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -220,6 +230,7 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch.object(Path, "home", return_value=home),
                 mock.patch.object(MODULE, "migrate_production_inventory"),
                 mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
                 mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
                 mock.patch.object(
                     MODULE,
@@ -430,7 +441,9 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('linux-headers-$kernel_release', guard)
         self.assertIn("dkms status", guard)
         self.assertIn("'^amneziawg/'", guard)
-        self.assertNotIn("dpkg-query", guard)
+        self.assertIn("dpkg-query -W", guard)
+        self.assertIn("/lib/modules/*", guard)
+        self.assertIn("linux-image-unsigned-", guard)
         self.assertNotIn("Пакет amneziawg-dkms не установлен", guard)
         self.assertIn('dkms autoinstall -k "$kernel_release"', guard)
         self.assertIn('modinfo -k "$kernel_release" amneziawg', guard)
@@ -635,6 +648,7 @@ class InteractiveDeployTests(unittest.TestCase):
     def test_bootstrap_readline_edits_with_backspace_and_arrows(self) -> None:
         deploy = (MODULE_PATH.parents[2] / "deploy").read_text(encoding="utf-8")
         self.assertIn("IFS= read -e -r answer", deploy)
+        self.assertIn("openssl sshpass ssss", deploy)
         self.assertIn("RESULT=<user>", self.run_bash_readline(b"usea\x08r\n"))
         self.assertIn("RESULT=<usra>", self.run_bash_readline(b"usea\x1b[D\x08r\n"))
 
@@ -1523,6 +1537,83 @@ class InteractiveDeployTests(unittest.TestCase):
                 MODULE.ensure_runtime_secret_material(production, password_path)
             )
 
+    def test_admin_account_material_is_generated_once_and_only_hashes_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_admin_authorized_keys": [
+                        "ssh-ed25519 AAAAfixture admin@example"
+                    ]
+                },
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {"hosts": {"entry-managed": {}}},
+                            "exit": {"hosts": {"exit-managed": {}}},
+                        }
+                    }
+                },
+            )
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump({}).encode("utf-8"))
+            )
+            generated = iter(
+                [
+                    "Aa2!" + "a" * 26,
+                    "Bb3@" + "b" * 26,
+                    "Cc4#" + "c" * 26,
+                    "Dd5$" + "d" * 26,
+                ]
+            )
+            with (
+                mock.patch.object(
+                    MODULE, "generate_account_password", side_effect=lambda: next(generated)
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$fixture${password[:4]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords") as show,
+            ):
+                self.assertTrue(
+                    MODULE.ensure_admin_account_material(
+                        production, password_path, root / "repo"
+                    )
+                )
+                self.assertFalse(
+                    MODULE.ensure_admin_account_material(
+                        production, password_path, root / "repo"
+                    )
+                )
+            show.assert_called_once()
+
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertEqual(len(decrypted), 4)
+            self.assertTrue(all(value.startswith("$6$") for value in decrypted.values()))
+            self.assertNotIn("Aa2!", (all_root / "vault.yml").read_text(encoding="utf-8"))
+            all_vars = yaml.safe_load(
+                (all_root / "main.yml").read_text(encoding="utf-8")
+            )
+            self.assertTrue(all_vars["security_manage_admin_account"])
+            self.assertFalse(all_vars["security_finalize_admin_access"])
+            self.assertTrue(all_vars["security_require_admin_authorized_key"])
+
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1546,8 +1637,8 @@ class InteractiveDeployTests(unittest.TestCase):
                     "n",
                     "entry.invalid",
                     "exit.invalid",
-                    "root",
-                    "root",
+                    "ubuntu",
+                    "deployer",
                     "22",
                     "2222",
                     "56777",
@@ -1557,6 +1648,8 @@ class InteractiveDeployTests(unittest.TestCase):
                     "39744",
                     "",
                     admin_public_key,
+                    "",
+                    "",
                     "1",
                     "n",
                     "y",
@@ -1593,6 +1686,17 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
                 mock.patch("getpass.getpass", side_effect=lambda _="": next(hidden_answers)),
                 mock.patch.object(MODULE, "require_command", side_effect=lambda name: name),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$fixture${password[:8]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords"),
+                mock.patch.object(
+                    MODULE,
+                    "detect_local_public_ipv4",
+                    return_value="8.8.8.8",
+                ),
                 mock.patch.object(
                     MODULE,
                     "split_runtime_secret",
@@ -1639,8 +1743,17 @@ class InteractiveDeployTests(unittest.TestCase):
             exit_node = inventory["all"]["children"]["exit"]["hosts"]["exit-managed"]
             self.assertEqual(entry["ansible_port"], 56777)
             self.assertEqual(exit_node["ansible_port"], 56778)
+            self.assertEqual(entry["ansible_user"], "root")
+            self.assertEqual(exit_node["ansible_user"], "root")
+            self.assertNotIn("ansible_become_password", entry)
+            self.assertNotIn("ansible_become_password", exit_node)
             self.assertFalse(entry["security_allow_ssh_port_change"])
             self.assertEqual(entry["security_previous_ssh_port"], 22)
+            self.assertEqual(entry["security_automation_source_ipv4"], "8.8.8.8")
+            self.assertEqual(
+                entry["security_admin_password_hash"],
+                "{{ vault_entry_kalimera_password_hash }}",
+            )
             entry_vars = yaml.safe_load(
                 (repo / "inventory" / "production" / "group_vars" / "entry.yml").read_text(encoding="utf-8")
             )
@@ -1677,6 +1790,9 @@ class InteractiveDeployTests(unittest.TestCase):
                 (repo / "inventory" / "production" / "group_vars" / "all" / "main.yml").read_text(encoding="utf-8")
             )
             self.assertEqual(len(all_vars["security_admin_authorized_keys"]), 1)
+            self.assertTrue(all_vars["security_manage_admin_account"])
+            self.assertEqual(all_vars["security_admin_user"], "kalimera")
+            self.assertTrue(all_vars["security_finalize_admin_access"])
             self.assertEqual(all_vars["awg_package_version_mode"], "pinned")
             self.assertEqual(all_vars["awg_package_versions"]["amneziawg"], "1.0")
             self.assertTrue(all_vars["runtime_secrets_enabled"])
@@ -1694,6 +1810,12 @@ class InteractiveDeployTests(unittest.TestCase):
             ).decrypt(encrypted)
             vault = yaml.safe_load(plaintext)
             self.assertIn("vault_awg_entry_private_key", vault)
+            self.assertRegex(vault["vault_entry_kalimera_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_entry_root_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_exit_kalimera_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_exit_root_password_hash"], r"^[$]6[$]")
+            self.assertNotIn("vault_entry_become_password", vault)
+            self.assertNotIn("vault_exit_become_password", vault)
             self.assertIn("vault_awg_entry_legacy_private_key", vault)
             self.assertIn("vault_awg_entry_mobile_private_key", vault)
             self.assertIn("vault_awg3_header_protection_key", vault)
