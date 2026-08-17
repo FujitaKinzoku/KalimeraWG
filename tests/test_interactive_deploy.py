@@ -1893,7 +1893,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertFalse(all_vars["security_finalize_admin_access"])
             self.assertTrue(all_vars["security_require_admin_authorized_key"])
 
-    def test_undelivered_account_passwords_are_rotated_and_deferred_on_resume(self) -> None:
+    def test_resume_preserves_admin_passwords_and_defers_undelivered_passwords(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             production = root / "inventory" / "production"
@@ -1924,8 +1924,10 @@ class InteractiveDeployTests(unittest.TestCase):
             )
             old_hashes = {
                 "vault_entry_kalimera_password_hash": "$6$old$entry-admin",
+                "vault_entry_kalimera_password": "Ee6%" + "e" * 26,
                 "vault_entry_root_password_hash": "$6$old$entry-root",
                 "vault_exit_kalimera_password_hash": "$6$old$exit-admin",
+                "vault_exit_kalimera_password": "Ff7^" + "f" * 26,
                 "vault_exit_root_password_hash": "$6$old$exit-root",
             }
             vault = VaultLib([("default", VaultSecret(b"test-vault-password"))])
@@ -1936,8 +1938,6 @@ class InteractiveDeployTests(unittest.TestCase):
                 [
                     "Aa2!" + "a" * 26,
                     "Bb3@" + "b" * 26,
-                    "Cc4#" + "c" * 26,
-                    "Dd5$" + "d" * 26,
                 ]
             )
             pending: dict[str, str] = {}
@@ -1961,25 +1961,50 @@ class InteractiveDeployTests(unittest.TestCase):
                         regenerate_undelivered=True,
                     )
                 )
+                self.assertEqual(
+                    MODULE.generate_account_password.call_count,
+                    2,
+                )
             show.assert_not_called()
             self.assertEqual(len(pending), 4)
             decrypted = yaml.safe_load(
                 vault.decrypt((all_root / "vault.yml").read_bytes())
             )
             self.assertTrue(
-                all(
-                    value.startswith("$6$new$")
-                    for key, value in decrypted.items()
-                    if key.endswith("_hash")
-                )
+                decrypted["vault_entry_root_password_hash"].startswith("$6$new$")
+            )
+            self.assertTrue(
+                decrypted["vault_exit_root_password_hash"].startswith("$6$new$")
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password_hash"],
+                "$6$old$entry-admin",
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password_hash"],
+                "$6$old$exit-admin",
             )
             self.assertEqual(
                 decrypted["vault_entry_kalimera_password"],
-                "Aa2!" + "a" * 26,
+                "Ee6%" + "e" * 26,
             )
             self.assertEqual(
                 decrypted["vault_exit_kalimera_password"],
-                "Cc4#" + "c" * 26,
+                "Ff7^" + "f" * 26,
+            )
+            self.assertEqual(
+                pending,
+                {
+                    "ENTRY · kalimera": "Ee6%" + "e" * 26,
+                    "ENTRY · root": "Aa2!" + "a" * 26,
+                    "EXIT · kalimera": "Ff7^" + "f" * 26,
+                    "EXIT · root": "Bb3@" + "b" * 26,
+                },
+            )
+            resumed_all_vars = MODULE.load_yaml(all_root / "main.yml")
+            self.assertNotIn(
+                "security_finalize_admin_access",
+                resumed_all_vars,
             )
 
             MODULE.mark_account_passwords_delivered(production)

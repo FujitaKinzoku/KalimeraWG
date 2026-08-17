@@ -942,7 +942,7 @@ def ensure_admin_account_material(
     pending_passwords: dict[str, str] | None = None,
     regenerate_undelivered: bool = False,
 ) -> bool:
-    """Добавить рабочие учётные записи в старый inventory без хранения паролей."""
+    """Подготовить рабочие учётные записи без рассинхронизации sudo на resume."""
     vault_path = production / "group_vars" / "all" / "vault.yml"
     all_path = production / "group_vars" / "all" / "main.yml"
     hosts_path = production / "hosts.yml"
@@ -960,7 +960,7 @@ def ensure_admin_account_material(
 
     all_vars = load_yaml(all_path)
     passwords_delivered = all_vars.get("security_account_passwords_delivered")
-    regenerate_all = bool(
+    redeliver_undelivered = bool(
         regenerate_undelivered and passwords_delivered is False
     )
     required = (
@@ -977,23 +977,43 @@ def ensure_admin_account_material(
         ),
         ("vault_exit_root_password_hash", None, "EXIT · root"),
     )
-    generated: dict[str, str] = {}
+    passwords_for_delivery: dict[str, str] = {}
+    vault_changed = False
+    admin_material_changed = False
     for hash_key, automation_password_key, label in required:
         missing_hash = not str(vault_document.get(hash_key, "")).startswith("$6$")
-        missing_automation_password = bool(
-            automation_password_key
-            and not str(vault_document.get(automation_password_key, ""))
+        automation_password = (
+            str(vault_document.get(automation_password_key, ""))
+            if automation_password_key
+            else ""
         )
-        if regenerate_all or missing_hash or missing_automation_password:
+        if automation_password_key and automation_password:
+            if missing_hash:
+                vault_document[hash_key] = hash_account_password(
+                    automation_password
+                )
+                vault_changed = True
+            if redeliver_undelivered:
+                passwords_for_delivery[label] = automation_password
+            continue
+
+        needs_password = bool(
+            missing_hash
+            or (automation_password_key and not automation_password)
+            or (redeliver_undelivered and automation_password_key is None)
+        )
+        if needs_password:
             password = generate_account_password()
-            generated[label] = password
+            passwords_for_delivery[label] = password
             vault_document[hash_key] = hash_account_password(password)
+            vault_changed = True
             if automation_password_key:
                 vault_document[automation_password_key] = password
+                admin_material_changed = True
 
     hosts_document = load_yaml(hosts_path)
-    changed = bool(generated)
-    transition_required = bool(generated) or not bool(
+    changed = vault_changed
+    transition_required = admin_material_changed or not bool(
         all_vars.get("security_manage_admin_account", False)
     )
     admin_keys = all_vars.get("security_admin_authorized_keys", [])
@@ -1009,7 +1029,7 @@ def ensure_admin_account_material(
         "security_controller_repo_path": str(repo),
         "security_require_admin_authorized_key": True,
     }
-    if generated and passwords_delivered is not False:
+    if passwords_for_delivery and passwords_delivered is not False:
         expected_all["security_account_passwords_delivered"] = False
     if transition_required:
         expected_all["security_finalize_admin_access"] = False
@@ -1058,12 +1078,12 @@ def ensure_admin_account_material(
             vault_path.chmod(0o600)
         finally:
             temporary.unlink(missing_ok=True)
-    if generated:
+    if passwords_for_delivery:
         if pending_passwords is None:
-            show_generated_account_passwords(generated)
+            show_generated_account_passwords(passwords_for_delivery)
         else:
-            pending_passwords.update(generated)
-        generated.clear()
+            pending_passwords.update(passwords_for_delivery)
+        passwords_for_delivery.clear()
     return changed
 
 
