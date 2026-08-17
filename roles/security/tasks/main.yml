@@ -573,9 +573,14 @@
   failed_when: false
   changed_when: false
 
-- name: "Получение фактического набора правил UFW"
-  ansible.builtin.command:
-    argv: [/usr/sbin/ufw, status, numbered]
+- name: "Получение постоянного набора управляемых правил UFW"
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    LC_ALL=C /usr/sbin/ufw status |
+      /usr/bin/sed -E \
+        '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+  args:
+    executable: /bin/bash
   register: security_ufw_actual_status
   changed_when: false
   failed_when: false
@@ -1365,9 +1370,14 @@
 # прежнего порта удаляется только в конце SSH-блока. Снимок, сделанный до
 # этого удаления, немедленно становился устаревшим и строгая проверка UFW
 # не могла пройти даже на чистой установке.
-- name: "Получение окончательной политики UFW после перехода SSH"
-  ansible.builtin.command:
-    argv: [/usr/sbin/ufw, status, numbered]
+- name: "Получение окончательной постоянной политики UFW после перехода SSH"
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    LC_ALL=C /usr/sbin/ufw status |
+      /usr/bin/sed -E \
+        '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+  args:
+    executable: /bin/bash
   register: security_ufw_final_status
   changed_when: false
 

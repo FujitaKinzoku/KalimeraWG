@@ -179,7 +179,15 @@ ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
     expected="$(cut -d '|' -f 2 "$marker")"
-    status="$(ufw status numbered)"
+    # Fail2Ban закономерно добавляет и удаляет временные REJECT-правила. Они
+    # имеют собственный комментарий и не являются изменением постоянной
+    # управляемой политики KalimeraWG. Все остальные правила остаются частью
+    # контролируемого отпечатка.
+    status="$(
+        LC_ALL=C ufw status |
+            sed -E \
+                '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+    )"
     actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     [[ -n "$expected" && "$actual" == "$expected" ]]
 }

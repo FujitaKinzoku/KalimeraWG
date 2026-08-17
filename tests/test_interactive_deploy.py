@@ -1205,6 +1205,14 @@ class InteractiveDeployTests(unittest.TestCase):
                 'name: "Фиксация отпечатка окончательной политики UFW"'
             ),
         )
+        self.assertIn(
+            "by Fail2Ban after [0-9]+ attempts against sshd", security_tasks
+        )
+        self.assertIn(
+            "by Fail2Ban after [0-9]+ attempts against sshd", health
+        )
+        self.assertNotIn("ufw status numbered", security_tasks)
+        self.assertNotIn("ufw status numbered", health)
 
         fail2ban_jail = (
             root / "roles/fail2ban/templates/fail2ban-sshd.local.j2"
