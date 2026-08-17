@@ -1199,6 +1199,12 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("169.254.0.0/16", security_tasks)
         self.assertIn("Изоляция служебного AWG 3+", security_tasks)
         self.assertIn("взаимно изолированы", health)
+        self.assertLess(
+            security_tasks.index('name: "Удаление: безопасность — этап 38"'),
+            security_tasks.index(
+                'name: "Фиксация отпечатка окончательной политики UFW"'
+            ),
+        )
 
         fail2ban_jail = (
             root / "roles/fail2ban/templates/fail2ban-sshd.local.j2"

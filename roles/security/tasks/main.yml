@@ -1004,22 +1004,6 @@
   community.general.ufw:
     logging: "{{ security_ufw_logging_level }}"
 
-- name: "Фиксация отпечатка применённой политики UFW"
-  ansible.builtin.command:
-    argv: [/usr/sbin/ufw, status, numbered]
-  register: security_ufw_final_status
-  changed_when: false
-
-- name: "Фиксация отпечатка применённой политики UFW"
-  ansible.builtin.copy:
-    dest: "{{ security_ufw_policy_marker }}"
-    content: >-
-      {{ security_ufw_policy_fingerprint }}|{{ security_ufw_final_status.stdout | hash('sha256') }}
-
-    owner: root
-    group: root
-    mode: "0600"
-
 - name: "Завершение транзакции пересборки UFW"
   ansible.builtin.file:
     path: "{{ item }}"
@@ -1376,3 +1360,23 @@
   ansible.builtin.debug:
     msg: "SSH не изменяется, поскольку security_manage_ssh=false."
   when: not security_manage_ssh | bool
+
+# При первоначальном переносе SSH на управляемый порт переходное правило
+# прежнего порта удаляется только в конце SSH-блока. Снимок, сделанный до
+# этого удаления, немедленно становился устаревшим и строгая проверка UFW
+# не могла пройти даже на чистой установке.
+- name: "Получение окончательной политики UFW после перехода SSH"
+  ansible.builtin.command:
+    argv: [/usr/sbin/ufw, status, numbered]
+  register: security_ufw_final_status
+  changed_when: false
+
+- name: "Фиксация отпечатка окончательной политики UFW"
+  ansible.builtin.copy:
+    dest: "{{ security_ufw_policy_marker }}"
+    content: >-
+      {{ security_ufw_policy_fingerprint }}|{{ security_ufw_final_status.stdout | hash('sha256') }}
+
+    owner: root
+    group: root
+    mode: "0600"
