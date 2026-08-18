@@ -99,7 +99,7 @@ fail2ban_sshd_policy_is_strict() {
     local jail=/etc/fail2ban/jail.d/zz-awg-sshd.local
     fail2ban-client -t >/dev/null 2>&1 &&
         fail2ban-client status sshd >/dev/null 2>&1 &&
-        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry }}" ]] &&
+        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry | int }}" ]] &&
         grep -Eq '^[[:space:]]*mode[[:space:]]*=[[:space:]]*aggressive[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
@@ -322,7 +322,7 @@ check 'служба AWG 3+ до EXIT сервера' systemctl is-active --quiet
 check 'служба AWG до EXIT сервера' systemctl is-active --quiet awg-quick@{{ entry_exit_interface }}.service
 {% endif %}
 check 'клиентский интерфейс AWG' ip link show {{ entry_client_interface | quote }}
-check 'MTU клиентского интерфейса согласован с каскадом' interface_mtu_is {{ entry_client_interface | quote }} {{ entry_awg_client_mtu }}
+check 'MTU клиентского интерфейса согласован с каскадом' interface_mtu_is {{ entry_client_interface | quote }} {{ entry_awg_client_mtu | int }}
 check 'интерфейс AWG до EXIT сервера' ip link show {{ entry_exit_interface | quote }}
 check 'состояние клиентского AWG доступно' awg show {{ entry_client_interface | quote }}
 {% if entry_legacy_client_available | default(false) | bool %}
@@ -341,7 +341,7 @@ if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.ser
     check 'служба мобильного AWG' systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service
     check 'мобильный интерфейс AWG' ip link show {{ entry_mobile_client_interface | quote }}
     check 'состояние мобильного AWG доступно' awg show {{ entry_mobile_client_interface | quote }}
-    check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu }}
+    check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu | int }}
     check 'внешний UDP/8443 мобильного AWG открыт напрямую' {{ entry_mobile_firewall_path | quote }} check
 elif systemctl is-failed --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
     check 'служба мобильного AWG не завершилась с ошибкой' false
@@ -358,7 +358,7 @@ check 'состояние AWG до EXIT сервера доступно' awg sho
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
-check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu }}
+check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu | int }}
 {% else %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
 {% endif %}
@@ -366,13 +366,13 @@ check 'согласование локальных VPN-пиров' systemctl is-
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
 check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
 check 'служба Unbound' systemctl is-active --quiet unbound.service
-check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port }}' {{ entry_dns_resolved_dropin_path | quote }}
+check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port | int }}' {{ entry_dns_resolved_dropin_path | quote }}
 check 'системное разрешение имён' getent ahostsv4 example.com
 check 'синтаксис dnsmasq' dnsmasq --test
 check 'синтаксис Unbound' unbound-checkconf
 check 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
 check 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
-check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port }} example.com A
+check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} example.com A
 check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
 {% if entry_legacy_client_available | default(false) | bool %}
@@ -455,7 +455,7 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
     check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
     check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
     check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
-    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port }} yandex.ru A
+    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port | int }} yandex.ru A
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" == proxy ]]; then
         check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
@@ -489,7 +489,7 @@ check 'состояние AWG EXIT сервера доступно' awg show {{ 
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
-check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu }}
+check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu | int }}
 {% else %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
 {% endif %}
