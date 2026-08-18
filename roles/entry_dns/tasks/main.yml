@@ -250,12 +250,30 @@
     enabled: true
     state: "{{ 'restarted' if entry_dns_resolved_dropin.changed else 'started' }}"
 
-- name: "Очистка: DNS ENTRY сервера — этап 25"
+- name: "Переключение: DNS ENTRY сервера — этап 25"
+  ansible.builtin.file:
+    path: /etc/resolv.conf
+    src: /run/systemd/resolve/stub-resolv.conf
+    state: link
+    force: true
+
+# Некоторые провайдеры VPS используют cloud-init с manage_resolv_conf: true
+# и однократно (per-once) записывают /etc/resolv.conf с собственным DNS
+# хостера в обход systemd-resolved. Без этого шага системные запросы (getent,
+# Python socket.getaddrinfo) идут напрямую к DNS хостера через NSS-модуль
+# dns, минуя локальный Unbound и политику no-logs, и блокируются строгим UFW.
+- name: "Настройка: DNS ENTRY сервера — этап 26"
+  ansible.builtin.lineinfile:
+    path: /etc/nsswitch.conf
+    regexp: '^hosts:'
+    line: 'hosts:          files resolve [!UNAVAIL=return] dns'
+
+- name: "Очистка: DNS ENTRY сервера — этап 27"
   ansible.builtin.command:
     argv: [/usr/bin/resolvectl, flush-caches]
   changed_when: false
 
-- name: "Проверка: DNS ENTRY сервера — этап 26"
+- name: "Проверка: DNS ENTRY сервера — этап 28"
   ansible.builtin.command:
     argv: [/usr/bin/getent, ahostsv4, example.com]
   register: entry_dns_system_resolution
