@@ -9,6 +9,7 @@ Before=awg-telegram-monitor.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec={{ (runtime_secrets_unlock_timeout_seconds | int) + 30 }}
 ExecStart={{ runtime_secrets_unlock_path }}
 ExecStartPost={{ runtime_secrets_ctl_path }} verify
 RemainAfterExit=yes
