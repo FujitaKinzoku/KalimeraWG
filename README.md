@@ -13,7 +13,7 @@
 AmneziaWG 3+ · автоматический PMTU/MTU · маршрутный DNS · SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-7B2CBF" alt="KalimeraWG v1.0.0"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.0.0"><img src="https://img.shields.io/badge/release-v2.0.0-7B2CBF" alt="KalimeraWG v2.0.0"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3+-7B2CBF" alt="AmneziaWG 3+">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -23,7 +23,14 @@ AmneziaWG 3+ · автоматический PMTU/MTU · маршрутный DN
 
 KalimeraWG превращает две чистые VPS с Ubuntu 24.04 в воспроизводимый каскад,
 создаёт первого VPN-клиента и устанавливает инструменты эксплуатации. Выпуск
-`v1.0.0` проверен повторными чистыми установками на разных VPS.
+`v2.0.0` проверен повторными чистыми установками на разных VPS.
+
+> **v2.0.0 — крупный релиз усиления безопасности.** Переработана модель
+> доступа (отдельный администратор `kalimera` вместо повседневного root),
+> добавлена пороговая защита секретов на диске, ужесточены SSH и политика
+> хранения логов, устранены гонки каскада при загрузке. Подробности — в
+> разделе [Что нового в v2.0.0](#что-нового-в-v200) и в
+> [CHANGELOG.md](CHANGELOG.md).
 
 ## Быстрый старт
 
@@ -38,10 +45,10 @@ KalimeraWG превращает две чистые VPS с Ubuntu 24.04 в во�
 Запустите на ENTRY от `root`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v1.0.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.0.0/install.sh | bash
 ```
 
-Команда загружает и устанавливает именно выпуск `v1.0.0`, а не изменяемое
+Команда загружает и устанавливает именно выпуск `v2.0.0`, а не изменяемое
 состояние ветки `main`. Проверить версию локальной копии:
 
 ```bash
@@ -55,7 +62,7 @@ cd /root/KalimeraWG
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v1.0.0 --depth 1 \
+git clone --branch v2.0.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -66,6 +73,28 @@ cd /root/KalimeraWG
 Установщик запросит адреса и SSH-порты серверов, административный публичный
 SSH-ключ, режим RU-маршрута, DNS, необязательные SOCKS5 и Telegram, а затем
 создаст конфигурацию первого клиента. Закрытый SSH-ключ вводить нельзя.
+
+## Что нового в v2.0.0
+
+Релиз `v2.0.0` — пакет усиления безопасности поверх `v1.0.0`: без изменения
+портов, MTU, DNS-политик и маршрутов каскада. Основные изменения:
+
+| Область | Было в v1.0.0 | Стало в v2.0.0 |
+|---|---|---|
+| Администрирование | повседневная работа под `root` по SSH-ключу | отдельный пользователь `kalimera`; `root` SSH ограничен адресом автоматизации |
+| Пароли | единый пароль `root` | 4 независимых 30-символьных пароля `kalimera`/`root` на ENTRY и EXIT; показываются один раз, в Vault — только SHA-512-хеши |
+| Секреты на диске | обычные файлы конфигурации AWG/AWG3/sing-box | пороговая защита Shamir `2-of-5` + AES-256-GCM; открытые данные только в `/run`, конфиги передаются через systemd credentials |
+| Загрузка каскада | службы стартуют сразу | fail-closed старт: ожидание кворума долей, проверка закреплённых SSH host keys, отказ при изменённом пакете |
+| SSH | key-only доступ, Fail2Ban | дополнительно: скрытый banner, запрет пользовательских startup-файлов, адресное ограничение ключа автоматизации, отдельный резервный административный ключ |
+| Хранение логов | стандартный journald и Fail2Ban | политика no-logs: journald/Fail2Ban/учёт входов только в RAM; UFW/sing-box/DNS query logs, shell history и coredump отключены |
+| Аудит | `server-audit` | добавлен `ssh-key-audit` (посторонние ключи root) и расширенный `server-audit` (публичные listener'ы, соответствие no-logs политике) |
+| Надёжность каскада | — | устранены гонки маршрутизации и AWG3 при загрузке, добавлено самовосстановление маршрута EXIT, устранены ложные срабатывания health-check после перезагрузки |
+| Ядро/DKMS | проверка `/vmlinuz` | guard распознаёт все установленные ядра, включая signed/unsigned kernel-пакеты |
+
+Полный список изменений — в [CHANGELOG.md](CHANGELOG.md) (раздел `[2.0.0]`).
+Модель угроз и границы доверия для новых механизмов — в
+[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md) и
+[docs/security-boundary.md](docs/security-boundary.md).
 
 ## Как устроен каскад
 
@@ -128,7 +157,7 @@ ru-direct-ports add 993
 
 ### Проверенная совместимость
 
-| Контур | Проверка выпуска `v1.0.0` |
+| Контур | Проверка выпуска `v2.0.0` |
 |---|---|
 | Ubuntu 24.04 LTS | повторные чистые установки на VPS разных провайдеров, перезагрузка и строгий аудит |
 | ENTRY–EXIT | свежий AWG 3+ handshake, согласованный MTU и восстановление после перезагрузки |
@@ -162,9 +191,9 @@ vpn-user delete phone
 | `awg-health` и `server-audit` | незаметный дрейф служб, UFW, DNS и маршрутов |
 | Telegram | отсутствие уведомлений о перезагрузке, отказе и восстановлении |
 
-## Безопасность v1.0.0
+## Безопасность v2.0.0
 
-В первом стабильном выпуске усилены следующие границы:
+В `v2.0.0` усилены следующие границы:
 
 | Область | Реализация |
 |---|---|
@@ -194,7 +223,7 @@ vpn-user delete phone
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Домены | `ru-domain`, `se-domain`, `entry-domain` |
 | RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
-| Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `telegram-test` |
+| Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 
 При новом SSH-входе ENTRY и EXIT показывают адаптивную таблицу с фактическими
@@ -255,4 +284,4 @@ KalimeraWG не переключает установленный сервер �
 KalimeraWG не является официальным проектом Amnezia VPN. Сторонние компоненты и
 лицензии перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v1.0.0 · два сервера, один управляемый маршрут</b></p>
+<p align="center"><b>KalimeraWG v2.0.0 · два сервера, один управляемый маршрут</b></p>
