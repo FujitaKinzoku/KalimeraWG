@@ -13,7 +13,7 @@
 AmneziaWG 3+ · automatic PMTU/MTU · route-aware DNS · optional SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/release-v1.0.0-7B2CBF" alt="KalimeraWG v1.0.0"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.0.0"><img src="https://img.shields.io/badge/release-v2.0.0-7B2CBF" alt="KalimeraWG v2.0.0"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3+-7B2CBF" alt="AmneziaWG 3+">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -22,7 +22,14 @@ AmneziaWG 3+ · automatic PMTU/MTU · route-aware DNS · optional SOAX/SOCKS5</e
 
 KalimeraWG turns two clean Ubuntu 24.04 VPS instances into a reproducible
 ENTRY/EXIT cascade, creates the first client, and installs operational tools.
-Release `v1.0.0` has been verified through repeated clean VPS deployments.
+Release `v2.0.0` has been verified through repeated clean VPS deployments.
+
+> **v2.0.0 is a major security-hardening release.** The access model changed
+> (a dedicated `kalimera` administrator instead of everyday root), on-disk
+> secrets now get threshold protection, SSH and log-retention policy were
+> tightened, and cascade boot races were fixed. See
+> [What's new in v2.0.0](#whats-new-in-v200) and [CHANGELOG.md](CHANGELOG.md)
+> for details.
 
 ## Quick start
 
@@ -37,11 +44,33 @@ Release `v1.0.0` has been verified through repeated clean VPS deployments.
 Run as `root` on ENTRY:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v1.0.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.0.0/install.sh | bash
 ```
 
-The command installs the immutable `v1.0.0` tag rather than the moving `main`
+The command installs the immutable `v2.0.0` tag rather than the moving `main`
 branch. Confirm the local version with `./deploy --version`.
+
+## What's new in v2.0.0
+
+`v2.0.0` is a security-hardening package on top of `v1.0.0`: ports, MTU, DNS
+policy, and cascade routing are unchanged. Highlights:
+
+| Area | v1.0.0 | v2.0.0 |
+|---|---|---|
+| Administration | everyday work as `root` over SSH keys | dedicated `kalimera` account; `root` SSH is restricted to the automation source address |
+| Passwords | a single `root` password | 4 independent 30-character `kalimera`/`root` passwords per ENTRY and EXIT, shown once; only SHA-512 hashes remain in Vault |
+| On-disk secrets | plain AWG/AWG3/sing-box/Telegram config files | Shamir `2-of-5` threshold protection + AES-256-GCM; plaintext only in `/run`, configs delivered via systemd credentials |
+| Cascade boot | services start immediately | fail-closed startup: waits for a share quorum, verifies pinned SSH host keys, refuses to start on a missing/modified package |
+| SSH | key-only access, Fail2Ban | additionally: hidden banner, no user startup files, automation key restricted to its source address, separate recovery admin key |
+| Log retention | standard journald and Fail2Ban | no-logs policy: journald/Fail2Ban/login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
+| Auditing | `server-audit` | added `ssh-key-audit` (foreign root keys) and an expanded `server-audit` (public listeners, no-logs policy compliance) |
+| Cascade reliability | — | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
+| Kernel/DKMS | checks `/vmlinuz` | guard now recognizes every installed kernel, including signed/unsigned kernel packages |
+
+See the full changelog in [CHANGELOG.md](CHANGELOG.md) (the `[2.0.0]` section) and the
+threat model for the new mechanisms in
+[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md) and
+[docs/security-boundary.md](docs/security-boundary.md).
 
 ## Architecture
 
@@ -72,7 +101,7 @@ and transit segments use separate interfaces, keys, and parameters.
 
 ### Validated compatibility
 
-| Path | `v1.0.0` validation |
+| Path | `v2.0.0` validation |
 |---|---|
 | Ubuntu 24.04 LTS | repeated clean deployments across different VPS providers, reboot, and strict audit |
 | ENTRY–EXIT | fresh AWG 3+ handshake, coordinated MTU, and post-reboot recovery |
@@ -113,8 +142,9 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | bounded DNS/APT/SSH/AWG3 retries | tolerates transient provider failures |
 | SOCKS5 watchdog | stateful fail-open and recovery |
 | health/audit gates | detect service, firewall, DNS, and routing drift |
+| Telegram | alerts on reboot, failover, and recovery |
 
-## Security in v1.0.0
+## Security in v2.0.0
 
 | Boundary | Implementation |
 |---|---|
@@ -127,7 +157,9 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | Kernel | headers, DKMS and `modinfo` verified for the running and newest installed kernels |
 | DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience |
 | No-logs | journal and login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
+| On-disk secrets | Shamir `2-of-5` + AES-256-GCM; plaintext configuration only in `/run`; services receive AWG/AWG3/sing-box/Telegram config via systemd credentials |
 | AWG3 failures | bounded retries and sanitized diagnostics without key material |
+| VPS networking | compatible with both ifupdown and systemd-networkd without replacing the hosting provider's network manager |
 | Repository | Gitleaks plus YAML, Ansible, Shell, and Python checks |
 
 See [SECURITY.md](SECURITY.md) and
@@ -142,6 +174,7 @@ See [SECURITY.md](SECURITY.md) and
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Routing | `ru-domain`, `se-domain`, `entry-domain`, `ru-direct-ports` |
 | Proxy | `ru-proxy`, `ru-proxy-set` |
+| Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 
 Normal post-installation administration uses the `kalimera` account. Project
@@ -178,4 +211,4 @@ lawful use and provider terms.
 KalimeraWG is not an official Amnezia VPN project. Third-party notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v1.0.0 · two servers, one managed route</b></p>
+<p align="center"><b>KalimeraWG v2.0.0 · two servers, one managed route</b></p>
