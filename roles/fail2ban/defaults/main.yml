@@ -1,3 +1,4 @@
 ---
 awg_enable_fail2ban: true
 security_fail2ban_file: /etc/fail2ban/jail.d/zz-awg-sshd.local
+security_fail2ban_runtime_file: /etc/fail2ban/fail2ban.local

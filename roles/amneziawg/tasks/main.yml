@@ -7,11 +7,67 @@
   ansible.builtin.meta: end_role
   when: awg_package_rollback | bool
 
-- name: Подключение PPA-репозитория AmneziaWG
-  ansible.builtin.apt_repository:
-    repo: "{{ amneziawg_ppa }}"
+- name: Установка средств проверки подписи PPA AmneziaWG
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
     state: present
+    lock_timeout: 600
+
+- name: Создание каталога изолированных ключей APT
+  ansible.builtin.file:
+    path: "{{ amneziawg_ppa_keyring_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Загрузка отдельного ключа PPA AmneziaWG
+  ansible.builtin.get_url:
+    url: "{{ amneziawg_ppa_key_url }}"
+    dest: "{{ amneziawg_ppa_keyring_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  register: amneziawg_ppa_key_download
+
+- name: Проверка полного отпечатка ключа PPA AmneziaWG
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/gpg
+      - --batch
+      - --show-keys
+      - --with-colons
+      - "{{ amneziawg_ppa_keyring_path }}"
+  register: amneziawg_ppa_key_details
+  changed_when: false
+  failed_when: >-
+    amneziawg_ppa_key_details.rc != 0 or
+    ('fpr:::::::::' ~ amneziawg_ppa_fingerprint ~ ':') not in
+    amneziawg_ppa_key_details.stdout
+
+- name: Подключение PPA AmneziaWG через отдельный Signed-By keyring
+  ansible.builtin.template:
+    src: amnezia-ppa.sources.j2
+    dest: "{{ amneziawg_ppa_source_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: amneziawg_ppa_source
+
+- name: Проверка подписанного индекса PPA AmneziaWG
+  ansible.builtin.apt:
     update_cache: true
+    lock_timeout: 600
+  when: amneziawg_ppa_key_download.changed or amneziawg_ppa_source.changed
+
+- name: Удаление прежнего подключения PPA без выделенного Signed-By
+  ansible.builtin.apt_repository:
+    repo: "{{ amneziawg_ppa_legacy }}"
+    state: absent
+    update_cache: false
 
 - name: Проверка политики выбора пакетов AmneziaWG
   ansible.builtin.assert:

@@ -3,8 +3,29 @@ set -Eeuo pipefail
 mode="${1:-up}"
 iface={{ awg3_transit_interface | quote }}
 config={{ awg3_transit_config_path | quote }}
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" &&
+      -r "${CREDENTIALS_DIRECTORY}/awg3.conf" ]]; then
+    config="${CREDENTIALS_DIRECTORY}/awg3.conf"
+fi
 peer={{ awg3_peer_tunnel_address | quote }}
-if [[ "$mode" == up ]]; then
+socket="/var/run/amneziawg/${iface}.sock"
+
+cleanup_interface() {
+    ip link delete dev "$iface" >/dev/null 2>&1 || true
+    for _ in {1..50}; do
+        ip link show "$iface" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    if ip link show "$iface" >/dev/null 2>&1; then
+        echo "Интерфейс ${iface} не освободился после остановки предыдущего процесса." >&2
+        return 1
+    fi
+    rm -f -- "$socket"
+}
+
+if [[ "$mode" == prepare ]]; then
+    cleanup_interface
+elif [[ "$mode" == up ]]; then
     for _ in {1..50}; do
         ip link show "$iface" >/dev/null 2>&1 && break
         sleep 0.1
@@ -14,7 +35,10 @@ if [[ "$mode" == up ]]; then
     ip link set mtu {{ awg3_transit_effective_mtu }} up dev "$iface"
     ip -4 route replace "${peer}/32" dev "$iface"
 {% if awg_node_role == 'entry' %}
-    systemctl --no-block try-restart awg-entry-routing.service >/dev/null 2>&1 || true
+    routing_reconcile={{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') | quote }}
+    if [[ -x "$routing_reconcile" ]]; then
+        "$routing_reconcile"
+    fi
     systemctl --no-block try-restart awg-local-peer-apply.service >/dev/null 2>&1 || true
 {% endif %}
 {% if awg_node_role == 'exit' %}
@@ -31,7 +55,8 @@ elif [[ "$mode" == down ]]; then
     iptables -w 10 -t mangle -D FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
     iptables -w 10 -D FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || true
 {% endif %}
+    cleanup_interface
 else
-    echo 'Использование: awg3-transit-setup {up|down}' >&2
+    echo 'Использование: awg3-transit-setup {prepare|up|down}' >&2
     exit 2
 fi

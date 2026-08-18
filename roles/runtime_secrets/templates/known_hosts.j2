@@ -1,0 +1,3 @@
+{% for peer in runtime_secrets_peer_inventory_hosts %}
+[{{ hostvars[peer].runtime_secrets_advertise_ipv4 | default(hostvars[peer].ansible_host | default(peer)) }}]:{{ hostvars[peer].ssh_listen_port | default(hostvars[peer].ansible_port | default(22)) }} {{ hostvars[peer].runtime_secrets_ssh_host_public_key }}
+{% endfor %}

@@ -1,6 +1,14 @@
 ---
 awg_node_role: exit
 
+# При будущей поддержке второго EXIT установщик назначит ему индекс 3 на уровне
+# host vars. Динамический список peers уже допускает ENTRY и остальные EXIT.
+runtime_secrets_share_index: 2
+runtime_secrets_peer_inventory_hosts: >-
+  {{ ((groups['entry'] | default([])) +
+      (groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list)) }}
+runtime_secrets_advertise_ipv4: "{{ ansible_host }}"
+
 exit_awg_interface: awg0
 exit_wan_interface: auto
 exit_awg_listen_port: 443

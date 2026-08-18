@@ -3,4 +3,4 @@ After=ufw.service
 
 [Service]
 ExecStartPost=/bin/systemctl --no-block try-restart awg-local-peer-apply.service
-ExecStartPost=/bin/systemctl --no-block try-restart awg-entry-routing.service
+ExecStartPost=/bin/sh -c 'test ! -x {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }} || {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }}'

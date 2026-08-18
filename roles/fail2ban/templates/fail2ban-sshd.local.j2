@@ -1,7 +1,11 @@
 [sshd]
 enabled = true
 backend = systemd
+mode = aggressive
 port = {{ ssh_listen_port }}
+banaction = ufw
+usedns = no
+ignoreip = 127.0.0.1/8 ::1
 maxretry = {{ fail2ban_sshd.maxretry }}
 findtime = {{ fail2ban_sshd.findtime }}
 bantime = {{ fail2ban_sshd.bantime }}

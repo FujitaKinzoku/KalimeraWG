@@ -25,6 +25,96 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_remote_observed_source_uses_ssh_connection_ipv4(self) -> None:
+        with (
+            mock.patch.object(MODULE, "require_command", return_value="ssh"),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=mock.Mock(
+                    returncode=0,
+                    stdout="8.8.8.8 49152 198.51.100.20 22\n",
+                ),
+            ) as run,
+        ):
+            observed = MODULE.remote_observed_ssh_source_ipv4(
+                "exit.invalid", "root", 22, Path("automation-key")
+            )
+
+        self.assertEqual(observed, "8.8.8.8")
+        self.assertIn("$SSH_CONNECTION", run.call_args.args[0][-1])
+
+    def test_saved_inventory_preflight_stops_before_ansible(self) -> None:
+        hosts = {
+            "all": {
+                "children": {
+                    "entry": {
+                        "hosts": {
+                            "entry-managed": {
+                                "ansible_connection": "local",
+                            }
+                        }
+                    },
+                    "exit": {
+                        "hosts": {
+                            "exit-managed": {
+                                "ansible_host": "198.51.100.20",
+                                "ansible_user": "root",
+                                "ansible_port": 56777,
+                                "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        with mock.patch.object(MODULE, "ssh_connection_works", return_value=False):
+            with self.assertRaisesRegex(SystemExit, "Ansible и аварийная очистка не запускались"):
+                MODULE.verify_saved_inventory_access(hosts)
+
+    def test_resume_refreshes_observed_automation_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {
+                                    "ansible_connection": "local",
+                                }
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    "security_automation_source_ipv4": "9.9.9.9",
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            with mock.patch.object(
+                MODULE, "remote_observed_ssh_source_ipv4", return_value="8.8.8.8"
+            ):
+                self.assertTrue(
+                    MODULE.refresh_saved_automation_sources(hosts, hosts_path)
+                )
+
+            updated = MODULE.load_yaml(hosts_path)
+            self.assertEqual(
+                updated["all"]["children"]["exit"]["hosts"]["exit-managed"][
+                    "security_automation_source_ipv4"
+                ],
+                "8.8.8.8",
+            )
+
     def test_local_entry_public_ipv4_uses_route_source_not_loopback(self) -> None:
         connection = mock.Mock()
         connection.getsockname.return_value = ("198.51.100.44", 49152)
@@ -66,6 +156,104 @@ class InteractiveDeployTests(unittest.TestCase):
             mock.patch.object(MODULE.socket, "socket", return_value=connection),
         ):
             self.assertEqual(MODULE.detect_local_public_ipv4("unresolved.invalid"), "")
+
+    def test_ssh_transition_uses_kalimera_and_skips_local_entry_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            hosts_path = production / "hosts.yml"
+            vault_password = root / "vault.pass"
+            private_key = root / "automation-key"
+            vault_password.write_text("fixture\n", encoding="utf-8")
+            private_key.write_text("fixture\n", encoding="utf-8")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_manage_admin_account": True,
+                    "security_finalize_admin_access": False,
+                },
+            )
+            hosts_document = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {
+                                    "ansible_host": "127.0.0.1",
+                                    "ansible_connection": "local",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": str(private_key),
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56778,
+                                    "ansible_ssh_private_key_file": str(private_key),
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts_document)
+            with (
+                mock.patch.object(MODULE, "ansible"),
+                mock.patch.object(MODULE, "check_ssh") as check_ssh,
+                mock.patch.object(MODULE, "require_operator_ssh_confirmation"),
+                mock.patch.object(MODULE, "remove_bootstrap_become_passwords"),
+            ):
+                self.assertTrue(
+                    MODULE.complete_ssh_transition(
+                        root / "repo",
+                        hosts_path,
+                        vault_password,
+                        hosts_document,
+                        root / "mtu.yml",
+                        root / "package-lock.txt",
+                    )
+                )
+
+            check_ssh.assert_called_once_with(
+                "198.51.100.20", "kalimera", 56778, private_key
+            )
+            updated = MODULE.load_yaml(hosts_path)
+            entry = updated["all"]["children"]["entry"]["hosts"]["entry-managed"]
+            exit_node = updated["all"]["children"]["exit"]["hosts"]["exit-managed"]
+            self.assertEqual(entry["ansible_port"], 56777)
+            self.assertTrue(entry["ansible_connection"] == "local")
+            self.assertEqual(entry["ansible_user"], "kalimera")
+            self.assertTrue(entry["ansible_become"])
+            self.assertEqual(
+                entry["ansible_become_password"],
+                "{{ vault_entry_kalimera_password }}",
+            )
+            self.assertEqual(exit_node["ansible_user"], "kalimera")
+            self.assertTrue(exit_node["ansible_become"])
+            self.assertEqual(
+                exit_node["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
+
+    def test_generated_account_password_has_all_required_character_classes(self) -> None:
+        password = MODULE.generate_account_password(30)
+        self.assertEqual(len(password), 30)
+        self.assertRegex(password, r"[a-z]")
+        self.assertRegex(password, r"[A-Z]")
+        self.assertRegex(password, r"[0-9]")
+        self.assertRegex(password, r"[!@#$%^&*_+=-]")
+        with self.assertRaises(ValueError):
+            MODULE.generate_account_password(24)
 
     def test_component_update_uses_candidate_awg_and_stable_sing_box(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -219,6 +407,10 @@ class InteractiveDeployTests(unittest.TestCase):
             with (
                 mock.patch.object(Path, "home", return_value=home),
                 mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
                 mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
                 mock.patch.object(
                     MODULE,
@@ -375,7 +567,9 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("current=degraded", monitor)
         self.assertIn("PROXY_DISABLED_FLAG", monitor)
         self.assertIn("PROXY_MANUAL_FLAG", monitor)
-        self.assertIn("сервер ${host} перезапущен", monitor)
+        self.assertIn("сервер перезапущен", monitor)
+        self.assertNotIn('host="$(hostname', monitor)
+        self.assertIn("[BOT_TOKEN]", monitor)
         self.assertIn("RU-прокси восстановлен", monitor)
         self.assertIn('case "${0##*/}:${1:-}"', monitor)
         self.assertIn("telegram-test:--help", monitor)
@@ -415,6 +609,7 @@ class InteractiveDeployTests(unittest.TestCase):
         maintenance = (
             repository / "roles/operations/templates/maintenance.sh.j2"
         ).read_text(encoding="utf-8")
+        verify = (repository / "playbooks/verify.yml").read_text(encoding="utf-8")
         security = (repository / "roles/security/tasks/main.yml").read_text(
             encoding="utf-8"
         )
@@ -427,12 +622,19 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('linux-headers-$kernel_release', guard)
         self.assertIn("dkms status", guard)
         self.assertIn("'^amneziawg/'", guard)
-        self.assertNotIn("dpkg-query", guard)
+        self.assertIn("dpkg-query -W", guard)
+        self.assertIn("/lib/modules/*", guard)
+        self.assertIn("linux-image-unsigned-", guard)
         self.assertNotIn("Пакет amneziawg-dkms не установлен", guard)
         self.assertIn('dkms autoinstall -k "$kernel_release"', guard)
         self.assertIn('modinfo -k "$kernel_release" amneziawg', guard)
         self.assertIn("/usr/local/sbin/awg-kernel-guard", update_all)
         self.assertIn("/usr/local/sbin/awg-kernel-guard", maintenance)
+        self.assertIn("/usr/local/sbin/awg-kernel-guard", verify)
+        self.assertIn('APT::Periodic::Unattended-Upgrade "0"', operations)
+        self.assertIn('awg_maintenance_calendar: "*-*-* 05:20:00"', (
+            repository / "roles/operations/defaults/main.yml"
+        ).read_text(encoding="utf-8"))
         self.assertIn("path: /etc/ufw/sysctl.conf", security)
         self.assertIn("line: net/ipv4/icmp_echo_ignore_all=1", security)
 
@@ -632,6 +834,7 @@ class InteractiveDeployTests(unittest.TestCase):
     def test_bootstrap_readline_edits_with_backspace_and_arrows(self) -> None:
         deploy = (MODULE_PATH.parents[2] / "deploy").read_text(encoding="utf-8")
         self.assertIn("IFS= read -e -r answer", deploy)
+        self.assertIn("openssl sshpass ssss", deploy)
         self.assertIn("RESULT=<user>", self.run_bash_readline(b"usea\x08r\n"))
         self.assertIn("RESULT=<usra>", self.run_bash_readline(b"usea\x1b[D\x08r\n"))
 
@@ -723,6 +926,7 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertNotIn("--dports", routing)
         self.assertIn("flock -w 30 9", routing)
         self.assertNotIn("flock -n 9 || exit 0", routing)
+        self.assertIn('wait_for_interface_up "$PROXY_IF"', routing)
         self.assertIn('for direct_port in "${DIRECT_PORTS[@]}"', routing)
         self.assertIn('PROXY_UDP_MODE" == direct', routing)
 
@@ -774,9 +978,22 @@ class InteractiveDeployTests(unittest.TestCase):
             sing_box_tasks.index("Связывание запуска sing-box"),
             sing_box_tasks.index("Применение: прокси sing-box — этап 17"),
         )
-        self.assertIn("ExecStartPost=+/bin/sh -c", dropin)
-        self.assertIn("try-restart awg-entry-routing.service", dropin)
-        self.assertIn("|| true", dropin)
+        self.assertIn("awg-entry-routing-reconcile", dropin)
+        self.assertIn("test ! -x", dropin)
+        self.assertNotIn("try-restart awg-entry-routing.service", dropin)
+
+        transit_setup = (
+            root / "roles/awg3_transit/templates/transit-setup.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn('if [[ -x "$routing_reconcile" ]]', transit_setup)
+
+        reconcile = (
+            root
+            / "roles/entry_routing/templates/awg-entry-routing-reconcile.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("activating|deactivating|reloading", reconcile)
+        self.assertIn('systemctl --no-block reload "$service"', reconcile)
+        self.assertNotIn("try-restart", reconcile)
 
     def test_administrative_commands_are_safe_and_runtime_state_is_persistent(self) -> None:
         root = MODULE_PATH.parents[2]
@@ -796,6 +1013,9 @@ class InteractiveDeployTests(unittest.TestCase):
         doh = (templates / "doh-switch.sh.j2").read_text(encoding="utf-8")
         dns_status = (templates / "dns-status.sh.j2").read_text(encoding="utf-8")
         fail2ban = (templates / "f2b-reset.sh.j2").read_text(encoding="utf-8")
+        ssh_key_audit = (templates / "ssh-key-audit.sh.j2").read_text(
+            encoding="utf-8"
+        )
         update_all = (templates / "update-all.sh.j2").read_text(encoding="utf-8")
         maintenance = (templates / "maintenance.sh.j2").read_text(encoding="utf-8")
         entry_dns_tasks = (root / "roles/entry_dns/tasks/main.yml").read_text(
@@ -818,7 +1038,11 @@ class InteractiveDeployTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("vpn-user list", vpn_user)
+        self.assertIn("vpn-user export NAME", vpn_user)
         self.assertIn("vpn-user delete NAME [--yes]", vpn_user)
+        self.assertIn('export_user_config "$2"', vpn_user)
+        self.assertIn('cat -- "$output"', vpn_user)
+        self.assertIn('export_user_config "$name"', vpn_user)
         self.assertIn('awg set "$iface" peer "$public_key" remove', vpn_user)
         self.assertIn("config-backups/entry/clients/deleted", vpn_user)
         self.assertIn("управляется зашифрованным inventory", vpn_user)
@@ -846,11 +1070,18 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("{{ awg_server_audit_path | quote }}", update_all)
         self.assertNotIn("systemctl reset-failed", update_all)
         self.assertIn("{{ awg_server_audit_path | quote }} --quiet", maintenance)
+        self.assertIn("ssh-key-audit.sh.j2", operations)
+        self.assertIn("ssh-key-audit delete SHA256:FINGERPRINT", ssh_key_audit)
+        self.assertIn("Для подтверждения введите DELETE", ssh_key_audit)
+        self.assertIn("ssh-key-audit status", terminal_status)
+        self.assertIn("function ssh-key-audit", shell_tools)
 
         telegram = (templates / "telegram-monitor.sh.j2").read_text(
             encoding="utf-8"
         )
         self.assertIn("Использование: telegram-test", telegram)
+        self.assertIn("current=security", telegram)
+        self.assertIn("ssh-key-audit status", telegram)
 
         self.assertIn("kalimera-help.sh.j2", terminal_tasks)
         self.assertIn("kalimera-status.py.j2", terminal_tasks)
@@ -858,6 +1089,11 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("--with-commands", terminal_help)
         self.assertIn("/var/lib/awg-iac/mtu.yml", terminal_status)
         self.assertIn("server-audit", terminal_status)
+        self.assertIn("BOOT_GRACE_SECONDS = 120", terminal_status)
+        self.assertIn("STARTUP_WAIT_SECONDS = 10", terminal_status)
+        self.assertIn("wait_for_transit_startup", terminal_status)
+        self.assertIn("transit_handshake_fresh", terminal_status)
+        self.assertIn("инициализация после загрузки", terminal_status)
         self.assertIn("forward-addr", terminal_status)
         self.assertIn("yandex-doh-ru", terminal_status)
         self.assertIn("KALIMERA_HELP_SHOWN", shell_tools)
@@ -900,6 +1136,198 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn(
             "check_value 'ответы на ICMP echo отключены'", health_template
         )
+
+    def test_security_hardening_keeps_one_compatible_baseline(self) -> None:
+        root = MODULE_PATH.parents[2]
+        security_tasks = (
+            root / "roles" / "security" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        security_defaults = (
+            root / "roles" / "security" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
+        ssh = (
+            root / "roles" / "security" / "templates" / "sshd-awg.conf.j2"
+        ).read_text(encoding="utf-8")
+        sysctl = (
+            root / "roles" / "security" / "templates" / "sysctl.conf.j2"
+        ).read_text(encoding="utf-8")
+        health = (
+            root / "roles" / "health" / "templates" / "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("security_restrict_automation_key: true", security_defaults)
+        self.assertIn('from="{{ security_automation_source_ipv4 }}"', security_tasks)
+        self.assertIn("no-port-forwarding", security_tasks)
+        self.assertIn(
+            "Установка адресно ограниченного ключа автоматизации пользователю KalimeraWG",
+            security_tasks,
+        )
+        self.assertIn(
+            "Удаление служебного ключа из root в финальной фазе",
+            security_tasks,
+        )
+        self.assertIn('user: "{{ security_admin_user }}"', security_tasks)
+        self.assertIn("security_finalize_admin_access | bool", security_tasks)
+        self.assertIn("PermitRootLogin {{ effective_root_login }}", ssh)
+        self.assertIn("AllowUsers {{ managed_admin }}", ssh)
+        self.assertNotIn("root@{{ security_automation_source_ipv4 }}", ssh)
+        self.assertNotIn(
+            "security_finalize_admin_access | bool and\n             awg_node_role == 'entry'",
+            security_tasks,
+        )
+        self.assertIn("Banner none", ssh)
+        self.assertIn("PermitUserRC no", ssh)
+        self.assertIn("AuthenticationMethods publickey", ssh)
+        self.assertIn("AuthorizedKeysFile .ssh/authorized_keys", ssh)
+        self.assertIn("PubkeyAcceptedAlgorithms -ssh-rsa", ssh)
+        self.assertIn("RequiredRSASize 2048", ssh)
+        self.assertIn("DisableForwarding yes", ssh)
+        self.assertIn("AllowStreamLocalForwarding no", ssh)
+        self.assertIn("HostKey {{ host_key_path }}", ssh)
+        self.assertIn("Создание отсутствующего Ed25519 host key", security_tasks)
+        self.assertIn("Получение публичной части Ed25519 host key", security_tasks)
+        self.assertIn("Проверка fingerprint Ed25519 host key", security_tasks)
+        self.assertIn("Поиск доступных закрытых SSH host keys", security_tasks)
+        self.assertIn("security_ssh_host_key_paths", security_tasks)
+        self.assertNotIn("patterns: ssh_host_*_key", security_tasks)
+        self.assertIn("ssh_host_ed25519_key", security_tasks)
+        self.assertIn("ssh_host_ecdsa_key", security_tasks)
+        self.assertIn("ssh_host_rsa_key", security_tasks)
+        self.assertIn("ssh_host_dsa_key' not in", security_tasks)
+        self.assertIn("kernel.unprivileged_bpf_disabled = 1", sysctl)
+        self.assertNotIn("kernel.modules_disabled", sysctl)
+        self.assertIn("169.254.0.0/16", security_tasks)
+        self.assertIn("Изоляция служебного AWG 3+", security_tasks)
+        self.assertIn("взаимно изолированы", health)
+        self.assertLess(
+            security_tasks.index('name: "Удаление: безопасность — этап 38"'),
+            security_tasks.index(
+                'name: "Фиксация отпечатка окончательной политики UFW"'
+            ),
+        )
+        self.assertIn(
+            "by Fail2Ban after [0-9]+ attempts against sshd", security_tasks
+        )
+        self.assertIn(
+            "by Fail2Ban after [0-9]+ attempts against sshd", health
+        )
+        self.assertNotIn("ufw status numbered", security_tasks)
+        self.assertNotIn("ufw status numbered", health)
+
+        fail2ban_jail = (
+            root / "roles/fail2ban/templates/fail2ban-sshd.local.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("mode = aggressive", fail2ban_jail)
+        self.assertIn("banaction = ufw", fail2ban_jail)
+        self.assertIn("usedns = no", fail2ban_jail)
+        self.assertIn("ignoreip = 127.0.0.1/8 ::1", fail2ban_jail)
+        self.assertIn("fail2ban_sshd_policy_is_strict", health)
+
+    def test_no_logs_baseline_keeps_only_volatile_operational_state(self) -> None:
+        root = MODULE_PATH.parents[2]
+        journal = (
+            root / "roles" / "security" / "templates" /
+            "journald-limits.conf.j2"
+        ).read_text(encoding="utf-8")
+        coredump = (
+            root / "roles" / "security" / "templates" /
+            "coredump-no-storage.conf.j2"
+        ).read_text(encoding="utf-8")
+        accounting = (
+            root / "roles" / "security" / "templates" /
+            "volatile-accounting.conf.j2"
+        ).read_text(encoding="utf-8")
+        security_tasks = (
+            root / "roles" / "security" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        fail2ban = (
+            root / "roles" / "fail2ban" / "templates" / "fail2ban.local.j2"
+        ).read_text(encoding="utf-8")
+        dnsmasq = (
+            root / "roles" / "entry_dns" / "templates" /
+            "50-awg-base.conf.j2"
+        ).read_text(encoding="utf-8")
+        resolved = (
+            root / "roles" / "entry_dns" / "templates" /
+            "60-kalimerawg-resolved.conf.j2"
+        ).read_text(encoding="utf-8")
+        unbound = (
+            root / "roles" / "entry_dns" / "templates" /
+            "90-awg-dot.conf.j2"
+        ).read_text(encoding="utf-8")
+        sing_box = (
+            root / "roles" / "sing_box" / "templates" / "config.json.j2"
+        ).read_text(encoding="utf-8")
+        shell = (
+            root / "roles" / "terminal" / "templates" /
+            "kalimera-shell-tools.sh.j2"
+        ).read_text(encoding="utf-8")
+        audit = (
+            root / "roles" / "operations" / "templates" /
+            "server-audit.sh.j2"
+        ).read_text(encoding="utf-8")
+        health = (
+            root / "roles" / "health" / "templates" /
+            "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+        security_defaults = (
+            root / "roles" / "security" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Storage=volatile", journal)
+        self.assertIn("ForwardToSyslog=no", journal)
+        self.assertIn("zz-kalimerawg-no-logs.conf", security_defaults)
+        self.assertIn("systemd_config_last_value", health)
+        self.assertIn("ForwardToSyslog)\" == no", health)
+        self.assertIn("systemd_config_last_value", audit)
+        self.assertIn("ForwardToSyslog)\" == no", audit)
+        self.assertNotIn("SystemMaxUse", journal)
+        self.assertIn("Storage=none", coredump)
+        self.assertIn("ProcessSizeMax=0", coredump)
+        self.assertIn("L+ /var/log/wtmp", accounting)
+        self.assertIn("security_volatile_accounting_dir", accounting)
+        self.assertIn("masked: true", security_tasks)
+        self.assertIn("/var/log/journal", security_tasks)
+        self.assertIn("/root/.bash_history", security_tasks)
+        self.assertIn("src: /dev/null", security_tasks)
+        self.assertIn("dbfile = :memory:", fail2ban)
+        self.assertIn("logtarget = SYSTEMD-JOURNAL", fail2ban)
+        self.assertIn("cache-size=0", dnsmasq)
+        self.assertNotIn("log-queries", dnsmasq)
+        self.assertIn("Cache=no", resolved)
+        self.assertIn("log-queries: no", unbound)
+        self.assertIn("log-replies: no", unbound)
+        self.assertNotIn("log-destaddr", unbound)
+        self.assertIn('"disabled": true', sing_box)
+        self.assertIn('"disable_cache": true', sing_box)
+        self.assertIn("export HISTFILE=/dev/null", shell)
+        self.assertIn("постоянные журналы активности отсутствуют", audit)
+        self.assertIn("/root/.wget-hsts", audit)
+
+    def test_amnezia_ppa_and_managed_integrity_are_verified(self) -> None:
+        root = MODULE_PATH.parents[2]
+        awg_defaults = (
+            root / "roles" / "amneziawg" / "defaults" / "main.yml"
+        ).read_text(encoding="utf-8")
+        awg_tasks = (
+            root / "roles" / "amneziawg" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        source = (
+            root / "roles" / "amneziawg" / "templates" /
+            "amnezia-ppa.sources.j2"
+        ).read_text(encoding="utf-8")
+        audit = (
+            root / "roles" / "operations" / "templates" /
+            "server-audit.sh.j2"
+        ).read_text(encoding="utf-8")
+        site = (root / "playbooks" / "site.yml").read_text(encoding="utf-8")
+
+        fingerprint = "75C9DD72C799870E310542E24166F2C257290828"
+        self.assertIn(fingerprint, awg_defaults)
+        self.assertIn("Проверка полного отпечатка", awg_tasks)
+        self.assertIn("Signed-By: {{ amneziawg_ppa_keyring_path }}", source)
+        self.assertIn("awg_managed_integrity_path", audit)
+        self.assertIn("argv: [/usr/local/sbin/awg-managed-integrity, seal]", site)
 
     def test_awg_key_material_has_wireguard_shape(self) -> None:
         private = MODULE.awg_private_key()
@@ -965,6 +1393,39 @@ class InteractiveDeployTests(unittest.TestCase):
             6 + 8 + 1 + 8 + 3 + 1000 + 174,
             MODULE.AWG_QUIC_INITIAL_SIZE,
         )
+        self.assertEqual(
+            MODULE.awg_cps_signature_size(signature),
+            MODULE.AWG_QUIC_INITIAL_SIZE,
+        )
+
+    def test_generated_profiles_fit_minimum_outer_pmtu(self) -> None:
+        profiles = (
+            MODULE.awg_server_obfuscation(),
+            MODULE.awg_legacy_server_obfuscation(),
+            MODULE.awg_mobile_dns_obfuscation(),
+            MODULE.awg_mobile_quic_obfuscation(),
+            MODULE.awg3_transit_obfuscation(),
+        )
+        for profile in profiles:
+            MODULE.validate_awg_obfuscation(profile)
+            for index in range(1, 6):
+                packet_size = MODULE.awg_cps_signature_size(str(profile[f"i{index}"]))
+                self.assertLessEqual(
+                    packet_size + 28,
+                    MODULE.AWG_MINIMUM_OUTER_PMTU,
+                )
+
+    def test_profile_validator_rejects_overlapping_headers(self) -> None:
+        profile = MODULE.awg_server_obfuscation()
+        profile["h2"] = profile["h1"]
+        with self.assertRaises(SystemExit):
+            MODULE.validate_awg_obfuscation(profile)
+
+    def test_profile_validator_rejects_oversized_cps_packet(self) -> None:
+        profile = MODULE.awg_server_obfuscation()
+        profile["i1"] = "<r 1000><r 300>"
+        with self.assertRaises(SystemExit):
+            MODULE.validate_awg_obfuscation(profile)
 
     def test_oversized_cps_random_tags_are_migrated_without_size_change(self) -> None:
         signature = "<b 0xc10000000110><r 16><b 0x00><r 1161>"
@@ -1220,6 +1681,345 @@ class InteractiveDeployTests(unittest.TestCase):
             any("не ответил за 45 секунд" in str(call) for call in output.call_args_list)
         )
 
+    def test_runtime_secret_uses_true_shamir_2_of_5_without_output(self) -> None:
+        shares = [
+            f"kalimerawgruntimev1-{index}-{'a' * 64}"
+            for index in range(1, 6)
+        ]
+        with (
+            mock.patch.object(MODULE, "require_command", return_value="ssss-split"),
+            mock.patch.object(
+                MODULE.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout="\n".join(shares) + "\n"),
+            ) as run,
+        ):
+            result = MODULE.split_runtime_secret("1" * 64)
+
+        self.assertEqual(result, shares)
+        command = run.call_args.args[0]
+        self.assertIn("-t", command)
+        self.assertEqual(command[command.index("-t") + 1], "2")
+        self.assertEqual(command[command.index("-n") + 1], "5")
+        self.assertTrue(run.call_args.kwargs["capture_output"])
+
+    def test_runtime_secret_inventory_assigns_unique_second_exit_share(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(all_root / "main.yml", {})
+            MODULE.yaml_write(
+                production / "group_vars" / "entry.yml",
+                {"security_interserver_peer_ipv4": "198.51.100.20"},
+            )
+            MODULE.yaml_write(
+                production / "group_vars" / "exit.yml",
+                {"security_interserver_peer_ipv4": "198.51.100.10"},
+            )
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {"ansible_host": "198.51.100.10"}
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {"ansible_host": "198.51.100.20"},
+                                "exit-secondary": {"ansible_host": "198.51.100.30"},
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(production / "hosts.yml", hosts)
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump({}).encode("utf-8"))
+            )
+            shares = [
+                f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                for index in range(1, 6)
+            ]
+            exchange_counter = iter(range(1, 4))
+
+            def exchange_keypair() -> tuple[str, str]:
+                index = next(exchange_counter)
+                return f"private-{index}", f"ssh-ed25519 public-{index} exchange"
+
+            with (
+                mock.patch.object(MODULE, "split_runtime_secret", return_value=shares),
+                mock.patch.object(
+                    MODULE, "ssh_exchange_keypair", side_effect=exchange_keypair
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.ensure_runtime_secret_material(production, password_path)
+                )
+
+            updated_hosts = yaml.safe_load(
+                (production / "hosts.yml").read_text(encoding="utf-8")
+            )["all"]["children"]
+            self.assertEqual(
+                updated_hosts["entry"]["hosts"]["entry-managed"][
+                    "runtime_secrets_share_index"
+                ],
+                1,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-managed"][
+                    "runtime_secrets_share_index"
+                ],
+                2,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-secondary"][
+                    "runtime_secrets_share_index"
+                ],
+                3,
+            )
+            self.assertEqual(
+                updated_hosts["exit"]["hosts"]["exit-secondary"][
+                    "runtime_secrets_advertise_ipv4"
+                ],
+                "198.51.100.30",
+            )
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertEqual(
+                set(decrypted["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed", "exit-secondary"},
+            )
+            self.assertFalse(
+                MODULE.ensure_runtime_secret_material(production, password_path)
+            )
+
+    def test_admin_account_material_is_generated_once_and_only_hashes_persist(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_admin_authorized_keys": [
+                        "ssh-ed25519 AAAAfixture admin@example"
+                    ]
+                },
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {"hosts": {"entry-managed": {}}},
+                            "exit": {"hosts": {"exit-managed": {}}},
+                        }
+                    }
+                },
+            )
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump({}).encode("utf-8"))
+            )
+            generated = iter(
+                [
+                    "Aa2!" + "a" * 26,
+                    "Bb3@" + "b" * 26,
+                    "Cc4#" + "c" * 26,
+                    "Dd5$" + "d" * 26,
+                ]
+            )
+            with (
+                mock.patch.object(
+                    MODULE, "generate_account_password", side_effect=lambda: next(generated)
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$fixture${password[:4]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords") as show,
+            ):
+                self.assertTrue(
+                    MODULE.ensure_admin_account_material(
+                        production, password_path, root / "repo"
+                    )
+                )
+                self.assertFalse(
+                    MODULE.ensure_admin_account_material(
+                        production, password_path, root / "repo"
+                    )
+                )
+            show.assert_called_once()
+
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertEqual(len(decrypted), 6)
+            self.assertTrue(
+                all(
+                    value.startswith("$6$")
+                    for key, value in decrypted.items()
+                    if key.endswith("_hash")
+                )
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password"],
+                "Aa2!" + "a" * 26,
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password"],
+                "Cc4#" + "c" * 26,
+            )
+            self.assertNotIn("Aa2!", (all_root / "vault.yml").read_text(encoding="utf-8"))
+            all_vars = yaml.safe_load(
+                (all_root / "main.yml").read_text(encoding="utf-8")
+            )
+            self.assertTrue(all_vars["security_manage_admin_account"])
+            self.assertFalse(all_vars["security_finalize_admin_access"])
+            self.assertTrue(all_vars["security_require_admin_authorized_key"])
+
+    def test_resume_preserves_admin_passwords_and_defers_undelivered_passwords(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "inventory" / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            MODULE.yaml_write(
+                all_root / "main.yml",
+                {
+                    "security_admin_authorized_keys": [
+                        "ssh-ed25519 AAAAfixture admin@example"
+                    ],
+                    "security_manage_admin_account": True,
+                    "security_account_passwords_delivered": False,
+                },
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {"hosts": {"entry-managed": {}}},
+                            "exit": {"hosts": {"exit-managed": {}}},
+                        }
+                    }
+                },
+            )
+            old_hashes = {
+                "vault_entry_kalimera_password_hash": "$6$old$entry-admin",
+                "vault_entry_kalimera_password": "Ee6%" + "e" * 26,
+                "vault_entry_root_password_hash": "$6$old$entry-root",
+                "vault_exit_kalimera_password_hash": "$6$old$exit-admin",
+                "vault_exit_kalimera_password": "Ff7^" + "f" * 26,
+                "vault_exit_root_password_hash": "$6$old$exit-root",
+            }
+            vault = VaultLib([("default", VaultSecret(b"test-vault-password"))])
+            (all_root / "vault.yml").write_bytes(
+                vault.encrypt(yaml.safe_dump(old_hashes).encode("utf-8"))
+            )
+            generated = iter(
+                [
+                    "Aa2!" + "a" * 26,
+                    "Bb3@" + "b" * 26,
+                ]
+            )
+            pending: dict[str, str] = {}
+            with (
+                mock.patch.object(
+                    MODULE, "generate_account_password", side_effect=lambda: next(generated)
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$new${password[:4]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords") as show,
+            ):
+                self.assertTrue(
+                    MODULE.ensure_admin_account_material(
+                        production,
+                        password_path,
+                        root / "repo",
+                        pending_passwords=pending,
+                        regenerate_undelivered=True,
+                    )
+                )
+                self.assertEqual(
+                    MODULE.generate_account_password.call_count,
+                    2,
+                )
+            show.assert_not_called()
+            self.assertEqual(len(pending), 4)
+            decrypted = yaml.safe_load(
+                vault.decrypt((all_root / "vault.yml").read_bytes())
+            )
+            self.assertTrue(
+                decrypted["vault_entry_root_password_hash"].startswith("$6$new$")
+            )
+            self.assertTrue(
+                decrypted["vault_exit_root_password_hash"].startswith("$6$new$")
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password_hash"],
+                "$6$old$entry-admin",
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password_hash"],
+                "$6$old$exit-admin",
+            )
+            self.assertEqual(
+                decrypted["vault_entry_kalimera_password"],
+                "Ee6%" + "e" * 26,
+            )
+            self.assertEqual(
+                decrypted["vault_exit_kalimera_password"],
+                "Ff7^" + "f" * 26,
+            )
+            self.assertEqual(
+                pending,
+                {
+                    "ENTRY · kalimera": "Ee6%" + "e" * 26,
+                    "ENTRY · root": "Aa2!" + "a" * 26,
+                    "EXIT · kalimera": "Ff7^" + "f" * 26,
+                    "EXIT · root": "Bb3@" + "b" * 26,
+                },
+            )
+            resumed_all_vars = MODULE.load_yaml(all_root / "main.yml")
+            self.assertNotIn(
+                "security_finalize_admin_access",
+                resumed_all_vars,
+            )
+
+            MODULE.mark_account_passwords_delivered(production)
+            second_pending: dict[str, str] = {}
+            self.assertFalse(
+                MODULE.ensure_admin_account_material(
+                    production,
+                    password_path,
+                    root / "repo",
+                    pending_passwords=second_pending,
+                    regenerate_undelivered=True,
+                )
+            )
+            self.assertEqual(second_pending, {})
+
     def test_remote_direct_mode_generates_final_two_phase_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1243,8 +2043,8 @@ class InteractiveDeployTests(unittest.TestCase):
                     "n",
                     "entry.invalid",
                     "exit.invalid",
-                    "root",
-                    "root",
+                    "ubuntu",
+                    "deployer",
                     "22",
                     "2222",
                     "56777",
@@ -1254,6 +2054,8 @@ class InteractiveDeployTests(unittest.TestCase):
                     "39744",
                     "",
                     admin_public_key,
+                    "",
+                    "",
                     "1",
                     "n",
                     "y",
@@ -1290,6 +2092,30 @@ class InteractiveDeployTests(unittest.TestCase):
                 mock.patch("builtins.input", side_effect=lambda _="": next(answers)),
                 mock.patch("getpass.getpass", side_effect=lambda _="": next(hidden_answers)),
                 mock.patch.object(MODULE, "require_command", side_effect=lambda name: name),
+                mock.patch.object(
+                    MODULE,
+                    "hash_account_password",
+                    side_effect=lambda password: f"$6$fixture${password[:8]}",
+                ),
+                mock.patch.object(MODULE, "show_generated_account_passwords"),
+                mock.patch.object(
+                    MODULE,
+                    "detect_local_public_ipv4",
+                    return_value="8.8.8.8",
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "remote_observed_ssh_source_ipv4",
+                    return_value="8.8.8.8",
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "split_runtime_secret",
+                    return_value=[
+                        f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                        for index in range(1, 6)
+                    ],
+                ),
                 mock.patch.object(MODULE, "run", side_effect=simulated_run) as run,
                 mock.patch.object(MODULE, "cleanup_deployment"),
                 mock.patch.object(
@@ -1328,8 +2154,27 @@ class InteractiveDeployTests(unittest.TestCase):
             exit_node = inventory["all"]["children"]["exit"]["hosts"]["exit-managed"]
             self.assertEqual(entry["ansible_port"], 56777)
             self.assertEqual(exit_node["ansible_port"], 56778)
+            self.assertEqual(entry["ansible_user"], "kalimera")
+            self.assertEqual(exit_node["ansible_user"], "kalimera")
+            self.assertTrue(entry["ansible_become"])
+            self.assertTrue(exit_node["ansible_become"])
+            self.assertEqual(entry["ansible_become_method"], "sudo")
+            self.assertEqual(exit_node["ansible_become_method"], "sudo")
+            self.assertEqual(
+                entry["ansible_become_password"],
+                "{{ vault_entry_kalimera_password }}",
+            )
+            self.assertEqual(
+                exit_node["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
             self.assertFalse(entry["security_allow_ssh_port_change"])
             self.assertEqual(entry["security_previous_ssh_port"], 22)
+            self.assertEqual(entry["security_automation_source_ipv4"], "8.8.8.8")
+            self.assertEqual(
+                entry["security_admin_password_hash"],
+                "{{ vault_entry_kalimera_password_hash }}",
+            )
             entry_vars = yaml.safe_load(
                 (repo / "inventory" / "production" / "group_vars" / "entry.yml").read_text(encoding="utf-8")
             )
@@ -1366,8 +2211,18 @@ class InteractiveDeployTests(unittest.TestCase):
                 (repo / "inventory" / "production" / "group_vars" / "all" / "main.yml").read_text(encoding="utf-8")
             )
             self.assertEqual(len(all_vars["security_admin_authorized_keys"]), 1)
+            self.assertTrue(all_vars["security_manage_admin_account"])
+            self.assertEqual(all_vars["security_admin_user"], "kalimera")
+            self.assertTrue(all_vars["security_finalize_admin_access"])
+            self.assertTrue(all_vars["security_account_passwords_delivered"])
             self.assertEqual(all_vars["awg_package_version_mode"], "pinned")
             self.assertEqual(all_vars["awg_package_versions"]["amneziawg"], "1.0")
+            self.assertTrue(all_vars["runtime_secrets_enabled"])
+            self.assertEqual(all_vars["runtime_secrets_threshold"], 2)
+            self.assertEqual(all_vars["runtime_secrets_total_shares"], 5)
+            self.assertRegex(all_vars["runtime_secrets_cluster_id"], r"^[0-9a-f]{32}$")
+            self.assertEqual(entry_vars["runtime_secrets_share_index"], 1)
+            self.assertEqual(exit_vars["runtime_secrets_share_index"], 2)
 
             encrypted = (
                 repo / "inventory" / "production" / "group_vars" / "all" / "vault.yml"
@@ -1377,9 +2232,28 @@ class InteractiveDeployTests(unittest.TestCase):
             ).decrypt(encrypted)
             vault = yaml.safe_load(plaintext)
             self.assertIn("vault_awg_entry_private_key", vault)
+            self.assertRegex(vault["vault_entry_kalimera_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_entry_root_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_exit_kalimera_password_hash"], r"^[$]6[$]")
+            self.assertRegex(vault["vault_exit_root_password_hash"], r"^[$]6[$]")
+            self.assertRegex(
+                vault["vault_entry_kalimera_password"],
+                r"^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#$%^&*_+=-]).{30}$",
+            )
+            self.assertRegex(
+                vault["vault_exit_kalimera_password"],
+                r"^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#$%^&*_+=-]).{30}$",
+            )
+            self.assertNotIn("vault_entry_become_password", vault)
+            self.assertNotIn("vault_exit_become_password", vault)
             self.assertIn("vault_awg_entry_legacy_private_key", vault)
             self.assertIn("vault_awg_entry_mobile_private_key", vault)
             self.assertIn("vault_awg3_header_protection_key", vault)
+            self.assertEqual(len(vault["vault_runtime_secret_shares"]), 5)
+            self.assertEqual(
+                set(vault["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed"},
+            )
             self.assertEqual(vault["vault_proxy_username"], "")
             self.assertEqual(
                 vault["vault_entry_client_peers"][0]["allowed_ips"],

@@ -8,6 +8,16 @@
 
 - name: "Установка: защита Fail2Ban — этап 2"
   ansible.builtin.template:
+    src: fail2ban.local.j2
+    dest: "{{ security_fail2ban_runtime_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg_enable_fail2ban | bool
+  notify: Перезапустить итоговый Fail2Ban
+
+- name: "Установка: защита Fail2Ban — этап 3"
+  ansible.builtin.template:
     src: fail2ban-sshd.local.j2
     dest: "{{ security_fail2ban_file }}"
     owner: root
@@ -16,13 +26,52 @@
   when: awg_enable_fail2ban | bool
   notify: Перезапустить итоговый Fail2Ban
 
-- name: "Включение: защита Fail2Ban — этап 3"
+- name: "Проверка строгой конфигурации Fail2Ban до перезапуска"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/fail2ban-client
+      - -t
+  changed_when: false
+  when: awg_enable_fail2ban | bool
+
+- name: "Включение: защита Fail2Ban — этап 4"
   ansible.builtin.systemd_service:
     name: fail2ban.service
     enabled: true
     state: started
   when: awg_enable_fail2ban | bool
 
-- name: "Применение: защита Fail2Ban — этап 4"
+- name: "Применение: защита Fail2Ban — этап 5"
   ansible.builtin.meta: flush_handlers
+  when: awg_enable_fail2ban | bool
+
+- name: "Проверка активной защиты SSH через Fail2Ban"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/fail2ban-client
+      - status
+      - sshd
+  changed_when: false
+  when: awg_enable_fail2ban | bool
+
+- name: Поиск прежних постоянных журналов Fail2Ban
+  ansible.builtin.find:
+    paths:
+      - /var/log
+      - /var/lib/fail2ban
+    recurse: false
+    file_type: file
+    patterns:
+      - fail2ban.log*
+      - fail2ban.sqlite3*
+  register: fail2ban_persistent_state
+  when: awg_enable_fail2ban | bool
+
+- name: Удаление прежних постоянных журналов Fail2Ban
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ fail2ban_persistent_state.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
   when: awg_enable_fail2ban | bool

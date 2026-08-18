@@ -11,7 +11,7 @@ if [[ $# -eq 1 && $1 == --version ]]; then
 fi
 
 install_controller_packages() {
-    packages=(python3 python3-venv openssh-client sshpass)
+    packages=(python3 python3-venv openssh-client openssl sshpass ssss)
     if [[ "$(id -u)" -eq 0 ]]; then
         apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 update
         apt-get -o Acquire::Retries=5 -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
@@ -24,7 +24,7 @@ install_controller_packages() {
     fi
 }
 
-for command in python3 ssh ssh-keygen ssh-copy-id sshpass; do
+for command in python3 ssh ssh-keygen ssh-copy-id openssl sshpass ssss-split ssss-combine; do
     if ! command -v "$command" >/dev/null 2>&1; then
         printf 'Не хватает зависимостей управляющего окружения. Установить автоматически? [Y/n]: '
         if [[ -t 0 ]]; then

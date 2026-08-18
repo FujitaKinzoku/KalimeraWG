@@ -317,6 +317,15 @@
   notify: Перезапуск межсерверного AWG 3+
   when: awg3_transit_enabled | bool
 
+- name: "Установка безопасного перезапуска межсерверного AWG 3+"
+  ansible.builtin.template:
+    src: transit-restart.sh.j2
+    dest: "{{ awg3_transit_restart_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: awg3_transit_enabled | bool
+
 - name: "Установка systemd-службы межсерверного AWG 3+"
   ansible.builtin.template:
     src: awg3-transit.service.j2

@@ -33,6 +33,8 @@
         - roles/health/defaults/main.yml
         - roles/operations/defaults/main.yml
         - roles/awg3_transit/defaults/main.yml
+        - roles/runtime_secrets/defaults/main.yml
+        - roles/security/defaults/main.yml
 
     - name: Включение preview-ветвей логики для проверки шаблонов
       ansible.builtin.set_fact:
@@ -41,7 +43,19 @@
         entry_mobile_client_available: true
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
+        runtime_secrets_enabled: true
+        security_manage_admin_account: true
+        security_finalize_admin_access: true
+        security_admin_user: kalimera
+        security_root_authorized_keys_path: "{{ rendered_shell_root }}/root-authorized_keys"
+        security_ssh_host_key_paths:
+          - "{{ rendered_shell_root }}/ssh_host_ed25519_key"
+        runtime_secrets_cluster_id: "00000000000000000000000000000000"
+        runtime_secrets_peer_inventory_hosts:
+          - exit.example.invalid
+        vault_runtime_secret_key_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         awg_node_role: entry
+        ansible_port: 56777
         terminal_summary_entry_host: 192.0.2.10
         terminal_summary_exit_host: 192.0.2.20
         terminal_summary_entry_user: root
@@ -70,6 +84,103 @@
             state: directory
             mode: "0700"
 
+        - name: Формирование программы порогового runtime-хранилища
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/secretctl.py.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-secretctl"
+            mode: "0700"
+
+        - name: Проверка синтаксиса программы порогового runtime-хранилища
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - py_compile
+              - "{{ rendered_shell_root }}/kalimera-secretctl"
+          changed_when: false
+
+        - name: Формирование безопасной структуры runtime-хранилища
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/config.json.j2"
+            dest: "{{ rendered_shell_root }}/runtime-config.json"
+            mode: "0600"
+
+        - name: Проверка JSON и полного набора защищаемых путей
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -c
+              - >-
+                import json,sys;
+                d=json.load(open(sys.argv[1], encoding='utf-8'));
+                paths={m['source'] for m in d['mappings']};
+                assert '/etc/awg' in paths and '/etc/sing-box' in paths and
+                '/etc/amnezia/amneziawg-v3' in paths
+              - "{{ rendered_shell_root }}/runtime-config.json"
+          changed_when: false
+
+        - name: Формирование ограниченной политики sudo рабочего администратора
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/security/templates/kalimera-admin.sudoers.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-admin.sudoers"
+            mode: "0440"
+
+        - name: Проверка отсутствия неограниченного passwordless sudo
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            sudoers_path={{ (rendered_shell_root ~ '/kalimera-admin.sudoers') | quote }}
+            grep -Fq '/usr/local/libexec/kalimera-admin-command *' "$sudoers_path"
+            grep -Fq '/usr/local/libexec/kalimera-share-export get-share' "$sudoers_path"
+            ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' "$sudoers_path"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Создание временного Ed25519 host key для проверки SSH
+          ansible.builtin.command:
+            argv:
+              - ssh-keygen
+              - -q
+              - -t
+              - ed25519
+              - -N
+              - ""
+              - -f
+              - "{{ rendered_shell_root }}/ssh_host_ed25519_key"
+          args:
+            creates: "{{ rendered_shell_root }}/ssh_host_ed25519_key"
+
+        - name: Формирование строгой конфигурации SSH
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/security/templates/sshd-awg.conf.j2"
+            dest: "{{ rendered_shell_root }}/sshd-awg.conf"
+            mode: "0600"
+
+        - name: Подготовка штатного runtime-каталога OpenSSH
+          ansible.builtin.file:
+            path: /run/sshd
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Проверка синтаксиса и результирующей политики SSH
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            config={{ (rendered_shell_root ~ '/sshd-awg.conf') | quote }}
+            effective="$(/usr/sbin/sshd -T -f "$config" \
+              -C user=kalimera,host=localhost,addr=127.0.0.1)"
+            grep -qx 'authenticationmethods publickey' <<<"$effective"
+            grep -qx 'authorizedkeysfile .ssh/authorized_keys' <<<"$effective"
+            grep -qx 'requiredrsasize 2048' <<<"$effective"
+            grep -qx 'disableforwarding yes' <<<"$effective"
+            grep -qx 'allowstreamlocalforwarding no' <<<"$effective"
+            ! grep -Eq '^pubkeyacceptedalgorithms .*([,[:space:]])ssh-rsa([,[:space:]]|$)' \
+              <<<"$effective"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
         - name: Формирование исполняемых шаблонов ENTRY
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../{{ item.src }}"
@@ -78,22 +189,32 @@
           loop:
             - src: roles/entry_routing/templates/awg-entry-routing.sh.j2
               dest: awg-entry-routing
+            - src: roles/entry_routing/templates/awg-entry-routing-reconcile.sh.j2
+              dest: awg-entry-routing-reconcile
             - src: roles/entry_routing/templates/awg-ru-zone-update.sh.j2
               dest: awg-ru-zone-update
             - src: roles/entry_watchdog/templates/awg-ru-proxy-watch.sh.j2
               dest: awg-ru-proxy-watch
             - src: roles/operations/templates/server-audit.sh.j2
               dest: server-audit-entry
+            - src: roles/operations/templates/awg-managed-integrity.sh.j2
+              dest: awg-managed-integrity-entry
             - src: roles/operations/templates/telegram-monitor.sh.j2
               dest: telegram-monitor-entry
             - src: roles/operations/templates/awg-kernel-guard.sh.j2
               dest: awg-kernel-guard
+            - src: roles/security/templates/kalimera-admin-command.sh.j2
+              dest: kalimera-admin-command
+            - src: roles/runtime_secrets/templates/share-export.sh.j2
+              dest: kalimera-share-export
             - src: roles/operations/templates/maintenance.sh.j2
               dest: maintenance
             - src: roles/operations/templates/update-all.sh.j2
               dest: update-all
             - src: roles/operations/templates/f2b-reset.sh.j2
               dest: f2b-reset
+            - src: roles/operations/templates/ssh-key-audit.sh.j2
+              dest: ssh-key-audit
             - src: roles/operations/templates/domain-admin.sh.j2
               dest: domain-admin
             - src: roles/operations/templates/ru-proxy.sh.j2
@@ -122,8 +243,12 @@
               dest: awg-dns-policy
             - src: roles/awg3_transit/templates/transit-setup.sh.j2
               dest: awg3-transit-setup
+            - src: roles/awg3_transit/templates/transit-restart.sh.j2
+              dest: awg3-transit-restart
             - src: roles/awg3_transit/templates/validate-config.sh.j2
               dest: awg3-validate-config
+            - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
+              dest: kalimera-secrets-unlock
 
         - name: Формирование настроек интерактивного терминала
           ansible.builtin.template:
@@ -183,6 +308,7 @@
             'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status.stdout or
             'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' not in rendered_kalimera_status.stdout or
             'ЗАЩИТА ВНЕШНИХ ИНТЕРФЕЙСОВ' not in rendered_kalimera_status.stdout or
+            'No-logs' not in rendered_kalimera_status.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status.stdout or
             'VPN-КЛИЕНТЫ' not in rendered_kalimera_status.stdout
 
@@ -193,6 +319,40 @@
               - -m
               - py_compile
               - "{{ playbook_dir }}/../roles/operations/files/ru-proxy-capability.py"
+          changed_when: false
+
+        - name: Исполняемая проверка обнаружения постороннего root SSH-ключа
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            root_keys={{ (rendered_shell_root ~ '/root-authorized_keys') | quote }}
+            cp {{ (rendered_shell_root ~ '/ssh_host_ed25519_key.pub') | quote }} "$root_keys"
+            chmod 0600 "$root_keys"
+            if {{ (rendered_shell_root ~ '/ssh-key-audit') | quote }} status >status.out 2>&1; then
+                echo 'Посторонний тестовый root-ключ не был обнаружен.' >&2
+                exit 1
+            fi
+            grep -Fq 'WARN строка 1: 256 SHA256:' status.out
+            grep -Fq 'удалить: ssh-key-audit delete SHA256:' status.out
+            : >"$root_keys"
+            {{ (rendered_shell_root ~ '/ssh-key-audit') | quote }} status |
+                grep -Fq 'не содержит активных ключей'
+            rm -f status.out "$root_keys"
+          args:
+            executable: /bin/bash
+            chdir: "{{ rendered_shell_root }}"
+          changed_when: false
+
+        - name: Формирование конфигурации Unbound для Ubuntu 24.04
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/entry_dns/templates/90-awg-dot.conf.j2"
+            dest: "{{ rendered_shell_root }}/90-awg-dot.conf"
+            mode: "0600"
+
+        - name: Проверка конфигурации штатным unbound-checkconf Ubuntu 24.04
+          ansible.builtin.command:
+            argv:
+              - unbound-checkconf
+              - "{{ rendered_shell_root }}/90-awg-dot.conf"
           changed_when: false
 
         - name: Формирование защищённого модуля systemd для watchdog
@@ -239,6 +399,7 @@
             rendered_kalimera_status_exit.rc != 0 or
             'ПОДКЛЮЧЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'СХЕМА РАБОТЫ И DNS' not in rendered_kalimera_status_exit.stdout or
+            'No-logs' not in rendered_kalimera_status_exit.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status_exit.stdout or
             'БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_exit.stdout
@@ -255,14 +416,19 @@
               - shellcheck
               - --exclude=SC2317
               - "{{ rendered_shell_root }}/awg-entry-routing"
+              - "{{ rendered_shell_root }}/awg-entry-routing-reconcile"
               - "{{ rendered_shell_root }}/awg-ru-zone-update"
               - "{{ rendered_shell_root }}/awg-ru-proxy-watch"
               - "{{ rendered_shell_root }}/server-audit-entry"
+              - "{{ rendered_shell_root }}/awg-managed-integrity-entry"
               - "{{ rendered_shell_root }}/telegram-monitor-entry"
               - "{{ rendered_shell_root }}/awg-kernel-guard"
+              - "{{ rendered_shell_root }}/kalimera-admin-command"
+              - "{{ rendered_shell_root }}/kalimera-share-export"
               - "{{ rendered_shell_root }}/maintenance"
               - "{{ rendered_shell_root }}/update-all"
               - "{{ rendered_shell_root }}/f2b-reset"
+              - "{{ rendered_shell_root }}/ssh-key-audit"
               - "{{ rendered_shell_root }}/domain-admin"
               - "{{ rendered_shell_root }}/ru-proxy"
               - "{{ rendered_shell_root }}/ru-proxy-set"
@@ -277,7 +443,9 @@
               - "{{ rendered_shell_root }}/awg-local-peer-apply"
               - "{{ rendered_shell_root }}/awg-dns-policy"
               - "{{ rendered_shell_root }}/awg3-transit-setup"
+              - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
+              - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/kalimera-help"

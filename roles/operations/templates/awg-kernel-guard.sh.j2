@@ -26,14 +26,33 @@ kernels+=("$running_kernel")
 boot_image="$(readlink -f /vmlinuz 2>/dev/null || true)"
 if [[ -n "$boot_image" && "${boot_image##*/}" == vmlinuz-* ]]; then
     kernels+=("${boot_image##*/vmlinuz-}")
-elif compgen -G '/boot/vmlinuz-*' >/dev/null; then
-    boot_kernel="$({
+fi
+
+# На части VPS /vmlinuz отсутствует, является самоссылкой или управляется
+# загрузчиком провайдера. Поэтому следующее загрузочное ядро определяем также
+# по /boot, установленным пакетам Ubuntu и реально созданным /lib/modules.
+boot_kernel="$({
+    if compgen -G '/boot/vmlinuz-*' >/dev/null; then
         for image in /boot/vmlinuz-*; do
             printf '%s\n' "${image##*/vmlinuz-}"
         done
-    } | sort -V | tail -n 1)"
-    [[ -z "$boot_kernel" ]] || kernels+=("$boot_kernel")
-fi
+    fi
+
+    { dpkg-query -W -f='${binary:Package} ${db:Status-Abbrev}\n' \
+        'linux-image-[0-9]*' 'linux-image-unsigned-[0-9]*' 2>/dev/null || true; } |
+    awk '$2 ~ /^ii/ { print $1 }' |
+    sed -E \
+        -e 's/:.*$//' \
+        -e 's/^linux-image-unsigned-//' \
+        -e 's/^linux-image-//'
+
+    if compgen -G '/lib/modules/*' >/dev/null; then
+        for modules_dir in /lib/modules/*; do
+            [[ -d "$modules_dir" ]] && printf '%s\n' "${modules_dir##*/}"
+        done
+    fi
+} | awk 'NF && /^[0-9]/ && !seen[$0]++' | sort -V | tail -n 1)"
+[[ -z "$boot_kernel" ]] || kernels+=("$boot_kernel")
 
 mapfile -t kernels < <(printf '%s\n' "${kernels[@]}" | awk 'NF && !seen[$0]++')
 
@@ -62,4 +81,4 @@ for kernel_release in "${kernels[@]}"; do
 done
 
 modprobe amneziawg
-printf 'AmneziaWG готов для текущего и следующего загрузочного ядра.\n'
+printf 'AmneziaWG готов для ядер: %s.\n' "$(IFS=', '; echo "${kernels[*]}")"

@@ -45,6 +45,118 @@ service_inactive() {
     ! systemctl is-active --quiet "$1"
 }
 
+systemd_config_last_value() {
+    local config="$1" key="$2"
+    systemd-analyze cat-config "$config" |
+        awk -F= -v wanted="$key" '
+            {
+                name = $1
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+                if (name == wanted) {
+                    value = substr($0, index($0, "=") + 1)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                    last = value
+                }
+            }
+            END { if (last != "") print last }
+        '
+}
+
+journald_is_volatile() {
+    [[ "$(systemd_config_last_value systemd/journald.conf Storage)" == volatile ]] &&
+        [[ "$(systemd_config_last_value systemd/journald.conf ForwardToSyslog)" == no ]]
+}
+
+rsyslog_is_disabled() {
+    local enabled
+    ! systemctl is-active --quiet rsyslog.service &&
+        enabled="$(systemctl is-enabled rsyslog.service 2>/dev/null || true)" &&
+        [[ "$enabled" == masked || "$enabled" == not-found ]]
+}
+
+coredump_storage_is_disabled() {
+    [[ "$(systemd_config_last_value systemd/coredump.conf Storage)" == none ]] &&
+        [[ "$(systemd_config_last_value systemd/coredump.conf ProcessSizeMax)" == 0 ]]
+}
+
+login_accounting_is_volatile() {
+    local name
+    for name in wtmp btmp lastlog faillog; do
+        [[ "$(readlink -f "/var/log/$name")" == "/run/kalimerawg-accounting/$name" ]] ||
+            return 1
+    done
+}
+
+fail2ban_state_is_volatile() {
+    grep -Eq '^[[:space:]]*logtarget[[:space:]]*=[[:space:]]*SYSTEMD-JOURNAL[[:space:]]*$' \
+        /etc/fail2ban/fail2ban.local &&
+        grep -Eq '^[[:space:]]*dbfile[[:space:]]*=[[:space:]]*:memory:[[:space:]]*$' \
+            /etc/fail2ban/fail2ban.local
+}
+
+
+fail2ban_sshd_policy_is_strict() {
+    local jail=/etc/fail2ban/jail.d/zz-awg-sshd.local
+    fail2ban-client -t >/dev/null 2>&1 &&
+        fail2ban-client status sshd >/dev/null 2>&1 &&
+        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry | int }}" ]] &&
+        grep -Eq '^[[:space:]]*mode[[:space:]]*=[[:space:]]*aggressive[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+}
+
+ufw_logging_is_disabled() {
+    ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
+}
+
+{% if security_manage_admin_account | default(false) | bool %}
+managed_admin_is_ready() {
+    id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
+        id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
+        passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
+        passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
+        test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
+        test -x {{ security_admin_command_path | quote }} &&
+        visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
+        ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
+}
+{% endif %}
+
+{% if runtime_secrets_enabled | default(false) | bool %}
+runtime_secrets_are_healthy() {
+    systemctl is-enabled --quiet {{ runtime_secrets_service_name | quote }} &&
+        systemctl is-active --quiet {{ runtime_secrets_service_name | quote }} &&
+        {{ runtime_secrets_ctl_path | quote }} verify >/dev/null 2>&1
+}
+
+runtime_secret_dependencies_are_loaded() {
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:'
+}
+{% endif %}
+
+{% if awg_node_role == 'entry' %}
+dns_no_logs_policy_is_active() {
+    grep -Fxq 'cache-size=0' /etc/dnsmasq.d/50-awg-base.conf &&
+        ! grep -Eq '^[[:space:]]*log-queries([=[:space:]]|$)' \
+            /etc/dnsmasq.d/50-awg-base.conf &&
+        grep -Fxq 'Cache=no' {{ entry_dns_resolved_dropin_path | quote }} &&
+        grep -Eq '^[[:space:]]*log-queries:[[:space:]]*no[[:space:]]*$' \
+            /etc/unbound/unbound.conf.d/90-awg-dot.conf &&
+        grep -Eq '^[[:space:]]*log-replies:[[:space:]]*no[[:space:]]*$' \
+            /etc/unbound/unbound.conf.d/90-awg-dot.conf
+}
+
+sing_box_no_logs_policy_is_active() {
+    [[ ! -e /etc/sing-box/config.json ]] ||
+        jq -e '.log.disabled == true and .dns.disable_cache == true' \
+            /etc/sing-box/config.json >/dev/null
+}
+{% endif %}
+
 handshake_recent() {
     local interface="$1" max_age="$2" tool="${3:-awg}" latest now
     latest="$("$tool" show "$interface" latest-handshakes |
@@ -67,7 +179,15 @@ ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
     expected="$(cut -d '|' -f 2 "$marker")"
-    status="$(ufw status numbered)"
+    # Fail2Ban закономерно добавляет и удаляет временные REJECT-правила. Они
+    # имеют собственный комментарий и не являются изменением постоянной
+    # управляемой политики KalimeraWG. Все остальные правила остаются частью
+    # контролируемого отпечатка.
+    status="$(
+        LC_ALL=C ufw status |
+            sed -E \
+                '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+    )"
     actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     [[ -n "$expected" && "$actual" == "$expected" ]]
 }
@@ -99,6 +219,17 @@ ufw_interserver_has_no_broad_allow() {
             grep -F -- "--dport ${port}" |
             grep -F -- '-j ACCEPT' || true
     )
+}
+
+ufw_client_destination_denied() {
+    local interface="$1" source="$2" destination="$3"
+    iptables -w 10 -C ufw-user-forward -i "$interface" \
+        -s "$source" -d "$destination" -j DROP
+}
+
+ufw_client_zones_isolated() {
+    ufw_client_destination_denied "$1" "$2" "$3" &&
+        ufw_client_destination_denied "$4" "$5" "$6"
 }
 
 route_uses_interface() {
@@ -142,6 +273,11 @@ check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
 check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
 check 'UFW активен' ufw_active
 check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check 'журналирование UFW отключено' ufw_logging_is_disabled
+check 'systemd journal хранится только в RAM' journald_is_volatile
+check 'постоянный rsyslog отключён' rsyslog_is_disabled
+check 'coredump не сохраняются' coredump_storage_is_disabled
+check 'учёт входов хранится только в RAM' login_accounting_is_volatile
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
     ufw_interserver_restricted \
@@ -156,10 +292,19 @@ check 'UFW не разрешает межсерверный AWG для всех 
 {% endif %}
 {% if awg_enable_fail2ban | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
+check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 {% else %}
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
+{% if security_manage_admin_account | default(false) | bool %}
+check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
+{% endif %}
+{% if runtime_secrets_enabled | default(false) | bool %}
+check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
+check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
+{% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
 {% if awg_telegram_monitor_enabled | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
@@ -177,7 +322,7 @@ check 'служба AWG 3+ до EXIT сервера' systemctl is-active --quiet
 check 'служба AWG до EXIT сервера' systemctl is-active --quiet awg-quick@{{ entry_exit_interface }}.service
 {% endif %}
 check 'клиентский интерфейс AWG' ip link show {{ entry_client_interface | quote }}
-check 'MTU клиентского интерфейса согласован с каскадом' interface_mtu_is {{ entry_client_interface | quote }} {{ entry_awg_client_mtu }}
+check 'MTU клиентского интерфейса согласован с каскадом' interface_mtu_is {{ entry_client_interface | quote }} {{ entry_awg_client_mtu | int }}
 check 'интерфейс AWG до EXIT сервера' ip link show {{ entry_exit_interface | quote }}
 check 'состояние клиентского AWG доступно' awg show {{ entry_client_interface | quote }}
 {% if entry_legacy_client_available | default(false) | bool %}
@@ -196,7 +341,7 @@ if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.ser
     check 'служба мобильного AWG' systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service
     check 'мобильный интерфейс AWG' ip link show {{ entry_mobile_client_interface | quote }}
     check 'состояние мобильного AWG доступно' awg show {{ entry_mobile_client_interface | quote }}
-    check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu }}
+    check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu | int }}
     check 'внешний UDP/8443 мобильного AWG открыт напрямую' {{ entry_mobile_firewall_path | quote }} check
 elif systemctl is-failed --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
     check 'служба мобильного AWG не завершилась с ошибкой' false
@@ -213,7 +358,7 @@ check 'состояние AWG до EXIT сервера доступно' awg sho
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
-check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu }}
+check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu | int }}
 {% else %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
 {% endif %}
@@ -221,11 +366,13 @@ check 'согласование локальных VPN-пиров' systemctl is-
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
 check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
 check 'служба Unbound' systemctl is-active --quiet unbound.service
-check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port }}' {{ entry_dns_resolved_dropin_path | quote }}
+check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port | int }}' {{ entry_dns_resolved_dropin_path | quote }}
 check 'системное разрешение имён' getent ahostsv4 example.com
 check 'синтаксис dnsmasq' dnsmasq --test
 check 'синтаксис Unbound' unbound-checkconf
-check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port }} example.com A
+check 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
+check 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
+check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} example.com A
 check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
 {% if entry_legacy_client_available | default(false) | bool %}
@@ -245,16 +392,36 @@ check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
 check 'ipset российских сетей' ipset list ru
 check 'цепочка маршрутизации ENTRY сервера' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -j AWG_RU_PROXY
+check 'клиенты AWG изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_client_interface | quote }} \
+    {{ entry_client_subnet | quote }} 169.254.0.0/16
+check 'клиенты AWG изолированы от служебной сети ENTRY-EXIT' \
+    ufw_client_destination_denied {{ entry_client_interface | quote }} \
+    {{ entry_client_subnet | quote }} {{ hostvars[groups['exit'][0]].exit_awg_subnet | quote }}
 {% if entry_legacy_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     check 'цепочка маршрутизации совместимого интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_legacy_client_interface | quote }} -s {{ entry_legacy_client_subnet | quote }} -j AWG_RU_PROXY
 fi
+check 'legacy-клиенты изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_legacy_client_interface | quote }} \
+    {{ entry_legacy_client_subnet | quote }} 169.254.0.0/16
+check 'обычные и legacy-клиенты взаимно изолированы' ufw_client_zones_isolated \
+    {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
+    {{ entry_legacy_client_subnet | quote }} {{ entry_legacy_client_interface | quote }} \
+    {{ entry_legacy_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
     check 'цепочка маршрутизации мобильного интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -j AWG_RU_PROXY
     check 'принудительный DNS мобильного интерфейса' iptables -w 10 -t nat -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_mobile_client_listen_address ~ ':53') | quote }}
 fi
+check 'mobile-клиенты изолированы от cloud metadata' \
+    ufw_client_destination_denied {{ entry_mobile_client_interface | quote }} \
+    {{ entry_mobile_client_subnet | quote }} 169.254.0.0/16
+check 'обычные и mobile-клиенты взаимно изолированы' ufw_client_zones_isolated \
+    {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
+    {{ entry_mobile_client_subnet | quote }} {{ entry_mobile_client_interface | quote }} \
+    {{ entry_mobile_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 check 'принудительное перенаправление DNS UDP' iptables -w 10 -t nat -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_client_listen_address ~ ':53') | quote }}
 direct_ports_present=false
@@ -288,7 +455,7 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
     check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
     check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
     check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
-    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port }} yandex.ru A
+    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port | int }} yandex.ru A
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" == proxy ]]; then
         check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
@@ -322,7 +489,7 @@ check 'состояние AWG EXIT сервера доступно' awg show {{ 
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
-check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu }}
+check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu | int }}
 {% else %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
 {% endif %}

@@ -54,6 +54,21 @@ awg_unattended_security_updates: true
 # Только защитный предел: установка продолжится сразу после освобождения APT.
 awg_apt_wait_timeout_seconds: 1800
 awg_server_audit_calendar: "*-*-* 04:40:00"
-awg_maintenance_calendar: "Sun *-*-* 05:20:00"
+awg_maintenance_calendar: "*-*-* 05:20:00"
 awg_telegram_monitor_enabled: false
 awg_telegram_monitor_interval: 60s
+
+# Защита ключевого материала на диске. Открытые конфигурации существуют только
+# в tmpfs /run, а 256-битный ключ пакета собирается из любых двух разных долей.
+# Пять долей позволяют без смены формата использовать ENTRY и два EXIT, оставив
+# ещё две доли для отдельного держателя и аварийного восстановления.
+runtime_secrets_enabled: true
+runtime_secrets_threshold: 2
+runtime_secrets_total_shares: 5
+runtime_secrets_runtime_root: /run/kalimera-secrets
+runtime_secrets_state_root: /var/lib/kalimera-secrets
+runtime_secrets_config_root: /etc/kalimera-secrets
+runtime_secrets_peer_timeout_seconds: 7
+runtime_secrets_unlock_timeout_seconds: 180
+runtime_secrets_service_name: kalimera-secrets-unlock.service
+runtime_secrets_ctl_path: /usr/local/sbin/kalimera-secretctl

@@ -66,6 +66,14 @@
     mode: "0750"
   notify: Перезапустить маршрутизацию ENTRY сервера
 
+- name: "Установка безопасного согласования повторных запусков маршрутизации"
+  ansible.builtin.template:
+    src: awg-entry-routing-reconcile.sh.j2
+    dest: "{{ entry_routing_reconcile_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
 - name: "Установка: маршрутизация ENTRY сервера — этап 8"
   ansible.builtin.template:
     src: awg-ru-zone-update.sh.j2

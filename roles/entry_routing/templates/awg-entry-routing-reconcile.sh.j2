@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly service={{ entry_routing_service_name | quote }}
+state="$(systemctl show "$service" --property=ActiveState --value 2>/dev/null || true)"
+
+case "$state" in
+    active)
+        # Для oneshot-службы с RemainAfterExit reload повторно применяет правила,
+        # не прерывая другой запуск сигналом TERM.
+        systemctl --no-block reload "$service" >/dev/null 2>&1 || true
+        ;;
+    inactive|failed)
+        systemctl --no-block start "$service" >/dev/null 2>&1 || true
+        ;;
+    activating|deactivating|reloading)
+        # Уже выполняющийся systemd job применит актуальное состояние. Новый
+        # restart здесь отменил бы ExecStart и оставил частичный набор правил.
+        ;;
+    *)
+        systemctl --no-block start "$service" >/dev/null 2>&1 || true
+        ;;
+esac

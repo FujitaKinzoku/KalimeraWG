@@ -14,6 +14,7 @@ readonly udp_state={{ entry_ru_proxy_udp_mode_path | quote }}
 readonly watchdog_timer={{ entry_ru_proxy_watch_timer_name | quote }}
 readonly watchdog_service={{ entry_ru_proxy_watch_service_name | quote }}
 readonly watchdog_state={{ entry_ru_proxy_watch_state_dir | quote }}
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
 [[ -f "$config" ]] || { echo 'Прокси не был настроен во время deploy.' >&2; exit 1; }
 
 if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
@@ -24,6 +25,9 @@ fi
 if [[ "${1:-}" == reset ]]; then
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
     rm -f "$override"
+{% if runtime_secrets_enabled | default(false) | bool %}
+    "$secretctl" seal
+{% endif %}
     echo 'Локальное переопределение удалено. Выполните deploy --resume для возврата к inventory.'
     exit 0
 fi
@@ -157,4 +161,7 @@ if systemctl is-active --quiet sing-box.service; then
 else
     echo 'Параметры прокси проверены и сохранены; прокси остаётся выключенным.'
 fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+"$secretctl" seal
+{% endif %}
 committed=false

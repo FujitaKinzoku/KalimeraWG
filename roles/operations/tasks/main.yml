@@ -23,7 +23,9 @@
     mode: "0644"
     content: |
       APT::Periodic::Update-Package-Lists "1";
-      APT::Periodic::Unattended-Upgrade "1";
+      // Обновления безопасности выполняет awg-maintenance.timer: после APT
+      // он обязательно устанавливает headers и собирает DKMS до перезагрузки.
+      APT::Periodic::Unattended-Upgrade "0";
   when: awg_unattended_security_updates | bool
 
 - name: "Запрет: администрирование — этап 4"
@@ -50,6 +52,14 @@
     group: root
     mode: "0750"
 
+- name: Установка проверки целостности управляемых файлов
+  ansible.builtin.template:
+    src: awg-managed-integrity.sh.j2
+    dest: "{{ awg_managed_integrity_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
 - name: "Установка: администрирование — этап 6"
   ansible.builtin.template:
     src: "{{ item.src }}"
@@ -62,6 +72,7 @@
     - {src: maintenance.sh.j2, dest: maintenance}
     - {src: update-all.sh.j2, dest: update-all}
     - {src: f2b-reset.sh.j2, dest: f2b-reset}
+    - {src: ssh-key-audit.sh.j2, dest: ssh-key-audit}
 
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
@@ -222,23 +233,21 @@
     owner: root
     group: root
     mode: "0755"
-  loop:
-    - "{{ entry_client_interface }}"
-    - "{{ entry_legacy_client_interface }}"
-    - "{{ entry_mobile_client_interface }}"
+  loop: >-
+    {{ [entry_client_interface, entry_legacy_client_interface, entry_mobile_client_interface] +
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
   when: awg_node_role == 'entry'
 
-- name: "Связывание запуска клиентских интерфейсов с восстановлением peers и маршрутов"
+- name: "Связывание запуска клиентских и базового EXIT интерфейса с восстановлением peers и маршрутов"
   ansible.builtin.template:
     src: awg-interface-reconcile.conf.j2
     dest: "/etc/systemd/system/awg-quick@{{ item }}.service.d/50-awg-reconcile.conf"
     owner: root
     group: root
     mode: "0644"
-  loop:
-    - "{{ entry_client_interface }}"
-    - "{{ entry_legacy_client_interface }}"
-    - "{{ entry_mobile_client_interface }}"
+  loop: >-
+    {{ [entry_client_interface, entry_legacy_client_interface, entry_mobile_client_interface] +
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
   when: awg_node_role == 'entry'
   notify: Перезагрузить модули systemd для администрирования
 

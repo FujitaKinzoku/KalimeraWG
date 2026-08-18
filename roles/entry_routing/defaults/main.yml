@@ -1,5 +1,6 @@
 ---
 entry_routing_script_path: /usr/local/sbin/awg-entry-routing
+entry_routing_reconcile_path: /usr/local/sbin/awg-entry-routing-reconcile
 entry_ru_zone_update_script_path: /usr/local/sbin/awg-ru-zone-update
 entry_ru_zone_state_dir: /var/lib/awg-routing
 entry_ru_zone_cache_path: /var/lib/awg-routing/ru.zone

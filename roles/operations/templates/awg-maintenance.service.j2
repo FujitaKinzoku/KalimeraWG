@@ -8,3 +8,7 @@ Type=oneshot
 ExecStart={{ awg_maintenance_path }} --scheduled
 Nice=10
 IOSchedulingClass=idle
+UMask=0077
+ProtectClock=true
+RestrictRealtime=true
+SystemCallArchitectures=native

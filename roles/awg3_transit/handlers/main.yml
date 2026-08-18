@@ -1,7 +1,6 @@
 ---
 - name: Перезапуск межсерверного AWG 3+
-  ansible.builtin.systemd_service:
-    name: "{{ awg3_transit_service_name }}"
-    state: restarted
-    daemon_reload: true
+  ansible.builtin.command:
+    argv: ["{{ awg3_transit_restart_path }}"]
+  changed_when: true
   when: awg3_transit_enabled | bool

@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ $EUID -eq 0 ]] || {
+    echo 'Команда должна запускаться через управляемый sudo.' >&2
+    exit 1
+}
+
+keys_file={{ security_root_authorized_keys_path | quote }}
+lock_file=/run/lock/kalimera-root-authorized-keys.lock
+
+usage() {
+    cat <<'EOF'
+Использование:
+  ssh-key-audit status
+  ssh-key-audit delete SHA256:FINGERPRINT
+
+Команда показывает только fingerprint, тип и комментарий ключа.
+Удаление выполняется только после явного подтверждения DELETE.
+EOF
+}
+
+is_active_key_line() {
+    [[ $1 =~ ^[[:space:]]*$ || $1 =~ ^[[:space:]]*# ]] && return 1
+    return 0
+}
+
+key_fingerprint() {
+    ssh-keygen -lf - 2>/dev/null <<<"$1" |
+        awk 'NR == 1 { print $2 }'
+}
+
+print_status() {
+    local line line_number=0 fingerprint details count=0
+    if [[ ! -s "$keys_file" ]]; then
+        echo 'OK: /root/.ssh/authorized_keys не содержит активных ключей.'
+        return 0
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_number=$((line_number + 1))
+        is_active_key_line "$line" || continue
+        count=$((count + 1))
+        details="$(ssh-keygen -lf - 2>/dev/null <<<"$line" || true)"
+        if [[ -n "$details" ]]; then
+            printf 'WARN строка %d: %s\n' "$line_number" "$details"
+            fingerprint="$(awk 'NR == 1 { print $2 }' <<<"$details")"
+            printf '     удалить: ssh-key-audit delete %s\n' "$fingerprint"
+        else
+            printf 'WARN строка %d: нераспознанная активная запись SSH\n' "$line_number"
+            echo '     проверьте файл вручную; автоматическое удаление недоступно'
+        fi
+    done <"$keys_file"
+
+    if (( count == 0 )); then
+        echo 'OK: /root/.ssh/authorized_keys не содержит активных ключей.'
+        return 0
+    fi
+
+    printf 'Обнаружено активных root-ключей: %d. Каскаду они не требуются.\n' "$count"
+    echo 'Root SSH уже отключён, поэтому удаление не прервёт сеанс пользователя kalimera.'
+    return 1
+}
+
+delete_fingerprint() {
+    local wanted="$1" line current confirmation temp removed=0
+    [[ "$wanted" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || {
+        echo 'Некорректный SHA256 fingerprint.' >&2
+        exit 2
+    }
+    [[ -f "$keys_file" ]] || {
+        echo 'Файл root authorized_keys отсутствует.' >&2
+        exit 1
+    }
+
+    exec 9>"$lock_file"
+    flock -x 9
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        is_active_key_line "$line" || continue
+        current="$(key_fingerprint "$line" || true)"
+        [[ "$current" == "$wanted" ]] && removed=$((removed + 1))
+    done <"$keys_file"
+
+    (( removed > 0 )) || {
+        echo "Ключ $wanted не найден." >&2
+        exit 1
+    }
+    [[ -t 0 ]] || {
+        echo 'Для удаления требуется интерактивный терминал.' >&2
+        exit 2
+    }
+    printf 'Будут удалены записи root с fingerprint %s (%d шт.).\n' "$wanted" "$removed"
+    read -r -p 'Для подтверждения введите DELETE: ' confirmation
+    [[ "$confirmation" == DELETE ]] || {
+        echo 'Удаление отменено.'
+        exit 1
+    }
+
+    temp="$(mktemp "$(dirname "$keys_file")/.authorized_keys.kalimera.XXXXXX")"
+    trap 'rm -f "$temp"' EXIT
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        current=''
+        if is_active_key_line "$line"; then
+            current="$(key_fingerprint "$line" || true)"
+        fi
+        [[ "$current" == "$wanted" ]] || printf '%s\n' "$line" >>"$temp"
+    done <"$keys_file"
+
+    chown root:root "$temp"
+    chmod 0600 "$temp"
+    mv -f "$temp" "$keys_file"
+    trap - EXIT
+    printf 'Удалено записей: %d.\n' "$removed"
+    print_status || true
+}
+
+case "${1:-status}" in
+    status)
+        [[ $# -le 1 ]] || { usage >&2; exit 2; }
+        print_status
+        ;;
+    delete)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        delete_fingerprint "$2"
+        ;;
+    --help|-h)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

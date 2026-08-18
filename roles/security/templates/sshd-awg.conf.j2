@@ -1,4 +1,7 @@
 # Управляется Ansible. Private keys должны находиться за пределами репозитория.
+{% for host_key_path in security_ssh_host_key_paths %}
+HostKey {{ host_key_path }}
+{% endfor %}
 Port {{ ssh_listen_port }}
 {% if (security_allow_ssh_port_change | bool) and ((ansible_port | default(22) | int) != (ssh_listen_port | int)) %}
 # Временный listener двухэтапного перехода. После проверки обновите ansible_port.
@@ -7,11 +10,35 @@ Port {{ ansible_port | default(22) }}
 PasswordAuthentication {{ ssh_password_authentication | ternary('yes', 'no') }}
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-PermitRootLogin {{ ssh_root_login }}
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAcceptedAlgorithms -ssh-rsa
+RequiredRSASize 2048
+{% set manage_admin = security_manage_admin_account | default(false) | bool %}
+{% set finalize_admin = security_finalize_admin_access | default(false) | bool %}
+{% set managed_admin = security_admin_user if manage_admin else ansible_user %}
+{% set effective_root_login = 'no' if (manage_admin and finalize_admin) else ssh_root_login %}
+PermitRootLogin {{ effective_root_login }}
 PermitEmptyPasswords no
+{% if manage_admin and finalize_admin %}
+AllowUsers {{ managed_admin }}
+{% elif manage_admin %}
+AllowUsers {{ managed_admin }} root{% if ansible_user not in [managed_admin, 'root'] %} {{ ansible_user }}{% endif %}
+{% else %}
+AllowUsers {{ managed_admin }}
+{% endif %}
+Banner none
+DebianBanner no
 X11Forwarding no
+DisableForwarding yes
 AllowAgentForwarding no
 AllowTcpForwarding no
+AllowStreamLocalForwarding no
 GatewayPorts no
+PermitUserEnvironment no
+PermitUserRC no
+GSSAPIAuthentication no
+UseDNS no
 MaxAuthTries 3
 LoginGraceTime 30
+MaxStartups 10:30:60

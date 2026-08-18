@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly service={{ awg3_transit_service_name | quote }}
+readonly iface={{ awg3_transit_interface | quote }}
+readonly port={{ awg3_transit_listen_port | int }}
+
+systemctl daemon-reload
+for attempt in 1 2 3; do
+    if systemctl restart "$service"; then
+        systemctl is-active --quiet "$service"
+        exit 0
+    fi
+    systemctl reset-failed "$service" >/dev/null 2>&1 || true
+    sleep $(( attempt * 2 ))
+done
+
+{
+    printf '%s\n' '--- безопасная диагностика отложенного перезапуска AWG 3+ ---'
+    systemctl show "$service" \
+        -p ActiveState \
+        -p SubState \
+        -p Result \
+        -p ExecMainCode \
+        -p ExecMainStatus \
+        -p ExecStart \
+        -p ExecStartPre \
+        -p ExecStartPost || true
+    journalctl -u "$service" -n 80 --no-pager --output=cat || true
+    ip -brief link show "$iface" || true
+    ip -brief address show "$iface" || true
+    ss -H -lunp | grep -E \
+        "(^|[[:space:]])[^[:space:]]*:${port}([[:space:]]|$)" || \
+        echo "UDP/${port}: не прослушивается"
+} 2>&1 | sed -E \
+    -e 's/((PrivateKey|PresharedKey|HeaderProtectionKey)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1[СКРЫТО]/Ig' \
+    -e 's/[A-Za-z0-9+\/]{42}[A-Za-z0-9+\/=]{2,}/[КЛЮЧ СКРЫТ]/g' >&2
+
+exit 1

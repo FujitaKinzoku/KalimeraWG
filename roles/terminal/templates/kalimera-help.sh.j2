@@ -13,4 +13,7 @@ if [[ ! -x /usr/local/sbin/kalimera-status ]]; then
     exit 1
 fi
 
+if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
+    exec sudo -n /usr/local/libexec/kalimera-admin-command kalimera-status --with-commands
+fi
 exec /usr/local/sbin/kalimera-status --with-commands

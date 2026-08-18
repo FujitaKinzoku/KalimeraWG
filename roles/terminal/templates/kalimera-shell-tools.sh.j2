@@ -3,6 +3,13 @@
 [[ -z ${KALIMERA_SHELL_TOOLS_LOADED:-} ]] || return 0
 KALIMERA_SHELL_TOOLS_LOADED=1
 
+# Команды администратора не сохраняются между сеансами.
+export HISTFILE=/dev/null
+export HISTSIZE=1000
+export HISTFILESIZE=0
+history -c 2>/dev/null || true
+export LESSHISTFILE=-
+
 export LESS='-R -F -X'
 export SYSTEMD_COLORS=1
 export SYSTEMD_PAGERSECURE=1
@@ -28,6 +35,37 @@ elif [[ -r /etc/bash_completion ]]; then
 fi
 
 alias kalimera='kalimera-help'
+
+# Рабочий администратор вызывает только заранее разрешённые root-команды.
+# Это не предоставляет NOPASSWD: ALL и не позволяет выполнить произвольный shell.
+if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
+    _kalimera_admin() {
+        sudo -n /usr/local/libexec/kalimera-admin-command "$@"
+    }
+    function kalimera-status { _kalimera_admin kalimera-status "$@"; }
+    function awg-health { _kalimera_admin awg-health "$@"; }
+    function server-audit { _kalimera_admin server-audit "$@"; }
+    function maintenance { _kalimera_admin maintenance "$@"; }
+    function update-all { _kalimera_admin update-all "$@"; }
+    function vpn-user { _kalimera_admin vpn-user "$@"; }
+    function awg-mobile { _kalimera_admin awg-mobile "$@"; }
+    function awg-old { _kalimera_admin awg-old "$@"; }
+    function dns-status { _kalimera_admin dns-status "$@"; }
+    function dot-switch { _kalimera_admin dot-switch "$@"; }
+    function doh-switch { _kalimera_admin doh-switch "$@"; }
+    function ru-domain { _kalimera_admin ru-domain "$@"; }
+    function se-domain { _kalimera_admin se-domain "$@"; }
+    function entry-domain { _kalimera_admin entry-domain "$@"; }
+    function ru-proxy { _kalimera_admin ru-proxy "$@"; }
+    function ru-proxy-set { _kalimera_admin ru-proxy-set "$@"; }
+    function ru-direct-ports { _kalimera_admin ru-direct-ports "$@"; }
+    function fail2ban-client { _kalimera_admin fail2ban-client "$@"; }
+    function f2b-reset { _kalimera_admin f2b-reset "$@"; }
+    function ssh-key-audit { _kalimera_admin ssh-key-audit "$@"; }
+    function telegram-test { _kalimera_admin telegram-test "$@"; }
+    function kalimera-secretctl { _kalimera_admin kalimera-secretctl "$@"; }
+    function kalimera-deploy { _kalimera_admin kalimera-deploy "$@"; }
+fi
 
 # Справка показывается один раз для каждого нового SSH/терминального сеанса.
 if [[ -t 1 && -z ${KALIMERA_HELP_SHOWN:-} && -x /usr/local/sbin/kalimera-help ]]; then

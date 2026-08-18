@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly MANIFEST={{ awg_managed_integrity_manifest | quote }}
+readonly STATE_DIR="${MANIFEST%/*}"
+
+usage() {
+    echo 'Использование: awg-managed-integrity seal|check'
+}
+
+managed_files() {
+    local path
+    while IFS= read -r path; do
+        [[ -f "$path" ]] && printf '%s\n' "$path"
+    done <<'EOF'
+/etc/sysctl.d/90-awg-managed.conf
+{{ security_journald_dropin_path | default('/etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf') }}
+/etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf
+/etc/tmpfiles.d/90-kalimerawg-volatile-accounting.conf
+/etc/fail2ban/fail2ban.local
+/etc/fail2ban/jail.d/zz-awg-sshd.local
+/etc/ssh/sshd_config.d/00-awg-managed.conf
+/etc/profile.d/kalimera-shell-tools.sh
+/usr/local/sbin/awg-health
+/usr/local/sbin/server-audit
+/usr/local/sbin/awg-managed-integrity
+/usr/local/sbin/awg-kernel-guard
+/usr/local/sbin/maintenance
+/usr/local/sbin/update-all
+/usr/local/sbin/ssh-key-audit
+/etc/systemd/system/awg-server-audit.service
+/etc/systemd/system/awg-server-audit.timer
+{% if runtime_secrets_enabled | default(false) | bool %}
+{{ runtime_secrets_ctl_path }}
+{{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
+{{ runtime_secrets_unlock_path | default('/usr/local/libexec/kalimera-secrets-unlock') }}
+{{ runtime_secrets_config_path | default('/etc/kalimera-secrets/config.json') }}
+/etc/systemd/system/{{ runtime_secrets_service_name }}
+/etc/systemd/system/awg-quick@.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/{{ awg3_transit_service_name | default('awg3-transit.service') }}.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/sing-box.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/awg-telegram-monitor.service.d/90-kalimerawg-runtime-secrets.conf
+{% endif %}
+{% if awg_node_role == 'entry' %}
+/etc/dnsmasq.d/50-awg-base.conf
+/etc/systemd/resolved.conf.d/60-kalimerawg.conf
+/etc/unbound/unbound.conf.d/90-awg-dot.conf
+/usr/local/sbin/awg-entry-routing
+/usr/local/sbin/awg-entry-routing-reconcile
+/usr/local/sbin/awg-dns-policy
+/usr/local/sbin/awg-local-peer-apply
+/etc/systemd/system/awg-entry-routing.service
+/etc/systemd/system/awg-local-peer-apply.service
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool or awg_node_role == 'exit' %}
+{{ awg3_transit_setup_path }}
+{{ awg3_transit_restart_path | default('/usr/local/sbin/awg3-transit-restart') }}
+/etc/systemd/system/{{ awg3_transit_service_name }}
+{% endif %}
+EOF
+}
+
+case "${1:-}" in
+    seal)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        install -d -m 0700 "$STATE_DIR"
+        temporary="$(mktemp "${STATE_DIR}/managed-files.XXXXXX")"
+        trap 'rm -f "$temporary"' EXIT
+        managed_files | sort -u | xargs -r sha256sum >"$temporary"
+        chmod 0600 "$temporary"
+        mv -f "$temporary" "$MANIFEST"
+        trap - EXIT
+        ;;
+    check)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        [[ -s "$MANIFEST" ]] || {
+            echo 'Манифест управляемых файлов отсутствует.' >&2
+            exit 1
+        }
+        sha256sum --check --quiet "$MANIFEST"
+        ;;
+    --help|-h)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

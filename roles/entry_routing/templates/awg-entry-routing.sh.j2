@@ -30,6 +30,21 @@ readonly PROXY_MANUAL_DISABLED_FLAG={{ entry_ru_proxy_manual_disabled_flag | quo
 readonly PROXY_UDP_MODE_FILE={{ entry_ru_proxy_udp_mode_path | quote }}
 readonly RU_CACHE={{ entry_ru_zone_cache_path | quote }}
 readonly CHAIN=AWG_RU_PROXY
+
+interface_is_up() {
+    ip -o link show dev "$1" 2>/dev/null |
+        grep -Eq '(^|[,<])UP([,>]|$)'
+}
+
+wait_for_interface_up() {
+    local interface="$1" _
+    for _ in {1..50}; do
+        interface_is_up "$interface" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 PROXY_UDP_MODE=direct
 if [[ -r "$PROXY_UDP_MODE_FILE" ]]; then
     read -r PROXY_UDP_MODE <"$PROXY_UDP_MODE_FILE" || PROXY_UDP_MODE=direct
@@ -129,7 +144,10 @@ remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
 ip rule add fwmark "$EXIT_MARK" table "$EXIT_TABLE" priority "$EXIT_PRIORITY"
 
 proxy_ready=false
-if ip link show "$PROXY_IF" >/dev/null 2>&1 && [[ ! -e "$PROXY_DISABLED_FLAG" ]] && [[ ! -e "$PROXY_MANUAL_DISABLED_FLAG" ]]; then
+if ip link show "$PROXY_IF" >/dev/null 2>&1 &&
+        [[ ! -e "$PROXY_DISABLED_FLAG" ]] &&
+        [[ ! -e "$PROXY_MANUAL_DISABLED_FLAG" ]] &&
+        wait_for_interface_up "$PROXY_IF"; then
     ip route replace default dev "$PROXY_IF" table "$RU_TABLE"
     remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
     ip rule add fwmark "$RU_MARK" table "$RU_TABLE" priority "$RU_PRIORITY"

@@ -487,6 +487,50 @@
     - role: health
       when: awg_adoption_mode == 'apply'
 
+- name: Подготовка взаимной аутентификации держателей Shamir-долей
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Чтение публичного Ed25519 host key без закрытого материала
+      ansible.builtin.slurp:
+        path: /etc/ssh/ssh_host_ed25519_key.pub
+      register: runtime_secrets_host_public_key_file
+      when:
+        - awg_adoption_mode == 'apply'
+        - runtime_secrets_enabled | default(false) | bool
+
+    - name: Сохранение проверенного host key только в памяти Ansible
+      ansible.builtin.set_fact:
+        runtime_secrets_ssh_host_public_key: >-
+          {{ runtime_secrets_host_public_key_file.content | b64decode | trim |
+             regex_replace('^(ssh-ed25519 [^ ]+).*$', '\1') }}
+      no_log: true
+      when:
+        - awg_adoption_mode == 'apply'
+        - runtime_secrets_enabled | default(false) | bool
+
+- name: Шифрование постоянных секретов и перенос открытых данных в tmpfs
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: runtime_secrets
+      when:
+        - awg_adoption_mode == 'apply'
+        - runtime_secrets_enabled | default(false) | bool
+
+- name: Фиксация контрольных сумм управляемой конфигурации
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Создание манифеста после полного применения ролей
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-managed-integrity, seal]
+      changed_when: true
+      when: awg_adoption_mode == 'apply'
+
 - name: Восстановление автоматических обновлений
   hosts: all
   gather_facts: false

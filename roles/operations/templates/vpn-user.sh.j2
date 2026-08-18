@@ -4,6 +4,7 @@ shopt -s nullglob
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
 
 readonly output_dir={{ awg_client_output_dir | quote }}
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
 readonly main_peer_dir={{ awg_local_peer_dir | quote }}
 readonly main_iface={{ entry_client_interface | quote }}
 readonly main_config="/etc/amnezia/amneziawg/${main_iface}.conf"
@@ -22,6 +23,7 @@ usage() {
     cat <<'EOF'
 Использование:
   vpn-user list
+  vpn-user export NAME
   vpn-user delete NAME [--yes]
   vpn-user NAME [performance|balanced|masking|mobile|old]
 EOF
@@ -129,6 +131,25 @@ inventory_has_user() {
     return 1
 }
 
+export_user_config() {
+    local name="$1" output="$output_dir/$1.conf"
+    if [[ ! -f "$output" || -L "$output" ]]; then
+        if inventory_has_user "$name"; then
+            echo "Пользователь $name управляется зашифрованным inventory." >&2
+            echo 'Закрытый ключ первоначального клиента хранится только на управляющем узле; ENTRY не может восстановить его конфиг.' >&2
+            return 2
+        fi
+        echo "Локальный VPN-пользователь $name или его конфигурация не найдены." >&2
+        return 1
+    fi
+    [[ -r "$output" ]] || {
+        echo "Конфигурация пользователя $name недоступна для чтения." >&2
+        return 1
+    }
+    printf 'Конфигурация %s показана только в текущем терминале; не сохраняйте сеанс с секретами.\n' "$name" >&2
+    cat -- "$output"
+}
+
 delete_user() {
     local name="$1" assume_yes="$2" specification directory iface peer_file='' public_key
     local output backup_dir timestamp optional_controller='' answer remaining
@@ -207,6 +228,9 @@ delete_user() {
             fi
         fi
     fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+    "$secretctl" seal
+{% endif %}
     completed=true
     trap - EXIT
     echo "VPN-пользователь $name удалён; доступ отозван. Резервная копия: $backup_dir"
@@ -217,6 +241,12 @@ case "${1:-}" in
         [[ $# -eq 1 ]] || { usage >&2; exit 2; }
         list_users
         exit 0
+        ;;
+    export|show)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        valid_name "$2" || { echo 'Недопустимое имя пользователя.' >&2; exit 2; }
+        export_user_config "$2"
+        exit $?
         ;;
     delete|del|remove)
         [[ $# -ge 2 && $# -le 3 ]] || { usage >&2; exit 2; }
@@ -436,7 +466,14 @@ if ! "${apply_command[@]}"; then
     echo 'Не удалось применить peer; созданные файлы удалены.' >&2
     exit 1
 fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+stage='обновление зашифрованного runtime-пакета'
+"$secretctl" seal
+{% endif %}
 legacy_started=false
 mobile_started=false
 completed=true
+trap - ERR
 echo "VPN-пользователь создан. Профиль: $profile. Защищённая конфигурация: $output"
+printf '%s\n' 'Скопируйте конфигурацию между строками [Interface] и PersistentKeepalive.' >&2
+export_user_config "$name"

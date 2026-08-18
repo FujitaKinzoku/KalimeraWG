@@ -10,6 +10,7 @@ case "${1:-}" in
     *) usage >&2; exit 2 ;;
 esac
 failures=0
+warnings=0
 
 record() {
     local label="$1"
@@ -19,6 +20,17 @@ record() {
     else
         [[ "$quiet" == true ]] || printf 'FAIL %s\n' "$label"
         failures=$((failures + 1))
+    fi
+}
+
+record_warn() {
+    local label="$1"
+    shift
+    if "$@" >/dev/null 2>&1; then
+        [[ "$quiet" == true ]] || printf 'OK   %s\n' "$label"
+    else
+        [[ "$quiet" == true ]] || printf 'WARN %s\n' "$label"
+        warnings=$((warnings + 1))
     fi
 }
 
@@ -33,13 +45,256 @@ no_failed_units() {
         awk '$1 != "awg-server-audit.service" { found=1 } END { exit !found }'
 }
 
+sensitive_modes_ok() {
+    local file mode
+    while IFS= read -r file; do
+        [[ -e "$file" ]] || continue
+        if [[ -L "$file" ]]; then
+            [[ "$(readlink -f "$file")" == /run/kalimera-secrets/* ]] || return 1
+            file="$(readlink -f "$file")"
+        fi
+        mode="$(stat -c '%a' "$file")"
+        case "$mode" in
+            600|400) ;;
+            *) return 1 ;;
+        esac
+    done <<'EOF'
+/etc/awg-telegram-monitor.env
+/etc/sing-box/config.json
+EOF
+
+    for file in /etc/amnezia/amneziawg/*.conf /etc/awg/*.conf; do
+        [[ -e "$file" ]] || continue
+        if [[ -L "$file" ]]; then
+            [[ "$(readlink -f "$file")" == /run/kalimera-secrets/* ]] || return 1
+            file="$(readlink -f "$file")"
+        fi
+        mode="$(stat -c '%a' "$file")"
+        case "$mode" in
+            600|400) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+{% if runtime_secrets_enabled | default(false) | bool %}
+runtime_secrets_ok() {
+    systemctl is-enabled --quiet {{ runtime_secrets_service_name | quote }} &&
+        systemctl is-active --quiet {{ runtime_secrets_service_name | quote }} &&
+        {{ runtime_secrets_ctl_path | quote }} verify >/dev/null 2>&1
+}
+{% endif %}
+
+ssh_baseline_ok() {
+    local effective
+    effective="$(sshd -T -C user=root,host=localhost,addr=127.0.0.1)"
+    grep -qx 'passwordauthentication no' <<<"$effective" &&
+        grep -qx 'kbdinteractiveauthentication no' <<<"$effective" &&
+        grep -qx 'authenticationmethods publickey' <<<"$effective" &&
+        grep -qx 'authorizedkeysfile .ssh/authorized_keys' <<<"$effective" &&
+        grep -qx 'requiredrsasize 2048' <<<"$effective" &&
+        ! grep -Eq '^pubkeyacceptedalgorithms .*([,[:space:]])ssh-rsa([,[:space:]]|$)' <<<"$effective" &&
+        grep -qx 'x11forwarding no' <<<"$effective" &&
+        grep -qx 'disableforwarding yes' <<<"$effective" &&
+        grep -qx 'allowagentforwarding no' <<<"$effective" &&
+        grep -qx 'allowtcpforwarding no' <<<"$effective" &&
+        grep -qx 'allowstreamlocalforwarding no' <<<"$effective" &&
+        grep -qx 'permituserenvironment no' <<<"$effective" &&
+        grep -qx 'permituserrc no' <<<"$effective" &&
+        grep -qx 'usedns no' <<<"$effective" &&
+        ! grep -qx 'hostkey /etc/ssh/ssh_host_dsa_key' <<<"$effective"
+}
+
+fail2ban_sshd_policy_ok() {
+    local jail=/etc/fail2ban/jail.d/zz-awg-sshd.local
+    fail2ban-client -t >/dev/null 2>&1 &&
+        fail2ban-client status sshd >/dev/null 2>&1 &&
+        [[ "$(fail2ban-client get sshd maxretry 2>/dev/null)" == "{{ fail2ban_sshd.maxretry | int }}" ]] &&
+        grep -Eq '^[[:space:]]*mode[[:space:]]*=[[:space:]]*aggressive[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
+        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+}
+
+{% if security_manage_admin_account | default(false) | bool %}
+managed_admin_ok() {
+    id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
+        id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
+        passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
+        passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
+        test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
+        test -x {{ security_admin_command_path | quote }} &&
+        visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
+        ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
+}
+
+root_ssh_policy_ok() {
+    local effective
+    effective="$(sshd -T -C user=root,host=localhost,addr={{ security_automation_source_ipv4 | quote }})"
+    grep -qx 'permitrootlogin no' <<<"$effective" &&
+        ! grep -Eq '^allowusers .*root(@|[[:space:]]|$)' <<<"$effective"
+}
+
+root_authorized_keys_clean() {
+    local keys={{ security_root_authorized_keys_path | quote }}
+    [[ ! -s "$keys" ]] ||
+        ! awk '
+            /^[[:space:]]*($|#)/ { next }
+            { found=1; exit }
+            END { exit !found }
+        ' "$keys"
+}
+{% endif %}
+
+ppa_key_isolated() {
+    grep -Fxq 'Signed-By: /etc/apt/keyrings/amnezia-ppa.asc' \
+        /etc/apt/sources.list.d/amnezia-ppa.sources &&
+        gpg --batch --show-keys --with-colons /etc/apt/keyrings/amnezia-ppa.asc |
+        grep -Fq 'fpr:::::::::75C9DD72C799870E310542E24166F2C257290828:'
+}
+
+apparmor_enabled() {
+    command -v aa-status >/dev/null 2>&1 && aa-status --enabled
+}
+
+no_container_runtime() {
+    local service
+    for service in docker.service podman.service containerd.service; do
+        systemctl is-active --quiet "$service" && return 1
+    done
+    return 0
+}
+
+known_public_listeners_only() {
+    local proto endpoint address port
+    local known_tcp='{{ ssh_listen_port | int }} {{ ansible_port | default(22) | int }}'
+{% if awg_node_role == 'entry' %}
+    local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}'
+{% else %}
+    local known_udp='{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) | int }}'
+{% endif %}
+
+    while read -r proto _ _ _ endpoint _; do
+        [[ -n "$endpoint" ]] || continue
+        port="${endpoint##*:}"
+        address="${endpoint%:*}"
+        address="${address#[}"
+        address="${address%]}"
+        case "$address" in
+            127.*|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
+        esac
+        case "$proto" in
+            tcp) [[ " $known_tcp " == *" $port "* ]] || return 1 ;;
+            udp) [[ " $known_udp " == *" $port "* ]] || return 1 ;;
+        esac
+    done < <(ss -H -lntu)
+}
+
+systemd_config_last_value() {
+    local config="$1" key="$2"
+    systemd-analyze cat-config "$config" |
+        awk -F= -v wanted="$key" '
+            {
+                name = $1
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+                if (name == wanted) {
+                    value = substr($0, index($0, "=") + 1)
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                    last = value
+                }
+            }
+            END { if (last != "") print last }
+        '
+}
+
+journald_is_volatile() {
+    [[ "$(systemd_config_last_value systemd/journald.conf Storage)" == volatile ]] &&
+        [[ "$(systemd_config_last_value systemd/journald.conf ForwardToSyslog)" == no ]]
+}
+
+rsyslog_is_disabled() {
+    local enabled
+    ! systemctl is-active --quiet rsyslog.service &&
+        enabled="$(systemctl is-enabled rsyslog.service 2>/dev/null || true)" &&
+        [[ "$enabled" == masked || "$enabled" == not-found ]]
+}
+
+coredump_storage_is_disabled() {
+    [[ "$(systemd_config_last_value systemd/coredump.conf Storage)" == none ]] &&
+        [[ "$(systemd_config_last_value systemd/coredump.conf ProcessSizeMax)" == 0 ]]
+}
+
+login_accounting_is_volatile() {
+    local name target
+    for name in wtmp btmp lastlog faillog; do
+        target="$(readlink -f "/var/log/$name")"
+        [[ "$target" == "/run/kalimerawg-accounting/$name" ]] || return 1
+    done
+}
+
+fail2ban_state_is_volatile() {
+    grep -Eq '^[[:space:]]*logtarget[[:space:]]*=[[:space:]]*SYSTEMD-JOURNAL[[:space:]]*$' \
+        /etc/fail2ban/fail2ban.local &&
+        grep -Eq '^[[:space:]]*dbfile[[:space:]]*=[[:space:]]*:memory:[[:space:]]*$' \
+            /etc/fail2ban/fail2ban.local
+}
+
+no_persistent_activity_logs() {
+    local file history_file
+    if [[ -d /var/log/journal ]] &&
+       find /var/log/journal -type f -print -quit | grep -q .; then
+        return 1
+    fi
+    for file in /var/log/auth.log* /var/log/syslog* /var/log/kern.log* \
+                /var/log/ufw.log* /var/log/fail2ban.log* \
+                /var/lib/fail2ban/fail2ban.sqlite3*; do
+        [[ ! -s "$file" ]] || return 1
+    done
+    for history_file in \
+        /root/.bash_history \
+        /root/.lesshst \
+        /root/.viminfo \
+        /root/.nano_history \
+        /root/.python_history \
+        /root/.mysql_history \
+        /root/.psql_history \
+        /root/.sqlite_history \
+        /root/.wget-hsts; do
+        [[ "$(readlink -f "$history_file")" == /dev/null ]] || return 1
+    done
+}
+
 record 'строгая проверка AWG' {{ awg_health_script_path | quote }} --strict
 record 'корневой раздел заполнен менее чем на 90%' disk_ok
 record 'нет неисправных модулей systemd' no_failed_units
 record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
+record 'журналирование UFW отключено' bash -c "ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'"
 record 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+record 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_ok
+record 'systemd journal хранится только в RAM' journald_is_volatile
+record 'постоянный rsyslog отключён' rsyslog_is_disabled
+record 'coredump не сохраняются' coredump_storage_is_disabled
+record 'учёт входов хранится только в RAM' login_accounting_is_volatile
+record 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
+record 'постоянные журналы активности отсутствуют' no_persistent_activity_logs
+record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
+{% if runtime_secrets_enabled | default(false) | bool %}
+record 'пороговое хранилище runtime-секретов исправно' runtime_secrets_ok
+{% endif %}
+record 'усиленная конфигурация SSH применяется' ssh_baseline_ok
+{% if security_manage_admin_account | default(false) | bool %}
+record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
+record 'root SSH полностью отключён' root_ssh_policy_ok
+record_warn 'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' root_authorized_keys_clean
+{% endif %}
+record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
+record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
+record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled
+record_warn 'контейнерный runtime не расширяет поверхность атаки' no_container_runtime
+record_warn 'не обнаружены неожиданные внешние слушатели' known_public_listeners_only
 
-[[ "$quiet" == true ]] || printf 'Ошибок аудита: %d\n' "$failures"
+[[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then
     systemctl --failed --no-legend --plain --no-pager |
         awk '$1 != "awg-server-audit.service"' || true

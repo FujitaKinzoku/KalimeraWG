@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 
@@ -50,6 +51,8 @@ GREEN = "\033[1;32m"
 YELLOW = "\033[1;33m"
 WHITE = "\033[1;37m"
 DIM = "\033[2m"
+BOOT_GRACE_SECONDS = 120
+STARTUP_WAIT_SECONDS = 10
 
 
 def colour_enabled() -> bool:
@@ -94,6 +97,43 @@ def run(argv: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str] |
 def service_active(unit: str) -> bool:
     result = run(["systemctl", "is-active", "--quiet", unit])
     return result is not None and result.returncode == 0
+
+
+def boot_uptime() -> float:
+    try:
+        return float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+    except (OSError, ValueError, IndexError):
+        return BOOT_GRACE_SECONDS + 1
+
+
+def transit_handshake_fresh(interface: str) -> bool:
+    result = run(["awg", "show", interface, "latest-handshakes"], timeout=3)
+    if result is None or result.returncode != 0:
+        return False
+    now = int(time.time())
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2:
+            continue
+        try:
+            timestamp = int(fields[1])
+        except ValueError:
+            continue
+        if timestamp > 0 and 0 <= now - timestamp < 180:
+            return True
+    return False
+
+
+def wait_for_transit_startup(interface: str, in_boot_grace: bool) -> bool:
+    if not in_boot_grace:
+        return interface_mtu(interface) is not None and transit_handshake_fresh(interface)
+    deadline = time.monotonic() + STARTUP_WAIT_SECONDS
+    while True:
+        if interface_mtu(interface) is not None and transit_handshake_fresh(interface):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(1)
 
 
 def interface_mtu(interface: str) -> int | None:
@@ -147,12 +187,16 @@ def current_doh() -> str:
         )
 
 
-def audit_state() -> tuple[str, str]:
+def audit_state(in_boot_grace: bool) -> tuple[str, str]:
     result = run(["/usr/local/sbin/server-audit", "--quiet"], timeout=12)
     if result is None:
+        if in_boot_grace:
+            return "WARN", "службы завершают запуск после загрузки; повторите kalimera-status"
         return "WARN", "полная проверка недоступна или превысила 12 секунд"
     if result.returncode == 0:
         return "OK", "server-audit: все проверки пройдены"
+    if in_boot_grace:
+        return "WARN", "инициализация после загрузки; строгая проверка ещё не завершена"
     return "FAIL", f"server-audit: обнаружены ошибки (код {result.returncode})"
 
 
@@ -168,6 +212,30 @@ def ssh_key_only() -> bool:
         and settings.get("passwordauthentication") == "no"
         and settings.get("kbdinteractiveauthentication") == "no"
     )
+
+
+def no_logs_baseline() -> bool:
+    expected = {
+        Path("{{ security_journald_dropin_path | default('/etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf') }}"): (
+            "Storage=volatile",
+            "ForwardToSyslog=no",
+        ),
+        Path("/etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf"): (
+            "Storage=none",
+            "ProcessSizeMax=0",
+        ),
+        Path("/etc/fail2ban/fail2ban.local"): (
+            "logtarget = SYSTEMD-JOURNAL",
+            "dbfile = :memory:",
+        ),
+    }
+    try:
+        return all(
+            all(value in path.read_text(encoding="utf-8") for value in values)
+            for path, values in expected.items()
+        )
+    except OSError:
+        return False
 
 
 def state_word(active: bool, available: bool = True) -> str:
@@ -236,7 +304,7 @@ def command_panels() -> None:
             ("kalimera-status", "текущие подключения, DNS, MTU и защита", "INFO"),
             ("awg-health --strict", "строгая проверка AWG, маршрутов, DNS и UFW", "INFO"),
             ("server-audit", "AWG, диск, systemd, UFW и Fail2Ban", "INFO"),
-            ("maintenance", "проверка обновлений без их установки", "INFO"),
+            ("maintenance", "проверка обновлений и восстановление готовности DKMS", "INFO"),
             ("update-all", "обновления ОС и подготовка DKMS", "INFO"),
             (
                 "./deploy --resume --update-components",
@@ -251,6 +319,7 @@ def command_panels() -> None:
             [
                 ("vpn-user list", "пользователи и последний handshake", "INFO"),
                 ("vpn-user ИМЯ ПРОФИЛЬ", "создать performance, balanced, masking, mobile или old", "INFO"),
+                ("vpn-user export ИМЯ", "показать защищённый конфиг для копирования", "INFO"),
                 ("vpn-user delete ИМЯ", "отозвать peer и удалить рабочий конфиг", "INFO"),
                 ("awg-mobile status", "состояние мобильного интерфейса UDP/8443", "INFO"),
                 ("awg-old status", "состояние legacy-интерфейса", "INFO"),
@@ -280,6 +349,7 @@ def command_panels() -> None:
         [
             ("fail2ban-client status sshd", "состояние защиты SSH", "INFO"),
             ("f2b-reset status|IP|--all", "просмотр или явное снятие блокировок", "INFO"),
+            ("ssh-key-audit status", "fingerprint посторонних ключей root и безопасное удаление", "INFO"),
             ("telegram-test", "безопасная проверка доставки Telegram", "INFO"),
             ("КОМАНДА --help", "точный синтаксис выбранной команды", "INFO"),
         ],
@@ -332,7 +402,21 @@ def main() -> int:
         if CONFIG["role"] == "entry"
         else CONFIG["exit_transit_interface"]
     )
+    in_boot_grace = boot_uptime() < BOOT_GRACE_SECONDS
+    transit_ready = wait_for_transit_startup(local_transit, in_boot_grace)
     transit_active = interface_mtu(local_transit) is not None
+    if transit_ready:
+        transit_text = "активен; handshake подтверждён"
+        transit_level = "OK"
+    elif in_boot_grace:
+        transit_text = "инициализация после загрузки"
+        transit_level = "WARN"
+    elif transit_active:
+        transit_text = "интерфейс активен; свежий handshake не подтверждён"
+        transit_level = "FAIL"
+    else:
+        transit_text = "не обнаружен"
+        transit_level = "FAIL"
 
     panel(
         "ПОДКЛЮЧЕНИЯ",
@@ -342,7 +426,7 @@ def main() -> int:
             ("VPN-клиенты", f"{CONFIG['entry_host']}:{CONFIG['client_port']}/UDP", "INFO"),
             ("Старые клиенты", f"{CONFIG['entry_host']}:{CONFIG['legacy_port']}/UDP; {old_text}", old_level),
             ("Мобильные клиенты", f"{CONFIG['entry_host']}:{CONFIG['mobile_port']}/UDP; {mobile_text}", mobile_level),
-            ("Канал ENTRY–EXIT", f"{CONFIG['exit_host']}:{CONFIG['exit_transit_port']} · AWG 3+ userspace; {'активен' if transit_active else 'не обнаружен'}", "OK" if transit_active else "FAIL"),
+            ("Канал ENTRY–EXIT", f"{CONFIG['exit_host']}:{CONFIG['exit_transit_port']} · AWG 3+ userspace; {transit_text}", transit_level),
         ],
     )
 
@@ -387,7 +471,8 @@ def main() -> int:
     ufw_ok = ufw_active is not None and "Status: active" in ufw_active.stdout
     fail2ban_ok = service_active("fail2ban.service")
     ssh_ok = ssh_key_only()
-    audit_level, audit_text = audit_state()
+    no_logs_ok = no_logs_baseline()
+    audit_level, audit_text = audit_state(in_boot_grace)
     entry_policy = (
         f"TCP/{CONFIG['entry_ssh_port']} SSH; UDP/{CONFIG['client_port']} клиенты; "
         f"UDP/{CONFIG['mobile_port']} mobile при включении; UDP/{CONFIG['entry_transit_port']} "
@@ -405,6 +490,11 @@ def main() -> int:
             ("Локальный UFW", "активен" if ufw_ok else "неактивен или недоступен", "OK" if ufw_ok else "FAIL"),
             ("Доступ SSH", "только по публичному ключу" if ssh_ok else "политика key-only не подтверждена", "OK" if ssh_ok else "WARN"),
             ("Fail2Ban", "активен" if fail2ban_ok else "неактивен", "OK" if fail2ban_ok else "FAIL"),
+            (
+                "No-logs",
+                "активность не сохраняется на диск" if no_logs_ok else "политика не подтверждена",
+                "OK" if no_logs_ok else "FAIL",
+            ),
             ("Полная проверка", audit_text, audit_level),
         ],
     )

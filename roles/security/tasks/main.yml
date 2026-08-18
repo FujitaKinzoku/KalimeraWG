@@ -1,4 +1,57 @@
 ---
+- name: Установка sudo для управляемого администратора
+  ansible.builtin.apt:
+    name: sudo
+    state: present
+    lock_timeout: 600
+  when: security_manage_admin_account | bool
+
+- name: Проверка материала учётных записей
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_admin_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - security_admin_user != 'root'
+      - security_admin_password_hash is match('^[$]6[$]')
+      - security_root_password_hash is match('^[$]6[$]')
+    fail_msg: >-
+      Для управляемых учётных записей требуются отдельный пользователь и
+      SHA-512 crypt-хеши двух сгенерированных паролей.
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Создание рабочего администратора KalimeraWG
+  ansible.builtin.user:
+    name: "{{ security_admin_user }}"
+    comment: KalimeraWG administrator
+    shell: "{{ security_admin_shell }}"
+    create_home: true
+    groups: sudo
+    append: true
+    password: "{{ security_admin_password_hash }}"
+    update_password: always
+    state: present
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Замена локального пароля root
+  ansible.builtin.user:
+    name: root
+    password: "{{ security_root_password_hash }}"
+    update_password: always
+  no_log: true
+  when: security_manage_admin_account | bool
+
+- name: Запрет постоянной истории рабочего администратора
+  ansible.builtin.file:
+    src: /dev/null
+    dest: "/home/{{ security_admin_user }}/.bash_history"
+    state: link
+    force: true
+    owner: "{{ security_admin_user }}"
+    group: "{{ security_admin_user }}"
+  when: security_manage_admin_account | bool
+
 - name: "Проверка: безопасность — этап 1"
   ansible.builtin.assert:
     quiet: true
@@ -11,7 +64,7 @@
 
 - name: "Установка: безопасность — этап 2"
   ansible.posix.authorized_key:
-    user: "{{ ansible_user }}"
+    user: "{{ security_admin_user if security_manage_admin_account | bool else ansible_user }}"
     key: "{{ item }}"
     state: present
     manage_dir: true
@@ -21,6 +74,123 @@
   when:
     - security_manage_ssh | bool
     - security_admin_authorized_keys | length > 0
+
+- name: Создание каталога ограниченных административных программ
+  ansible.builtin.file:
+    path: "{{ security_admin_command_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: security_manage_admin_account | bool
+
+- name: Установка ограниченного шлюза административных команд
+  ansible.builtin.template:
+    src: kalimera-admin-command.sh.j2
+    dest: "{{ security_admin_command_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
+  when: security_manage_admin_account | bool
+
+- name: Разрешение только управляемых команд без пароля sudo
+  ansible.builtin.template:
+    src: kalimera-admin.sudoers.j2
+    dest: /etc/sudoers.d/90-kalimera-admin
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: security_manage_admin_account | bool
+
+- name: Подключение терминального оформления рабочего администратора
+  ansible.builtin.blockinfile:
+    path: "/home/{{ security_admin_user }}/.bashrc"
+    create: true
+    owner: "{{ security_admin_user }}"
+    group: "{{ security_admin_user }}"
+    mode: "0644"
+    marker: "# {mark} KALIMERA ADMIN TERMINAL"
+    insertafter: EOF
+    block: |
+      if [[ $- == *i* ]]; then
+          source /etc/profile.d/kalimera-shell-tools.sh
+          source /etc/profile.d/kalimera-prompt.sh
+          [[ ! -r /etc/blesh.sh ]] || source /etc/blesh.sh
+      fi
+  when: security_manage_admin_account | bool
+
+- name: Проверка публичной части ключа автоматизации на управляющем узле
+  ansible.builtin.stat:
+    path: "{{ ansible_ssh_private_key_file }}.pub"
+  delegate_to: localhost
+  become: false
+  register: security_automation_public_key_file
+  when:
+    - security_manage_ssh | bool
+    - security_restrict_automation_key | bool
+    - security_automation_source_ipv4 | length > 0
+    - ansible_ssh_private_key_file is defined
+
+- name: Проверка сохранения управляемого канала автоматизации
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_automation_source_ipv4 | length > 0
+      - security_automation_public_key_file.stat.exists | default(false)
+    fail_msg: >-
+      Финальная SSH-политика не применяется без отдельного ключа автоматизации
+      и подтверждённого исходного IPv4 управляющей машины.
+  when:
+    - security_manage_ssh | bool
+    - security_manage_admin_account | bool
+    - security_finalize_admin_access | bool
+    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
+
+- name: Проверка разделения административного и автоматического SSH-ключей
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - >-
+        security_admin_authorized_keys |
+        select('search',
+          (lookup('file', ansible_ssh_private_key_file ~ '.pub').split()[1] |
+           regex_escape)) |
+        list | length == 0
+    fail_msg: >-
+      Административный ключ не должен совпадать с ключом awg-iac-production:
+      для восстановления доступа требуется отдельная ключевая пара.
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+
+- name: Установка адресно ограниченного ключа автоматизации пользователю KalimeraWG
+  ansible.posix.authorized_key:
+    user: "{{ security_admin_user }}"
+    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    key_options: >-
+      from="{{ security_automation_source_ipv4 }}",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
+    state: present
+    manage_dir: true
+    exclusive: false
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+    - security_manage_admin_account | bool
+    - awg_node_role == 'exit' or (ansible_connection | default('ssh')) != 'local'
+
+- name: Удаление служебного ключа из root в финальной фазе
+  ansible.posix.authorized_key:
+    user: root
+    key: "{{ lookup('file', ansible_ssh_private_key_file ~ '.pub') }}"
+    state: absent
+    manage_dir: true
+  no_log: true
+  when:
+    - security_automation_public_key_file.stat.exists | default(false)
+    - security_manage_admin_account | bool
+    - security_finalize_admin_access | bool
 
 - name: "Проверка основной конфигурации ifupdown перед запретом IPv6"
   ansible.builtin.stat:
@@ -184,6 +354,133 @@
     mode: "0644"
   notify: Перезагрузить sysctl
 
+- name: Создание каталога ограничений systemd-journald
+  ansible.builtin.file:
+    path: "{{ security_journald_dropin_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Перевод системного журнала в ограниченное хранилище RAM
+  ansible.builtin.template:
+    src: journald-limits.conf.j2
+    dest: "{{ security_journald_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить journald
+
+- name: Удаление прежнего drop-in с более низким приоритетом journald
+  ansible.builtin.file:
+    path: "{{ security_journald_legacy_dropin_path }}"
+    state: absent
+  when: security_journald_legacy_dropin_path != security_journald_dropin_path
+  notify: Перезагрузить journald
+
+- name: Создание каталога политики coredump
+  ansible.builtin.file:
+    path: "{{ security_coredump_dropin_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Запрет постоянного хранения coredump
+  ansible.builtin.template:
+    src: coredump-no-storage.conf.j2
+    dest: "{{ security_coredump_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Настройка временного учёта входов только в RAM
+  ansible.builtin.template:
+    src: volatile-accounting.conf.j2
+    dest: "{{ security_volatile_accounting_tmpfiles_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Применение временного учёта входов
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemd-tmpfiles
+      - --create
+      - --remove
+      - "{{ security_volatile_accounting_tmpfiles_path }}"
+  changed_when: false
+
+- name: Отключение постоянного syslog
+  ansible.builtin.systemd_service:
+    name: rsyslog.service
+    enabled: false
+    state: stopped
+    masked: true
+  failed_when: false
+
+- name: Применение политики журнала перед удалением прежних записей
+  ansible.builtin.meta: flush_handlers
+
+- name: Удаление прежнего постоянного systemd journal
+  ansible.builtin.file:
+    path: /var/log/journal
+    state: absent
+
+- name: Поиск прежних журналов активности
+  ansible.builtin.find:
+    paths: /var/log
+    recurse: false
+    file_type: file
+    patterns:
+      - auth.log*
+      - syslog*
+      - kern.log*
+      - ufw.log*
+      - fail2ban.log*
+  register: security_persistent_activity_logs
+
+- name: Удаление прежних журналов активности
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ security_persistent_activity_logs.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Поиск прежних постоянных coredump
+  ansible.builtin.find:
+    paths: /var/lib/systemd/coredump
+    recurse: false
+    file_type: file
+  register: security_persistent_coredumps
+  failed_when: false
+
+- name: Удаление прежних постоянных coredump
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ security_persistent_coredumps.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Перенаправление локальных историй root в /dev/null
+  ansible.builtin.file:
+    src: /dev/null
+    dest: "{{ item }}"
+    state: link
+    force: true
+  loop:
+    - /root/.bash_history
+    - /root/.lesshst
+    - /root/.viminfo
+    - /root/.nano_history
+    - /root/.python_history
+    - /root/.mysql_history
+    - /root/.psql_history
+    - /root/.sqlite_history
+    - /root/.wget-hsts
+
 - name: "Проверка изоляции межсерверного канала"
   ansible.builtin.assert:
     quiet: true
@@ -276,9 +573,14 @@
   failed_when: false
   changed_when: false
 
-- name: "Получение фактического набора правил UFW"
-  ansible.builtin.command:
-    argv: [/usr/sbin/ufw, status, numbered]
+- name: "Получение постоянного набора управляемых правил UFW"
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    LC_ALL=C /usr/sbin/ufw status |
+      /usr/bin/sed -E \
+        '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+  args:
+    executable: /bin/bash
   register: security_ufw_actual_status
   changed_when: false
   failed_when: false
@@ -566,6 +868,95 @@
     - "{{ entry_ru_proxy_interface }}"
   when: awg_node_role == 'entry'
 
+- name: "Запрет доступа обычных AWG-клиентов к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_client_interface }}"
+    from_ip: "{{ entry_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от AWG
+  when: awg_node_role == 'entry'
+
+- name: "Запрет доступа мобильных AWG-клиентов к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_mobile_client_interface }}"
+    from_ip: "{{ entry_mobile_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от mobile AWG
+  when:
+    - awg_node_role == 'entry'
+    - entry_mobile_client_available | default(false) | bool
+
+- name: "Запрет доступа legacy-клиентов AWG к cloud metadata"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ entry_legacy_client_interface }}"
+    from_ip: "{{ entry_legacy_client_subnet }}"
+    to_ip: 169.254.0.0/16
+    comment: Изоляция cloud metadata от legacy AWG
+  when:
+    - awg_node_role == 'entry'
+    - entry_legacy_client_available | default(false) | bool
+
+- name: "Запрет доступа клиентских зон к служебной подсети ENTRY-EXIT"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.subnet }}"
+    to_ip: "{{ hostvars[groups['exit'][0]].exit_awg_subnet }}"
+    comment: Изоляция служебного AWG 3+
+  loop: >-
+    {{
+      [{'interface': entry_client_interface, 'subnet': entry_client_subnet}] +
+      ([{'interface': entry_mobile_client_interface, 'subnet': entry_mobile_client_subnet}]
+       if entry_mobile_client_available | default(false) | bool else []) +
+      ([{'interface': entry_legacy_client_interface, 'subnet': entry_legacy_client_subnet}]
+       if entry_legacy_client_available | default(false) | bool else [])
+    }}
+  when: awg_node_role == 'entry'
+
+- name: "Запрет пересылки между клиентскими AWG-зонами"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.source }}"
+    to_ip: "{{ item.destination }}"
+    comment: Изоляция клиентских AWG-зон
+  loop: >-
+    {{
+      ([
+        {'interface': entry_client_interface, 'source': entry_client_subnet,
+         'destination': entry_mobile_client_subnet},
+        {'interface': entry_mobile_client_interface, 'source': entry_mobile_client_subnet,
+         'destination': entry_client_subnet}
+      ] if entry_mobile_client_available | default(false) | bool else []) +
+      ([
+        {'interface': entry_client_interface, 'source': entry_client_subnet,
+         'destination': entry_legacy_client_subnet},
+        {'interface': entry_legacy_client_interface, 'source': entry_legacy_client_subnet,
+         'destination': entry_client_subnet}
+      ] if entry_legacy_client_available | default(false) | bool else []) +
+      ([
+        {'interface': entry_mobile_client_interface, 'source': entry_mobile_client_subnet,
+         'destination': entry_legacy_client_subnet},
+        {'interface': entry_legacy_client_interface, 'source': entry_legacy_client_subnet,
+         'destination': entry_mobile_client_subnet}
+      ] if (entry_mobile_client_available | default(false) | bool and
+            entry_legacy_client_available | default(false) | bool) else [])
+    }}
+  when: awg_node_role == 'entry'
+
 - name: "Разрешение маршрутизации legacy-клиентов AWG"
   community.general.ufw:
     rule: allow
@@ -614,21 +1005,9 @@
     policy: deny
     direction: incoming
 
-- name: "Фиксация отпечатка применённой политики UFW"
-  ansible.builtin.command:
-    argv: [/usr/sbin/ufw, status, numbered]
-  register: security_ufw_final_status
-  changed_when: false
-
-- name: "Фиксация отпечатка применённой политики UFW"
-  ansible.builtin.copy:
-    dest: "{{ security_ufw_policy_marker }}"
-    content: >-
-      {{ security_ufw_policy_fingerprint }}|{{ security_ufw_final_status.stdout | hash('sha256') }}
-
-    owner: root
-    group: root
-    mode: "0600"
+- name: Отключение журналирования UFW
+  community.general.ufw:
+    logging: "{{ security_ufw_logging_level }}"
 
 - name: "Завершение транзакции пересборки UFW"
   ansible.builtin.file:
@@ -684,6 +1063,91 @@
         owner: root
         group: root
         mode: "0755"
+
+    - name: Проверка наличия закрытого Ed25519 host key
+      ansible.builtin.stat:
+        path: /etc/ssh/ssh_host_ed25519_key
+      register: security_ssh_ed25519_private_key
+
+    - name: Создание отсутствующего Ed25519 host key
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -q
+          - -t
+          - ed25519
+          - -N
+          - ""
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key
+      when: not security_ssh_ed25519_private_key.stat.exists
+      notify: Безопасно перезагрузить SSH
+
+    - name: Ограничение прав закрытого Ed25519 host key
+      ansible.builtin.file:
+        path: /etc/ssh/ssh_host_ed25519_key
+        state: file
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Получение публичной части Ed25519 host key из закрытой
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -y
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key
+      register: security_ssh_ed25519_public_material
+      changed_when: false
+      no_log: true
+
+    - name: Согласование публичной части Ed25519 host key
+      ansible.builtin.copy:
+        dest: /etc/ssh/ssh_host_ed25519_key.pub
+        content: "{{ security_ssh_ed25519_public_material.stdout | trim }} {{ inventory_hostname }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Проверка fingerprint Ed25519 host key
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh-keygen
+          - -l
+          - -E
+          - sha256
+          - -f
+          - /etc/ssh/ssh_host_ed25519_key.pub
+      register: security_ssh_ed25519_fingerprint
+      changed_when: false
+      failed_when: >-
+        security_ssh_ed25519_fingerprint.rc != 0 or
+        'ED25519' not in security_ssh_ed25519_fingerprint.stdout
+
+    - name: Поиск доступных закрытых SSH host keys
+      ansible.builtin.find:
+        paths: /etc/ssh
+        recurse: false
+        file_type: file
+        patterns:
+          - ssh_host_ed25519_key
+          - ssh_host_ecdsa_key
+          - ssh_host_rsa_key
+      register: security_ssh_host_key_files
+
+    - name: Формирование совместимого списка SSH host keys
+      ansible.builtin.set_fact:
+        security_ssh_host_key_paths: >-
+          {{ security_ssh_host_key_files.files |
+             map(attribute='path') | sort | list }}
+
+    - name: Проверка обязательного Ed25519 и доступных host keys
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - security_ssh_host_key_paths | length >= 1
+          - "'/etc/ssh/ssh_host_ed25519_key' in security_ssh_host_key_paths"
 
     - name: "Проверка: безопасность — этап 17"
       ansible.builtin.stat:
@@ -847,11 +1311,26 @@
           - "('port ' ~ (ssh_listen_port | string)) in security_sshd_effective.stdout_lines"
           - "'passwordauthentication no' in security_sshd_effective.stdout_lines"
           - >-
-            (ssh_root_login == 'no' and
+            'hostkey /etc/ssh/ssh_host_ed25519_key' in
+            security_sshd_effective.stdout_lines
+          - >-
+            'hostkey /etc/ssh/ssh_host_dsa_key' not in
+            security_sshd_effective.stdout_lines
+          - >-
+            (security_manage_admin_account | bool and
+             security_finalize_admin_access | bool and
              'permitrootlogin no' in security_sshd_effective.stdout_lines) or
-            (ssh_root_login == 'prohibit-password' and
+            ((not (security_manage_admin_account | bool and
+                   security_finalize_admin_access | bool)) and
+             ssh_root_login == 'prohibit-password' and
              (('permitrootlogin prohibit-password' in security_sshd_effective.stdout_lines) or
               ('permitrootlogin without-password' in security_sshd_effective.stdout_lines)))
+          - >-
+            (not security_manage_admin_account | bool) or
+            (security_sshd_effective.stdout_lines |
+             select('match', '^allowusers .*') |
+             select('search', '(^| )' ~ security_admin_user ~ '( |$)') |
+             list | length == 1)
 
     - name: "Применение: безопасность — этап 36"
       ansible.builtin.meta: flush_handlers
@@ -886,3 +1365,28 @@
   ansible.builtin.debug:
     msg: "SSH не изменяется, поскольку security_manage_ssh=false."
   when: not security_manage_ssh | bool
+
+# При первоначальном переносе SSH на управляемый порт переходное правило
+# прежнего порта удаляется только в конце SSH-блока. Снимок, сделанный до
+# этого удаления, немедленно становился устаревшим и строгая проверка UFW
+# не могла пройти даже на чистой установке.
+- name: "Получение окончательной постоянной политики UFW после перехода SSH"
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    LC_ALL=C /usr/sbin/ufw status |
+      /usr/bin/sed -E \
+        '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+  args:
+    executable: /bin/bash
+  register: security_ufw_final_status
+  changed_when: false
+
+- name: "Фиксация отпечатка окончательной политики UFW"
+  ansible.builtin.copy:
+    dest: "{{ security_ufw_policy_marker }}"
+    content: >-
+      {{ security_ufw_policy_fingerprint }}|{{ security_ufw_final_status.stdout | hash('sha256') }}
+
+    owner: root
+    group: root
+    mode: "0600"

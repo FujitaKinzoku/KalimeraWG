@@ -15,8 +15,29 @@ security_ifupdown_ipv6_hook_regexp_parts:
 security_fail2ban_file: /etc/fail2ban/jail.d/zz-awg-sshd.local
 security_manage_ssh: false
 security_allow_ssh_port_change: false
+security_manage_admin_account: false
+security_admin_user: kalimera
+security_admin_shell: /bin/bash
+security_admin_password_hash: ""
+security_root_password_hash: ""
+security_finalize_admin_access: false
+security_controller_repo_path: /root/KalimeraWG
+security_root_authorized_keys_path: /root/.ssh/authorized_keys
+security_admin_command_path: /usr/local/libexec/kalimera-admin-command
+security_runtime_secrets_export_path: >-
+  {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
 security_admin_authorized_keys: []
 security_require_admin_authorized_key: false
+security_restrict_automation_key: true
+security_automation_source_ipv4: >-
+  {{
+    '127.0.0.1'
+    if awg_node_role == 'entry' and
+       (ansible_host | default('')) in ['127.0.0.1', 'localhost', '::1']
+    else security_interserver_peer_ipv4
+    if awg_node_role == 'exit'
+    else ''
+  }}
 security_ssh_dropin_path: /etc/ssh/sshd_config.d/00-awg-managed.conf
 security_ssh_legacy_dropin_path: /etc/ssh/sshd_config.d/99-awg-managed.conf
 security_ssh_candidate_path: /run/ansible-sshd-awg.conf.candidate
@@ -26,3 +47,11 @@ security_interserver_listen_port: "{{ awg3_transit_listen_port | default(exit_aw
 security_ufw_authoritative: true
 security_ufw_state_dir: /var/lib/awg-iac/security
 security_ufw_policy_marker: "{{ security_ufw_state_dir }}/ufw-policy.sha256"
+security_journald_dropin_path: /etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf
+security_journald_legacy_dropin_path: /etc/systemd/journald.conf.d/90-kalimerawg-limits.conf
+security_journal_runtime_max_use: 32M
+security_journal_max_retention: 2h
+security_coredump_dropin_path: /etc/systemd/coredump.conf.d/90-kalimerawg-no-storage.conf
+security_volatile_accounting_tmpfiles_path: /etc/tmpfiles.d/90-kalimerawg-volatile-accounting.conf
+security_volatile_accounting_dir: /run/kalimerawg-accounting
+security_ufw_logging_level: 'off'

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ $EUID -eq 0 ]] || { echo 'Внутренняя команда должна запускаться через sudo.' >&2; exit 1; }
+command_name="${1:-}"
+[[ -n "$command_name" ]] || { echo 'Не указана команда KalimeraWG.' >&2; exit 2; }
+shift
+
+case "$command_name" in
+    kalimera-status|awg-health|server-audit|maintenance|update-all|vpn-user|awg-mobile|awg-old|dns-status|dot-switch|doh-switch|ru-domain|se-domain|entry-domain|ru-proxy|ru-proxy-set|ru-direct-ports|f2b-reset|ssh-key-audit|telegram-test|kalimera-secretctl)
+        executable="/usr/local/sbin/$command_name"
+        [[ -x "$executable" ]] || { echo "Команда $command_name не установлена на этом сервере." >&2; exit 127; }
+        exec "$executable" "$@"
+        ;;
+    fail2ban-client)
+        if [[ $# -eq 1 && $1 == status ]] || [[ $# -eq 2 && $1 == status && $2 == sshd ]]; then
+            exec /usr/bin/fail2ban-client "$@"
+        fi
+        echo 'Разрешено: fail2ban-client status [sshd]' >&2
+        exit 2
+        ;;
+    kalimera-deploy)
+{% if awg_node_role == 'entry' %}
+        case "${*:-}" in
+            '--resume'|'--resume --update-components'|'--summary'|'--terminal-only') ;;
+            *) echo 'Разрешено: kalimera-deploy --resume [--update-components], --summary или --terminal-only' >&2; exit 2 ;;
+        esac
+        [[ -x {{ (security_controller_repo_path ~ '/deploy') | quote }} ]] || {
+            echo 'Управляющий репозиторий не найден.' >&2
+            exit 127
+        }
+        cd {{ security_controller_repo_path | quote }}
+        exec {{ (security_controller_repo_path ~ '/deploy') | quote }} "$@"
+{% else %}
+        echo 'Deploy запускается только на ENTRY сервере.' >&2
+        exit 2
+{% endif %}
+        ;;
+    *)
+        echo "Команда $command_name не входит в ограниченный список KalimeraWG." >&2
+        exit 2
+        ;;
+esac

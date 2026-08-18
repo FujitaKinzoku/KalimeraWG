@@ -31,7 +31,7 @@ Release `v1.0.0` has been verified through repeated clean VPS deployments.
 | Servers | two clean Ubuntu 24.04 LTS VPS instances |
 | ENTRY | accepts clients; public IPv4 required |
 | EXIT | primary egress; public IPv4 required |
-| Access | root and working SSH on both servers |
+| Bootstrap access | root and working SSH on both servers; `kalimera` key access afterwards |
 | Typical time | 20–40 minutes |
 
 Run as `root` on ENTRY:
@@ -119,11 +119,14 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | Boundary | Implementation |
 |---|---|
 | Secrets | Ansible Vault, `no_log`, mode `0600`, no client configs in Git/CI |
-| SSH | key access is verified before old ports close; Fail2Ban follows |
+| SSH | dedicated `kalimera` account; key access is verified before old ports close; Fail2Ban follows |
+| Privileges | project commands use a root-owned allowlist; unrestricted sudo still requires the user password |
+| Passwords | four independent 30-character values are shown once; only hashes remain in Vault |
 | Firewall | deny-by-default UFW; AWG3 limited to known ENTRY/EXIT IPv4 peers |
 | Updates | candidate validation, exact applied-version lock, automatic rollback |
-| Kernel | headers, DKMS and `modinfo` verified for current and next kernels |
+| Kernel | headers, DKMS and `modinfo` verified for the running and newest installed kernels |
 | DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience |
+| No-logs | journal and login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
 | AWG3 failures | bounded retries and sanitized diagnostics without key material |
 | Repository | Gitleaks plus YAML, Ansible, Shell, and Python checks |
 
@@ -139,7 +142,12 @@ See [SECURITY.md](SECURITY.md) and
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Routing | `ru-domain`, `se-domain`, `entry-domain`, `ru-direct-ports` |
 | Proxy | `ru-proxy`, `ru-proxy-set` |
-| Maintenance | `maintenance`, `update-all`, `./deploy --resume` |
+| Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+
+Normal post-installation administration uses the `kalimera` account. Project
+commands do not require typing `sudo`; arbitrary system changes still require
+the one-time displayed `kalimera` password, so no unrestricted passwordless
+root shell is created.
 
 Validation on both nodes:
 

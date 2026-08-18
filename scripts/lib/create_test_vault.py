@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import ipaddress
 import os
 import re
+import secrets
 import stat
 import subprocess
 import shutil
@@ -15,10 +17,13 @@ from pathlib import Path
 
 import yaml
 from ansible.parsing.vault import VaultLib, VaultSecret
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 KEY_TOOL = shutil.which("awg") or shutil.which("wg")
+SSSS_SPLIT = shutil.which("ssss-split")
 
 
 def fail(message: str) -> None:
@@ -54,6 +59,39 @@ def command(name: str, stdin: str | None = None) -> str:
 
 def public_key(private_key: str) -> str:
     return command("pubkey", f"{private_key}\n")
+
+
+def split_runtime_secret(secret_hex: str, threshold: int = 2, total: int = 5) -> list[str]:
+    if SSSS_SPLIT is None:
+        fail("Установите пакет ssss на управляющем узле")
+    result = subprocess.run(
+        [
+            SSSS_SPLIT, "-t", str(threshold), "-n", str(total),
+            "-s", "256", "-x", "-Q", "-w", "kalimerawgruntimev1",
+        ],
+        input=secret_hex + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    shares = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(shares) != total or len(set(shares)) != total:
+        fail("Не удалось создать тестовые Shamir-доли без вывода секретов")
+    return shares
+
+
+def ssh_exchange_keypair() -> tuple[str, str]:
+    private = Ed25519PrivateKey.generate()
+    private_value = private.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    public_value = private.public_key().public_bytes(
+        serialization.Encoding.OpenSSH,
+        serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+    return private_value, f"{public_value} kalimerawg-share-exchange"
 
 
 def load_mapping(path: Path) -> dict:
@@ -116,6 +154,7 @@ def main() -> None:
 
     all_vars = load_mapping(test_root / "group_vars" / "all" / "main.yml")
     entry_vars = load_mapping(test_root / "group_vars" / "entry.yml")
+    hosts_document = load_mapping(test_root / "hosts.yml")
     interserver_address = all_vars.get("awg_interserver_entry_address")
     client_subnet = entry_vars.get("entry_client_subnet")
     try:
@@ -140,6 +179,32 @@ def main() -> None:
     interserver_psk = command("genpsk")
     client_private = command("genkey")
     client_psk = command("genpsk")
+    runtime_key = secrets.token_hex(32)
+    runtime_shares = split_runtime_secret(runtime_key)
+    active_hosts = [
+        host
+        for group in ("entry", "exit")
+        for host in (
+            hosts_document.get("all", {})
+            .get("children", {})
+            .get(group, {})
+            .get("hosts", {})
+        )
+    ]
+    exchange_private: dict[str, str] = {}
+    exchange_public: dict[str, str] = {}
+    for host in active_hosts:
+        private_value, public_value = ssh_exchange_keypair()
+        exchange_private[host] = private_value
+        exchange_public[host] = public_value
+
+    all_vars["runtime_secrets_enabled"] = True
+    all_vars["runtime_secrets_threshold"] = 2
+    all_vars["runtime_secrets_total_shares"] = 5
+    all_vars["runtime_secrets_cluster_id"] = secrets.token_hex(16)
+    (test_root / "group_vars" / "all" / "main.yml").write_text(
+        yaml.safe_dump(all_vars, sort_keys=False), encoding="utf-8"
+    )
 
     document = {
         "vault_awg_entry_private_key": entry_private,
@@ -171,6 +236,12 @@ def main() -> None:
                 "preshared_key": interserver_psk,
             }
         ],
+        "vault_runtime_secret_key_sha256": hashlib.sha256(
+            bytes.fromhex(runtime_key)
+        ).hexdigest(),
+        "vault_runtime_secret_shares": runtime_shares,
+        "vault_runtime_exchange_private_keys": exchange_private,
+        "vault_runtime_exchange_public_keys": exchange_public,
     }
     plaintext = yaml.safe_dump(document, sort_keys=False).encode("utf-8")
     encrypted = VaultLib([("default", VaultSecret(vault_password))]).encrypt(plaintext)
