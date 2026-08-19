@@ -1,0 +1,8 @@
+---
+exit_dns_port: 53
+exit_dns_config_dir: /etc/unbound/unbound.conf.d
+exit_dns_config_path: "{{ exit_dns_config_dir }}/90-awg-recursive.conf"
+exit_dns_candidate_root: /run/awg-exit-dns-candidate
+exit_dns_backup_root: /root/config-backups/exit-dns
+exit_dns_trust_anchor_path: /var/lib/unbound/root.key
+exit_dns_service_name: unbound.service

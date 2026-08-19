@@ -480,6 +480,8 @@
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit
       when: awg_adoption_mode == 'apply'
+    - role: exit_dns
+      when: awg_adoption_mode == 'apply'
     - role: operations
       when: awg_adoption_mode == 'apply'
     - role: fail2ban

@@ -5,3 +5,8 @@ server=/ru/127.0.0.1#{{ entry_dns_default_port }}
 server=/xn--p1ai/127.0.0.1#{{ entry_dns_ru_port }}
 server=/xn--p1ai/127.0.0.1#{{ entry_dns_default_port }}
 {% endif %}
+# Резолвинг любого .ru/.рф автоматически добавляет полученный IP в ipset ru —
+# закрывает дрейф CDN (сервис на общем зарубежном IP-пуле) тем же механизмом,
+# что уже используется для явных ru-domain/se-domain (dnsmasq --ipset).
+ipset=/ru/ru
+ipset=/xn--p1ai/ru

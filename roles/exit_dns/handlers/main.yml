@@ -1,0 +1,6 @@
+---
+- name: "Перезапуск: рекурсивный DNS EXIT сервера"
+  ansible.builtin.systemd_service:
+    name: "{{ exit_dns_service_name }}"
+    state: restarted
+  listen: Перезапустить рекурсивный резолвер EXIT

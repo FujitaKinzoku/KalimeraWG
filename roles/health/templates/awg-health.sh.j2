@@ -502,6 +502,10 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
 check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
 {% endif %}
+{% if entry_dns_default_via_exit | default(false) | bool %}
+check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
+check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
+{% endif %}
 {% endif %}
 
 if [[ "$failures" -eq 0 ]]; then

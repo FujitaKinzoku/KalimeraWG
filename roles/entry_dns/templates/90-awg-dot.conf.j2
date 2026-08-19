@@ -26,7 +26,11 @@ remote-control:
 
 forward-zone:
     name: "."
+{% if entry_dns_default_via_exit | default(false) | bool %}
+    forward-addr: {{ awg3_peer_tunnel_address }}@53
+{% else %}
     forward-tls-upstream: yes
 {% for upstream in entry_dns_effective_dot_upstreams | default(entry_dot_upstreams) %}
     forward-addr: {{ upstream.address }}@853#{{ upstream.tls_name }}
 {% endfor %}
+{% endif %}
