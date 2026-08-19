@@ -2,7 +2,19 @@
 After=network-online.target {{ awg3_transit_service_name if (awg3_transit_enabled | default(false) | bool) else 'awg-quick@' ~ exit_awg_interface ~ '.service' }}
 Requires={{ awg3_transit_service_name if (awg3_transit_enabled | default(false) | bool) else 'awg-quick@' ~ exit_awg_interface ~ '.service' }}
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+# Штатный хук пакета (unbound-helper root_trust_anchor_update) при повторном
+# запуске обновляет уже существующий auto-trust-anchor-file, а не создаёт его
+# заново, и при частых рестартах (Restart=on-failure) это приводило к порче
+# файла ("trust anchor presented twice"). Сбрасываем унаследованный список
+# ExecStartPre и явно удаляем файл перед пересозданием — так хук всегда идёт
+# по чистому пути "создать заново", а не "обновить существующий".
+ExecStartPre=
+ExecStartPre=/usr/libexec/unbound-helper chroot_setup
+ExecStartPre=/bin/rm -f /var/lib/unbound/root.key
+ExecStartPre=/usr/libexec/unbound-helper root_trust_anchor_update
 Restart=on-failure
 RestartSec=3
