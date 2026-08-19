@@ -723,6 +723,34 @@
   when:
     - awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool)
 
+- name: "Разрешение рекурсивного DNS EXIT сервера только от ENTRY по AWG-каналу"
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+    interface: "{{ exit_awg_interface }}"
+    direction: in
+    from_ip: "{{ awg3_peer_tunnel_address }}"
+    comment: Рекурсивный DNS EXIT только для ENTRY по AWG-каналу
+  loop: [udp, tcp]
+  when:
+    - awg_node_role == 'exit'
+    - entry_dns_default_via_exit | default(false) | bool
+
+- name: "Удаление правила рекурсивного DNS EXIT сервера при отключении"
+  community.general.ufw:
+    rule: allow
+    port: "53"
+    proto: "{{ item }}"
+    interface: "{{ exit_awg_interface }}"
+    direction: in
+    from_ip: "{{ awg3_peer_tunnel_address }}"
+    delete: true
+  loop: [udp, tcp]
+  when:
+    - awg_node_role == 'exit'
+    - not (entry_dns_default_via_exit | default(false) | bool)
+
 - name: "Разрешение служебного трафика только от второго сервера внутри AWG 3+"
   community.general.ufw:
     rule: allow
