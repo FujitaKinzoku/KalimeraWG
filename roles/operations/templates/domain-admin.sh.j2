@@ -129,8 +129,20 @@ fi
     while read -r domain; do
         [[ -z "$domain" ]] || {
             echo "ipset=/$domain/force_ru"
-            [[ "$proxy_dns" == false ]] || echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
-            echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
+            if [[ "$proxy_dns" == false ]]; then
+                # SOAX выключен полностью — RU-DoH порт всё равно не работает,
+                # единственный рабочий резолвер сейчас дефолтная ветка.
+                echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
+            else
+                # Явно перечисленный ru-domain: только RU-DoH, без фолбэка на
+                # дефолтную/зарубежную ветку. Раньше обе строки для одного
+                # домена конкурировали, и dnsmasq мог по своей эвристике
+                # выбора сервера чаще использовать более быструю дефолтную
+                # ветку — резолвинг молча уходил не туда, что администратор
+                # явно указал. Недоступность RU-DoH теперь честно даёт
+                # отказ резолвинга вместо тихой утечки геолокации.
+                echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
+            fi
         }
     done <"$DIR/ru-domain"
     while read -r domain; do
