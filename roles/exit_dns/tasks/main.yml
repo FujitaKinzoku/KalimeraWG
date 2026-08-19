@@ -17,6 +17,46 @@
     lock_timeout: 600
   when: entry_dns_default_via_exit | default(false) | bool
 
+# Тот же вспомогательный юнит пакета unbound, что и на ENTRY, конфликтует с
+# управляемой конфигурацией и не нужен — маскируем его так же.
+- name: "Отключение: рекурсивный DNS EXIT сервера — этап 2b"
+  ansible.builtin.systemd_service:
+    name: unbound-resolvconf.service
+    enabled: false
+    state: stopped
+    masked: true
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Очистка: рекурсивный DNS EXIT сервера — этап 2c"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, unbound-resolvconf.service]
+  changed_when: false
+  failed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+# unbound.service слушает на реальном IP AWG-интерфейса (не на loopback, как
+# на ENTRY), поэтому без явного порядка загрузки systemd может запустить его
+# раньше, чем интерфейс получит адрес — bind падает, юнит остаётся failed
+# после перезагрузки. Restart=on-failure — подстраховка на случай гонки.
+- name: "Создание: рекурсивный DNS EXIT сервера — этап 2d"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ exit_dns_service_name }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Формирование: рекурсивный DNS EXIT сервера — этап 2e"
+  ansible.builtin.template:
+    src: 90-awg-recursive.service.conf.j2
+    dest: "/etc/systemd/system/{{ exit_dns_service_name }}.d/90-awg-recursive.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: exit_dns_service_dropin
+  when: entry_dns_default_via_exit | default(false) | bool
+
 - name: "Проверка: рекурсивный DNS EXIT сервера — этап 3"
   ansible.builtin.stat:
     path: "{{ exit_dns_trust_anchor_path }}"
