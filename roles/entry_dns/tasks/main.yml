@@ -291,3 +291,8 @@
   until:
     - entry_dns_system_resolution.rc == 0
     - entry_dns_system_resolution.stdout | trim | length > 0
+  # При entry_dns_default_via_exit дефолтная ветка резолвится через EXIT, чья
+  # роль exit_dns выполняется позже в отдельном play — на этом шаге EXIT ещё
+  # не готов. Сквозная проверка перенесена в отдельный play после play EXIT
+  # (playbooks/site.yml, "Проверка DNS зарубежной ветки через EXIT").
+  when: not (entry_dns_default_via_exit | default(false) | bool)

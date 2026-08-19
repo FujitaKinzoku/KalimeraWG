@@ -489,6 +489,25 @@
     - role: health
       when: awg_adoption_mode == 'apply'
 
+- name: Проверка DNS зарубежной ветки через рекурсивный резолвер EXIT
+  hosts: entry
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Ожидание готовности рекурсивного резолвера EXIT
+      ansible.builtin.command:
+        argv: [/usr/bin/getent, ahostsv4, example.com]
+      register: entry_dns_via_exit_resolution
+      changed_when: false
+      retries: 12
+      delay: 5
+      until:
+        - entry_dns_via_exit_resolution.rc == 0
+        - entry_dns_via_exit_resolution.stdout | trim | length > 0
+      when:
+        - awg_adoption_mode == 'apply'
+        - entry_dns_default_via_exit | default(false) | bool
+
 - name: Подготовка взаимной аутентификации держателей Shamir-долей
   hosts: all
   gather_facts: false
