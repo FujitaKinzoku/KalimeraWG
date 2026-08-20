@@ -88,3 +88,43 @@ else
         logger -t awg-ru-proxy-watch "Российский прокси отключён после ${failures} неудачных проверок"
     fi
 fi
+
+{% if reality_fallback_enabled | default(false) | bool %}
+# Тот же DISABLED_FLAG, что и выше для ядерного каскада — единственный
+# источник истины о состоянии SOAX, чтобы REALITY и ipset-маршрутизация не
+# могли разойтись во мнениях. Сверяется на каждом запуске (а не только в
+# момент переключения флага), поэтому переживает перезагрузку: /run
+# очищается, а вот /etc/sing-box/config.json — нет, и без этой сверки после
+# reboot состояние REALITY могло бы остаться устаревшим.
+readonly REALITY_CONFIG={{ sing_box_config_path | quote }}
+readonly REALITY_SERVICE={{ sing_box_service_name | quote }}
+if [[ -f "$REALITY_CONFIG" ]] && jq -e '.inbounds[] | select(.tag == "reality-in")' "$REALITY_CONFIG" >/dev/null 2>&1; then
+    reality_target_outbound=ru-socks
+    [[ -e "$DISABLED_FLAG" ]] && reality_target_outbound=direct-entry
+    reality_current_outbound="$(jq -r '
+        [.route.rules[] | select(
+            (.inbound? // []) as $in | ($in | index("reality-in")) and (.rule_set? or .domain_suffix?)
+        )][0].outbound // empty
+    ' "$REALITY_CONFIG")" || true
+    if [[ -n "$reality_current_outbound" && "$reality_current_outbound" != "$reality_target_outbound" ]]; then
+        reality_tmp="$(mktemp /run/sing-box-reality-failover.XXXXXX)"
+        jq --arg outbound "$reality_target_outbound" '
+            .route.rules |= map(
+                if ((.inbound? // []) | index("reality-in")) and (.rule_set? or .domain_suffix?)
+                then .outbound = $outbound
+                else . end
+            )
+        ' "$REALITY_CONFIG" >"$reality_tmp" || true
+        if sing-box check --config "$reality_tmp" >/dev/null 2>&1; then
+            install -m 0600 "$reality_tmp" "$REALITY_CONFIG"
+            if systemctl is-active --quiet "$REALITY_SERVICE"; then
+                systemctl restart "$REALITY_SERVICE"
+            fi
+            logger -t awg-ru-proxy-watch "REALITY RU-маршрут переключён на ${reality_target_outbound}"
+        else
+            logger -t awg-ru-proxy-watch 'REALITY RU-failover: сгенерированная конфигурация не прошла проверку, изменение отменено'
+        fi
+        rm -f "$reality_tmp"
+    fi
+fi
+{% endif %}

@@ -82,6 +82,14 @@
         "server": "bootstrap-unbound",
         "strategy": "ipv4_only"
       }
+    },
+    {
+      "type": "direct",
+      "tag": "direct-entry",
+      "domain_resolver": {
+        "server": "bootstrap-unbound",
+        "strategy": "ipv4_only"
+      }
     }{% endif %}
   ],
   "route": {
@@ -112,17 +120,17 @@
       {
         "inbound": ["reality-in"],
         "domain_suffix": [".ru", ".xn--p1ai"],
-        "outbound": "ru-socks"
+        "outbound": "{{ reality_fallback_ru_outbound | default('ru-socks') }}"
       },
       {
         "inbound": ["reality-in"],
         "rule_set": ["reality-ru-domains"],
-        "outbound": "ru-socks"
+        "outbound": "{{ reality_fallback_ru_outbound | default('ru-socks') }}"
       },
       {
         "inbound": ["reality-in"],
         "rule_set": ["reality-ru-zone"],
-        "outbound": "ru-socks"
+        "outbound": "{{ reality_fallback_ru_outbound | default('ru-socks') }}"
       },
       {
         "inbound": ["reality-in"],

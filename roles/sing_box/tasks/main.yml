@@ -196,6 +196,23 @@
       RU-ветки маршрутизации, отдельного механизма для неё нет.
   when: reality_fallback_enabled | default(false) | bool
 
+# Fail-open REALITY RU-ветки использует тот же флаг, что и ядерный каскад
+# (awg-ru-proxy-watch), чтобы не было двух независимых источников истины о
+# состоянии SOAX. Если SOAX уже недоступен на момент deploy — сразу рендерим
+# direct-entry, не дожидаясь первого срабатывания watchdog.
+- name: "Проверка состояния fail-open RU-прокси для REALITY"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_disabled_flag }}"
+  register: sing_box_reality_ru_proxy_disabled
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Выбор действующего RU-outbound для REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_ru_outbound: >-
+      {{ 'direct-entry' if (sing_box_reality_ru_proxy_disabled.stat.exists | default(false))
+         else 'ru-socks' }}
+  when: reality_fallback_enabled | default(false) | bool
+
 # REALITY выдаёт себя за настоящий TLS-хендшейк reality_fallback_dest: sing-box
 # на лету обращается к нему для непрошедших авторизацию соединений. Сайт за
 # CDN/балансировщиком нескольких независимых бэкендов для этого непригоден —

@@ -277,6 +277,18 @@ reality_dest_tls13() {
     timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
         grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_'
 }
+
+reality_ru_failover_synced() {
+    local config="$1" disabled_flag="$2" expected current
+    expected=ru-socks
+    [[ -e "$disabled_flag" ]] && expected=direct-entry
+    current="$(jq -r '
+        [.route.rules[] | select(
+            (.inbound? // []) as $in | ($in | index("reality-in")) and (.rule_set? or .domain_suffix?)
+        )][0].outbound // empty
+    ' "$config")"
+    [[ "$current" == "$expected" ]]
+}
 {% endif %}
 
 printf 'Проверка AWG: {{ awg_node_role }}\n'
@@ -495,6 +507,7 @@ check 'запасной транспорт REALITY прослушивает по
 check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
 check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
 check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
+check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}

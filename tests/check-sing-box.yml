@@ -125,6 +125,13 @@
               password: ""
               override: {}
               reality_enabled: true
+              ru_outbound: ru-socks
+            - name: reality-ru-failover
+              username: ""
+              password: ""
+              override: {}
+              reality_enabled: true
+              ru_outbound: direct-entry
           vars:
             vault_proxy_username: "{{ item.username }}"
             vault_proxy_password: "{{ item.password }}"
@@ -138,6 +145,7 @@
             reality_fallback_client_uuid: "{{ sing_box_test_reality_uuid }}"
             reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
             reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
+            reality_fallback_ru_outbound: "{{ item.ru_outbound | default('ru-socks') }}"
           no_log: true
 
         - name: Семантическая проверка конфигураций закреплённой версией sing-box
@@ -152,6 +160,7 @@
             - anonymous
             - runtime-override
             - reality-enabled
+            - reality-ru-failover
           changed_when: false
           no_log: true
 
