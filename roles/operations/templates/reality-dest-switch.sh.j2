@@ -17,10 +17,11 @@ readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalime
 # подряд. mail.ru сюда намеренно не включён — отклоняет TLS 1.3 (alert 70).
 # www.microsoft.com исключён — отдаётся через сторонний CDN (Akamai), что на
 # практике повышало долю сорванных REALITY-хендшейков сильнее прочих
-# кандидатов. www.debian.org первым — единственный, проверенный end-to-end
-# на живом каскаде после исправления sniff-маршрутизации.
+# кандидатов. www.debian.org тоже исключён — резолвится в несколько IP (DNS
+# round-robin), сертификат нестабилен между пробами (см. preflight-проверку
+# на живом каскаде). yandex.ru первым — RU-правдоподобный и подтверждённо
+# стабильный.
 readonly -a candidates=(
-    www.debian.org
     yandex.ru
     vk.ru
     vk.com

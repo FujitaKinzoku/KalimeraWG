@@ -20,7 +20,7 @@
     vault_proxy_password: "{{ item.password }}"
     sing_box_runtime_proxy_override: "{{ item.override }}"
     reality_fallback_port: 443
-    reality_fallback_dest: www.debian.org
+    reality_fallback_dest: yandex.ru
     reality_fallback_dest_port: 443
     reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
     reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
