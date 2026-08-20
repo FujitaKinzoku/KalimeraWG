@@ -2552,11 +2552,16 @@ def main() -> None:
         expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
 
     reality_fallback_enabled = False
-    reality_fallback_dest = "www.microsoft.com"
+    reality_fallback_dest = "www.debian.org"
+    # www.debian.org первым — единственный кандидат, проверенный на живом
+    # каскаде end-to-end. Остальные RU-кандидаты правдоподобнее для DPI, но
+    # эмпирически не проверялись после исправления sniff-маршрутизации;
+    # www.microsoft.com исключён — отдаётся через Akamai (сторонний CDN),
+    # что на практике повышало долю сорванных REALITY-хендшейков.
     reality_candidates = [
-        "yandex.ru", "vk.ru", "vk.com", "kinopoisk.ru",
+        "www.debian.org", "yandex.ru", "vk.ru", "vk.com", "kinopoisk.ru",
         "market.yandex.ru", "maps.yandex.ru", "music.yandex.ru",
-        "dzen.ru", "tinkoff.ru", "www.microsoft.com",
+        "dzen.ru", "tinkoff.ru",
     ]
     if proxy_enabled:
         ui_panel(

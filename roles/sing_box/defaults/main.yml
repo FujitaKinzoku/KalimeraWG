@@ -24,7 +24,12 @@ reality_fallback_private_key_path: "{{ reality_fallback_state_dir }}/private.key
 reality_fallback_short_id_path: "{{ reality_fallback_state_dir }}/short_id"
 reality_fallback_client_uuid_path: "{{ reality_fallback_state_dir }}/client_uuid"
 # Настоящий, доступный TLS 1.3 сайт без ECH — маска для REALITY.
-reality_fallback_dest: www.microsoft.com
+# www.debian.org — единственный проверенный на живом каскаде кандидат:
+# отдаёт стабильный сертификат напрямую (не за сторонним CDN, в отличие от
+# www.microsoft.com — тот отдаётся через Akamai и на практике давал более
+# высокий процент сорванных REALITY-хендшейков). Сменить можно через
+# reality-dest-switch после деплоя.
+reality_fallback_dest: www.debian.org
 reality_fallback_dest_port: 443
 reality_fallback_server_names:
   - "{{ reality_fallback_dest }}"
