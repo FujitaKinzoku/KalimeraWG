@@ -269,6 +269,12 @@ tcp_port_listening() {
     local port="$1"
     ss -H -ltn "( sport = :${port} )" | grep -q .
 }
+
+reality_dest_tls13() {
+    local host="$1" port="$2"
+    timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
+        grep -Eq 'Protocol[[:space:]]*:[[:space:]]*TLSv1\.3'
+}
 {% endif %}
 
 printf 'Проверка AWG: {{ awg_node_role }}\n'
@@ -486,6 +492,7 @@ check 'российские назначения идут напрямую че�
 check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
 check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
 check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
+check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}

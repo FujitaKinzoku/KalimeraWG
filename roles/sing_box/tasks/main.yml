@@ -149,6 +149,45 @@
       RU-ветки маршрутизации, отдельного механизма для неё нет.
   when: reality_fallback_enabled | default(false) | bool
 
+# REALITY выдаёт себя за настоящий TLS-хендшейк reality_fallback_dest: sing-box
+# на лету обращается к нему для непрошедших авторизацию соединений. Сайт за
+# CDN/балансировщиком нескольких независимых бэкендов для этого непригоден —
+# разные бэкенды могут отвечать разными сертификатами или вовсе не поддерживать
+# TLS 1.3 одинаково стабильно. Три последовательные пробы с самого ENTRY
+# сервера — быстрая проверка перед применением конфигурации, не гарантия (сайт
+# также должен быть естественным для аудитории — это уже вручную).
+- name: "Проверка REALITY: проба TLS-рукопожатия с dest-сайтом"
+  ansible.builtin.shell:
+    cmd: |
+      host={{ reality_fallback_dest | quote }}
+      port={{ reality_fallback_dest_port }}
+      output="$(timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null)"
+      proto_ok=false
+      grep -Eq 'Protocol[[:space:]]*:[[:space:]]*TLSv1\.3' <<<"$output" && proto_ok=true
+      fingerprint="$(openssl x509 -noout -fingerprint -sha256 <<<"$output" 2>/dev/null | cut -d= -f2)"
+      printf '%s|%s\n' "$proto_ok" "$fingerprint"
+    executable: /bin/bash
+  register: reality_fallback_dest_probes
+  changed_when: false
+  loop: "{{ range(0, 3) | list }}"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка REALITY: dest-сайт стабильно отвечает TLS 1.3 одним и тем же сертификатом"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | select('match', '^true\\|.+') | list | length == reality_fallback_dest_probes.results | length
+      - (reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | map('regex_replace', '^true\\|', '') | unique | list | length) == 1
+    fail_msg: >-
+      dest-сайт {{ reality_fallback_dest }}:{{ reality_fallback_dest_port }}
+      непригоден в качестве маски REALITY: при прямом подключении с ENTRY
+      сервера он либо не согласовал TLS 1.3, либо в трёх последовательных
+      пробах отдал разные сертификаты (частый признак нескольких независимых
+      бэкендов за DNS round-robin или CDN — REALITY требует единственный
+      настоящий источник с предсказуемым TLS-рукопожатием). Выберите другой
+      reality_fallback_dest и повторите развёртывание.
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Создание: каталог состояния REALITY"
   ansible.builtin.file:
     path: "{{ reality_fallback_state_dir }}"
