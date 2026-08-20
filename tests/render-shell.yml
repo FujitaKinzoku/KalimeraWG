@@ -364,6 +364,12 @@
             dest: "{{ rendered_shell_root }}/awg-ru-proxy-watch.service"
             mode: "0600"
 
+        - name: Формирование модуля systemd credentials для awg-quick@
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/awg-quick-credential.conf.j2"
+            dest: "{{ rendered_shell_root }}/90-kalimerawg-runtime-secrets.conf"
+            mode: "0600"
+
         - name: Выбор ветви health-шаблона ENTRY
           ansible.builtin.set_fact:
             awg_node_role: entry
