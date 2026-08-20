@@ -87,9 +87,11 @@
             reality_fallback_port: 443
             reality_fallback_dest: www.microsoft.com
             reality_fallback_dest_port: 443
-            reality_fallback_private_key: uHHrnirWwMVonDSitTtNG3uglRPIuParW0SmLJZtknQ
-            reality_fallback_short_id: 23c5103f099e9c03
-            reality_fallback_client_uuid: 64906bb8-2b9a-40c1-882a-208e9ff20449
+            # Заведомо фиктивные, нулевые значения — только для проверки схемы
+            # конфигурации sing-box, а не реальный секретный материал.
+            reality_fallback_private_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            reality_fallback_short_id: "0000000000000000"
+            reality_fallback_client_uuid: "00000000-0000-0000-0000-000000000000"
             reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
             reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
           no_log: true
