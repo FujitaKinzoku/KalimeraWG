@@ -101,11 +101,8 @@
             sing_box_test_reality_uuid: "{{ sing_box_test_reality_uuid.stdout | trim }}"
           no_log: true
 
-        - name: Формирование тестовых SOCKS5-конфигураций с аутентификацией и без неё
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
-            dest: "{{ sing_box_test_root }}/config-{{ item.name }}.json"
-            mode: "0600"
+        - name: Формирование тестовых SOCKS5/REALITY-конфигураций
+          ansible.builtin.include_tasks: tasks/render-sing-box-fixture.yml
           loop:
             - name: authenticated
               username: example-user
@@ -138,20 +135,6 @@
               override: {}
               reality_enabled: true
               ru_outbound: direct-entry
-          vars:
-            vault_proxy_username: "{{ item.username }}"
-            vault_proxy_password: "{{ item.password }}"
-            sing_box_runtime_proxy_override: "{{ item.override }}"
-            reality_fallback_enabled: "{{ item.reality_enabled }}"
-            reality_fallback_port: 443
-            reality_fallback_dest: www.microsoft.com
-            reality_fallback_dest_port: 443
-            reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
-            reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
-            reality_fallback_client_uuid: "{{ sing_box_test_reality_uuid }}"
-            reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
-            reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
-            reality_fallback_ru_outbound: "{{ item.ru_outbound | default('ru-socks') }}"
           no_log: true
 
         - name: Семантическая проверка конфигураций закреплённой версией sing-box
@@ -169,6 +152,29 @@
             - reality-ru-failover
           changed_when: false
           no_log: true
+
+        # Регрессия на баг из живого теста: клиент REALITY присылает адрес
+        # назначения уже разрешённым в IP, а не именем, поэтому доменные
+        # RU-правила (domain_suffix/rule_set) не срабатывают без
+        # предварительного sniff — правило sniff обязано идти раньше их.
+        - name: Чтение сгенерированного REALITY-конфига для проверки порядка правил
+          ansible.builtin.slurp:
+            src: "{{ sing_box_test_root }}/config-reality-enabled.json"
+          register: sing_box_test_reality_config_raw
+
+        - name: "Проверка: правило sniff предшествует доменной RU-маршрутизации REALITY"
+          vars:
+            sing_box_test_reality_config: "{{ sing_box_test_reality_config_raw.content | b64decode | from_json }}"
+            sing_box_test_reality_rules: "{{ sing_box_test_reality_config.route.rules }}"
+          ansible.builtin.assert:
+            that:
+              - sing_box_test_reality_rules[1].inbound == ["reality-in"]
+              - sing_box_test_reality_rules[1].action == "sniff"
+              - sing_box_test_reality_rules[2].domain_suffix == [".ru", ".xn--p1ai"]
+            fail_msg: >-
+              Правило sniff должно стоять сразу после hijack-dns и раньше
+              доменных RU-правил REALITY, иначе клиент, присылающий уже
+              разрешённый IP вместо домена, никогда не попадёт в RU-ветку.
 
       always:
         - name: Удаление изолированного каталога проверки sing-box

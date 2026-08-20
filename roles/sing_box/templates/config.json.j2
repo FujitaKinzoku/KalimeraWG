@@ -119,6 +119,10 @@
       }{% if reality_fallback_enabled | default(false) | bool %},
       {
         "inbound": ["reality-in"],
+        "action": "sniff"
+      },
+      {
+        "inbound": ["reality-in"],
         "domain_suffix": [".ru", ".xn--p1ai"],
         "outbound": "{{ reality_fallback_ru_outbound | default('ru-socks') }}"
       },
