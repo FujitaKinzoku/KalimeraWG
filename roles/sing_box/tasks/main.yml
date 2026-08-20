@@ -300,10 +300,7 @@
 - name: "Сохранение: публичный ключ REALITY"
   ansible.builtin.copy:
     dest: "{{ reality_fallback_state_dir }}/public.key"
-    content: >-
-      {{ ((reality_fallback_keypair_output.stdout_lines
-          | select('match', '^PublicKey:')
-          | first).split(':')[1] | trim) + "\n" }}
+    content: "{{ (reality_fallback_keypair_output.stdout_lines | select('match', '^PublicKey:') | first).split(':')[1] | trim }}\n"
     owner: root
     group: root
     mode: "0644"
