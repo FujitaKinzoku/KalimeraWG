@@ -40,14 +40,20 @@
               - "{{ sing_box_test_root }}/package"
           changed_when: false
 
-        - name: Создание заготовок rule-set REALITY для проверки шаблона
+        # Непустой rule-set, а не заготовка "rules":[] — именно непустой
+        # набор правил ловит несовместимость версии rule-set с закреплённым
+        # sing-box (sing-box отвергает файл без "version" только при разборе
+        # реального содержимого правил, пустой массив проходит и без него).
+        - name: Создание тестовых rule-set REALITY с реальным содержимым
           ansible.builtin.copy:
-            dest: "{{ sing_box_test_root }}/reality-{{ item }}.json"
-            content: "{\"rules\":[]}\n"
+            dest: "{{ sing_box_test_root }}/reality-{{ item.name }}.json"
+            content: "{{ item.content }}\n"
             mode: "0600"
           loop:
-            - ru-domains
-            - ru-zone
+            - name: ru-domains
+              content: '{"version": 1, "rules": [{"domain_suffix": ["example.ru"]}]}'
+            - name: ru-zone
+              content: '{"version": 1, "rules": [{"ip_cidr": ["203.0.113.0/24"]}]}'
 
         # Генерируется закреплённым бинарником на каждом запуске, а не хранится в
         # репозитории как литерал — так же, как это делает роль sing_box в

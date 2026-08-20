@@ -390,7 +390,7 @@
 - name: "Создание: заготовка rule-set REALITY для ru-domain/se-domain"
   ansible.builtin.copy:
     dest: "{{ reality_fallback_ru_rule_set_path }}"
-    content: "{\"rules\":[]}\n"
+    content: "{\"version\": 1, \"rules\":[]}\n"
     owner: root
     group: root
     mode: "0644"
@@ -400,7 +400,7 @@
 - name: "Создание: заготовка rule-set REALITY для российских подсетей"
   ansible.builtin.copy:
     dest: "{{ reality_fallback_ru_zone_rule_set_path }}"
-    content: "{\"rules\":[]}\n"
+    content: "{\"version\": 1, \"rules\":[]}\n"
     owner: root
     group: root
     mode: "0644"
