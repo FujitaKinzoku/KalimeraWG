@@ -272,8 +272,10 @@ tcp_port_listening() {
 
 reality_dest_tls13() {
     local host="$1" port="$2"
+    # "Protocol  : TLSv1.3" эхом повторяет запрошенную версию даже при
+    # провале хендшейка — надёжен только "New, TLSv1.3, Cipher is TLS_...".
     timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
-        grep -Eq 'Protocol[[:space:]]*:[[:space:]]*TLSv1\.3'
+        grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_'
 }
 {% endif %}
 

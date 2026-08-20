@@ -163,7 +163,11 @@
       port={{ reality_fallback_dest_port }}
       output="$(timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null)"
       proto_ok=false
-      grep -Eq 'Protocol[[:space:]]*:[[:space:]]*TLSv1\.3' <<<"$output" && proto_ok=true
+      # "Protocol  : TLSv1.3" в блоке SSL-Session эхом повторяет ЗАПРОШЕННУЮ
+      # версию и присутствует даже при провале хендшейка (например, сервер
+      # ответил alert 70 "unsupported protocol version") — единственный
+      # надёжный признак успеха именно этот, с реальным именем шифра.
+      grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_' <<<"$output" && proto_ok=true
       fingerprint="$(openssl x509 -noout -fingerprint -sha256 <<<"$output" 2>/dev/null | cut -d= -f2)"
       printf '%s|%s\n' "$proto_ok" "$fingerprint"
     executable: /bin/bash
