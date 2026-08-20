@@ -175,10 +175,13 @@ fi
 # нужен.
 readonly REALITY_RU_RULE_SET={{ reality_fallback_ru_rule_set_path | quote }}
 reality_tmp="$(mktemp /run/awg-domain-policy-reality.XXXXXX)"
-ru_domains_json="$(sed -E '/^[[:space:]]*(#|$)/d' "$DIR/ru-domain" | jq -R -s 'split("\n") | map(select(length > 0))')"
-jq -n --argjson domains "$ru_domains_json" \
-    '{"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}' \
-    >"$reality_tmp"
+# Через stdin одним jq-вызовом, а не --argjson с большой shell-переменной —
+# см. аналогичный фикс "Argument list too long" в awg-ru-zone-update.sh.j2.
+sed -E '/^[[:space:]]*(#|$)/d' "$DIR/ru-domain" |
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $domains |
+        {"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}
+    ' >"$reality_tmp"
 if [[ ! -f "$REALITY_RU_RULE_SET" ]] || ! cmp --silent "$reality_tmp" "$REALITY_RU_RULE_SET"; then
     install -m 0644 "$reality_tmp" "$REALITY_RU_RULE_SET"
 fi
