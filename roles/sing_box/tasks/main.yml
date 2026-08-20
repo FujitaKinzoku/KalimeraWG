@@ -103,6 +103,53 @@
     fail_msg: "Локальное переопределение DoH повреждено; применить его безопасно невозможно"
   when: entry_ru_proxy_enabled | bool
 
+- name: Проверка постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.stat:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: sing_box_reality_dest_override_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: Загрузка постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.slurp:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: sing_box_reality_dest_override_content
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - sing_box_reality_dest_override_file.stat.exists | default(false)
+
+- name: Разбор постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.set_fact:
+    sing_box_runtime_reality_override: >-
+      {{ (sing_box_reality_dest_override_content.content | b64decode | from_json)
+         if (sing_box_reality_dest_override_file.stat.exists | default(false)) else {} }}
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: Проверка структуры постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - sing_box_runtime_reality_override is mapping
+      - >-
+        sing_box_runtime_reality_override | length == 0 or
+        (sing_box_runtime_reality_override.dest | default('')) is match('^[A-Za-z0-9.-]+$')
+      - >-
+        sing_box_runtime_reality_override | length == 0 or
+        (sing_box_runtime_reality_override.dest_port | default(0) | int >= 1 and
+         sing_box_runtime_reality_override.dest_port | default(0) | int <= 65535)
+    fail_msg: "Локальное переопределение dest-сайта REALITY повреждено; применить его безопасно невозможно"
+  when: reality_fallback_enabled | default(false) | bool
+
+# Дальше используется именно "действующее" значение — override, применённый
+# reality-dest-switch после deploy, приоритетнее inventory, иначе очередной
+# deploy тихо откатил бы ручную смену маски (как proxy/DoH override выше).
+- name: "Вычисление действующего dest-сайта REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_effective_dest: >-
+      {{ sing_box_runtime_reality_override.dest | default(reality_fallback_dest) }}
+    reality_fallback_effective_dest_port: >-
+      {{ sing_box_runtime_reality_override.dest_port | default(reality_fallback_dest_port) | int }}
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Создание: прокси sing-box — этап 3"
   ansible.builtin.file:
     path: "{{ sing_box_package_cache | dirname }}"
@@ -159,8 +206,8 @@
 - name: "Проверка REALITY: проба TLS-рукопожатия с dest-сайтом"
   ansible.builtin.shell:
     cmd: |
-      host={{ reality_fallback_dest | quote }}
-      port={{ reality_fallback_dest_port }}
+      host={{ reality_fallback_effective_dest | quote }}
+      port={{ reality_fallback_effective_dest_port }}
       output="$(timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null)"
       proto_ok=false
       # "Protocol  : TLSv1.3" в блоке SSL-Session эхом повторяет ЗАПРОШЕННУЮ
@@ -183,13 +230,14 @@
       - reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | select('match', '^true\\|.+') | list | length == reality_fallback_dest_probes.results | length
       - (reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | map('regex_replace', '^true\\|', '') | unique | list | length) == 1
     fail_msg: >-
-      dest-сайт {{ reality_fallback_dest }}:{{ reality_fallback_dest_port }}
+      dest-сайт {{ reality_fallback_effective_dest }}:{{ reality_fallback_effective_dest_port }}
       непригоден в качестве маски REALITY: при прямом подключении с ENTRY
       сервера он либо не согласовал TLS 1.3, либо в трёх последовательных
       пробах отдал разные сертификаты (частый признак нескольких независимых
       бэкендов за DNS round-robin или CDN — REALITY требует единственный
       настоящий источник с предсказуемым TLS-рукопожатием). Выберите другой
-      reality_fallback_dest и повторите развёртывание.
+      reality_fallback_dest (или откатите reality-dest-switch reset) и
+      повторите развёртывание.
   when: reality_fallback_enabled | default(false) | bool
 
 - name: "Создание: каталог состояния REALITY"

@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -578,6 +579,30 @@ def resolve_single_public_ipv4(value: str, label: str) -> str:
     if not ipaddress.ip_address(address).is_global:
         fail(f"{label} должен быть публичным IPv4-адресом")
     return address
+
+
+def probe_reality_dest(host: str, port: int = 443, attempts: int = 3) -> bool:
+    """Проверить, что dest-сайт REALITY стабильно отвечает TLS 1.3 одним
+    и тем же сертификатом — та же логика (три пробы), что применяется
+    сервером при deploy и в reality-dest-switch."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    fingerprints: set[str] = set()
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=8) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+                    if tls_sock.version() != "TLSv1.3":
+                        return False
+                    der = tls_sock.getpeercert(binary_form=True)
+                    if not der:
+                        return False
+                    fingerprints.add(hashlib.sha256(der).hexdigest())
+        except (OSError, ssl.SSLError):
+            return False
+    return len(fingerprints) == 1
 
 
 def detect_local_public_ipv4(route_target: str) -> str:
@@ -2526,6 +2551,51 @@ def main() -> None:
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
         expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
 
+    reality_fallback_enabled = False
+    reality_fallback_dest = "www.microsoft.com"
+    reality_candidates = [
+        "yandex.ru", "vk.ru", "vk.com", "kinopoisk.ru",
+        "market.yandex.ru", "maps.yandex.ru", "music.yandex.ru",
+        "dzen.ru", "tinkoff.ru", "www.microsoft.com",
+    ]
+    if proxy_enabled:
+        ui_panel(
+            "ЗАПАСНОЙ ТРАНСПОРТ VLESS+REALITY",
+            [
+                "Опционально: маскирует ENTRY под настоящий HTTPS-сайт на случай,",
+                "если сам AmneziaWG заблокируют по фингерпринту UDP-хендшейка.",
+                "Требует уже включённый выше RU-прокси (используется как RU-ветка).",
+            ],
+            "cyan",
+        )
+        reality_fallback_enabled = prompt_bool(
+            "Включить запасной транспорт VLESS+REALITY", False
+        )
+        if reality_fallback_enabled:
+            print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
+            results = {host: probe_reality_dest(host) for host in reality_candidates}
+            ui_panel(
+                "КАНДИДАТЫ DEST-САЙТА REALITY",
+                [
+                    f"{index} · {host} [{'OK' if results[host] else 'FAIL'}]"
+                    for index, host in enumerate(reality_candidates, start=1)
+                ] + ["0 · указать свой домен"],
+                "cyan",
+            )
+            dest_choice = prompt("Номер кандидата или 0 для своего домена", "1")
+            if dest_choice == "0":
+                reality_fallback_dest = prompt("Домен маскировочного сайта (например www.example.com)")
+            elif dest_choice.isdigit() and 1 <= int(dest_choice) <= len(reality_candidates):
+                reality_fallback_dest = reality_candidates[int(dest_choice) - 1]
+            else:
+                fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
+            if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
+                fail(
+                    f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 —"
+                    " выберите другой (та же проверка также выполняется во время deploy)"
+                )
+            print(f"dest-сайт {reality_fallback_dest} проверен.")
+
     ui_section(
         5,
         "DNS И МОНИТОРИНГ",
@@ -2931,6 +3001,8 @@ def main() -> None:
             "entry_proxy_server": proxy_host or "127.0.0.1",
             "entry_proxy_port": proxy_port or 1080,
             "entry_ru_proxy_expected_ip": expected_proxy_ip,
+            "reality_fallback_enabled": reality_fallback_enabled,
+            "reality_fallback_dest": reality_fallback_dest,
             "entry_dot_upstreams": dot_upstreams,
             "entry_dns_doh_server": doh_server,
             "entry_dns_doh_tls_name": doh_tls_name,

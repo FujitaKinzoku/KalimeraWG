@@ -40,12 +40,12 @@
       ],
       "tls": {
         "enabled": true,
-        "server_name": "{{ reality_fallback_dest }}",
+        "server_name": "{{ reality_fallback_effective_dest | default(reality_fallback_dest) }}",
         "reality": {
           "enabled": true,
           "handshake": {
-            "server": "{{ reality_fallback_dest }}",
-            "server_port": {{ reality_fallback_dest_port }}
+            "server": "{{ reality_fallback_effective_dest | default(reality_fallback_dest) }}",
+            "server_port": {{ reality_fallback_effective_dest_port | default(reality_fallback_dest_port) }}
           },
           "private_key": "{{ reality_fallback_private_key }}",
           "short_id": ["{{ reality_fallback_short_id }}"]

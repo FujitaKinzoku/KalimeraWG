@@ -226,6 +226,8 @@
               dest: dot-switch
             - src: roles/operations/templates/doh-switch.sh.j2
               dest: doh-switch
+            - src: roles/operations/templates/reality-dest-switch.sh.j2
+              dest: reality-dest-switch
             - src: roles/operations/templates/dns-status.sh.j2
               dest: dns-status
             - src: roles/operations/templates/ru-direct-ports.sh.j2
@@ -435,6 +437,7 @@
               - "{{ rendered_shell_root }}/ru-proxy-set"
               - "{{ rendered_shell_root }}/dot-switch"
               - "{{ rendered_shell_root }}/doh-switch"
+              - "{{ rendered_shell_root }}/reality-dest-switch"
               - "{{ rendered_shell_root }}/dns-status"
               - "{{ rendered_shell_root }}/ru-direct-ports"
               - "{{ rendered_shell_root }}/vpn-user"
