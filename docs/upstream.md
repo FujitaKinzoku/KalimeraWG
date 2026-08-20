@@ -24,10 +24,10 @@ upstream-исходников должно закреплять точный com
 
 Роль прокси ENTRY использует официальный артефакт выпуска SagerNet:
 
-- релиз: `v1.13.15`;
-- файл: `sing-box_1.13.15_linux_amd64.deb`;
-- SHA-256: `49a889611318a35a259077033ba6bd4139d99d953c0bc1778b1950ecd88b63d6`;
-- источник: https://github.com/SagerNet/sing-box/releases/tag/v1.13.15.
+- релиз: `v1.13.19`;
+- файл: `sing-box_1.13.19_linux_amd64.deb`;
+- SHA-256: `e243c2856d62df33dd2ee588dc3327899a4e4605300c10fa252fdaefeca6c144`;
+- источник: https://github.com/SagerNet/sing-box/releases/tag/v1.13.19.
 
 ## Межсерверная версия AmneziaWG 3+
 

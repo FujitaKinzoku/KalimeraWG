@@ -386,25 +386,37 @@
 # (ru-domain/se-domain) и awg-ru-zone-update.sh.j2 (статический список RU
 # подсетей) — тот же источник данных, что питает kernel ipset. Здесь только
 # гарантируем, что файл существует и валиден к первому запуску sing-box, до
-# первого срабатывания этих скриптов.
-- name: "Создание: заготовка rule-set REALITY для ru-domain/se-domain"
-  ansible.builtin.copy:
-    dest: "{{ reality_fallback_ru_rule_set_path }}"
-    content: "{\"version\": 1, \"rules\":[]}\n"
-    owner: root
-    group: root
-    mode: "0644"
-    force: false
+# первого срабатывания этих скриптов. Проверяем валидность содержимого, а не
+# просто "существует ли файл" (force: false) — иначе испорченный файл,
+# оставшийся от прерванного/неудачного deploy (например, старый rule-set без
+# обязательного поля version), навсегда переживает повторные попытки и
+# ломает sing-box check на каждом следующем deploy.
+- name: "Проверка: заготовка rule-set REALITY для ru-domain/se-domain"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_ru_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
   when: reality_fallback_enabled | default(false) | bool
 
-- name: "Создание: заготовка rule-set REALITY для российских подсетей"
-  ansible.builtin.copy:
-    dest: "{{ reality_fallback_ru_zone_rule_set_path }}"
-    content: "{\"version\": 1, \"rules\":[]}\n"
-    owner: root
-    group: root
-    mode: "0644"
-    force: false
+- name: "Проверка: заготовка rule-set REALITY для российских подсетей"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_ru_zone_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
   when: reality_fallback_enabled | default(false) | bool
 
 - name: "Проверка: прокси sing-box — этап 7"
