@@ -25,8 +25,8 @@ class InstallResilienceTests(unittest.TestCase):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         deploy = (ROOT / "deploy").read_text(encoding="utf-8")
 
-        self.assertEqual(version, "2.0.1")
-        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v2.0.1}"', installer)
+        self.assertEqual(version, "2.1.0")
+        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v2.1.0}"', installer)
         self.assertIn('installed_version', installer)
         self.assertIn('if [[ $# -eq 1 && $1 == --version ]]', deploy)
 
