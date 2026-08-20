@@ -138,6 +138,167 @@
     mode: "0700"
   when: entry_ru_proxy_enabled | bool
 
+- name: "Проверка: запасной транспорт REALITY требует активный RU-прокси"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_ru_proxy_enabled | bool
+    fail_msg: >-
+      reality_fallback_enabled требует entry_ru_proxy_enabled=true —
+      REALITY-путь переиспользует существующий outbound ru-socks (SOAX) для
+      RU-ветки маршрутизации, отдельного механизма для неё нет.
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Создание: каталог состояния REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: ключевая пара REALITY уже создана"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_private_key_path }}"
+  register: reality_fallback_keypair_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: ключевая пара REALITY"
+  ansible.builtin.command:
+    argv: [/usr/bin/sing-box, generate, reality-keypair]
+  register: reality_fallback_keypair_output
+  changed_when: true
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+- name: "Сохранение: закрытый ключ REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_private_key_path }}"
+    content: >-
+      {{ (reality_fallback_keypair_output.stdout_lines
+          | select('match', '^PrivateKey:')
+          | first).split(':')[1] | trim }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+- name: "Сохранение: публичный ключ REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_state_dir }}/public.key"
+    content: >-
+      {{ ((reality_fallback_keypair_output.stdout_lines
+          | select('match', '^PublicKey:')
+          | first).split(':')[1] | trim) + "\n" }}
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+- name: "Проверка: short_id REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_short_id_path }}"
+  register: reality_fallback_short_id_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: short_id REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate rand --hex 8 > {{ reality_fallback_short_id_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_short_id_file.stat.exists
+
+- name: "Ограничение прав: short_id REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_short_id_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: UUID клиента REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_client_uuid_path }}"
+  register: reality_fallback_client_uuid_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: UUID клиента REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate uuid > {{ reality_fallback_client_uuid_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_client_uuid_file.stat.exists
+
+- name: "Ограничение прав: UUID клиента REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_client_uuid_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Чтение: параметры REALITY для рендеринга конфигурации"
+  ansible.builtin.slurp:
+    path: "{{ item }}"
+  loop:
+    - "{{ reality_fallback_private_key_path }}"
+    - "{{ reality_fallback_short_id_path }}"
+    - "{{ reality_fallback_client_uuid_path }}"
+  register: reality_fallback_material_raw
+  no_log: true
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Разбор: параметры REALITY для рендеринга конфигурации"
+  ansible.builtin.set_fact:
+    reality_fallback_private_key: >-
+      {{ (reality_fallback_material_raw.results[0].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+    reality_fallback_short_id: >-
+      {{ (reality_fallback_material_raw.results[1].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+    reality_fallback_client_uuid: >-
+      {{ (reality_fallback_material_raw.results[2].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+  no_log: true
+  when: reality_fallback_enabled | default(false) | bool
+
+# Реальное содержимое этих rule-set файлов формируют domain-admin.sh.j2
+# (ru-domain/se-domain) и awg-ru-zone-update.sh.j2 (статический список RU
+# подсетей) — тот же источник данных, что питает kernel ipset. Здесь только
+# гарантируем, что файл существует и валиден к первому запуску sing-box, до
+# первого срабатывания этих скриптов.
+- name: "Создание: заготовка rule-set REALITY для ru-domain/se-domain"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_ru_rule_set_path }}"
+    content: "{\"rules\":[]}\n"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Создание: заготовка rule-set REALITY для российских подсетей"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_ru_zone_rule_set_path }}"
+    content: "{\"rules\":[]}\n"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Проверка: прокси sing-box — этап 7"
   ansible.builtin.stat:
     path: "{{ sing_box_config_path }}"

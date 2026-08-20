@@ -43,6 +43,7 @@
         entry_mobile_client_available: true
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
+        reality_fallback_enabled: true
         runtime_secrets_enabled: true
         security_manage_admin_account: true
         security_finalize_admin_access: true

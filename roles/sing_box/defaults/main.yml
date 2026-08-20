@@ -11,3 +11,21 @@ entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
 # Для policy routing с auto_route=false это надёжнее mixed/system.
 entry_ru_tun_stack: gvisor
 entry_ru_endpoint_independent_nat: true
+
+# Запасной транспорт VLESS+REALITY поверх уже работающего sing-box. Требует
+# entry_ru_proxy_enabled — переиспользует существующий outbound ru-socks для
+# RU-ветки, отдельный SOAX/прокси не нужен. Выключено по умолчанию —
+# обратная совместимость.
+reality_fallback_enabled: false
+reality_fallback_port: 443
+reality_fallback_state_dir: /etc/sing-box/reality
+reality_fallback_private_key_path: "{{ reality_fallback_state_dir }}/private.key"
+reality_fallback_short_id_path: "{{ reality_fallback_state_dir }}/short_id"
+reality_fallback_client_uuid_path: "{{ reality_fallback_state_dir }}/client_uuid"
+# Настоящий, доступный TLS 1.3 сайт без ECH — маска для REALITY.
+reality_fallback_dest: www.microsoft.com
+reality_fallback_dest_port: 443
+reality_fallback_server_names:
+  - "{{ reality_fallback_dest }}"
+reality_fallback_ru_rule_set_path: /etc/sing-box/reality/ru-domains.json
+reality_fallback_ru_zone_rule_set_path: /etc/sing-box/reality/ru-zone.json

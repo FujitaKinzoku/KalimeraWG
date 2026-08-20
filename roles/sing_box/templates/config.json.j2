@@ -26,7 +26,32 @@
       "listen_port": {{ entry_dns_ru_port }},
       "override_address": "{{ doh_server }}",
       "override_port": 53
-    }
+    }{% if reality_fallback_enabled | default(false) | bool %},
+    {
+      "type": "vless",
+      "tag": "reality-in",
+      "listen": "::",
+      "listen_port": {{ reality_fallback_port }},
+      "users": [
+        {
+          "uuid": "{{ reality_fallback_client_uuid }}",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ reality_fallback_dest }}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "{{ reality_fallback_dest }}",
+            "server_port": {{ reality_fallback_dest_port }}
+          },
+          "private_key": "{{ reality_fallback_private_key }}",
+          "short_id": ["{{ reality_fallback_short_id }}"]
+        }
+      }
+    }{% endif %}
   ],
   "outbounds": [
     {
@@ -48,16 +73,61 @@
         "server": "bootstrap-unbound",
         "strategy": "ipv4_only"
       }
-    }
+    }{% if reality_fallback_enabled | default(false) | bool %},
+    {
+      "type": "direct",
+      "tag": "direct-exit",
+      "routing_mark": "{{ entry_exit_mark }}",
+      "domain_resolver": {
+        "server": "bootstrap-unbound",
+        "strategy": "ipv4_only"
+      }
+    }{% endif %}
   ],
   "route": {
     "final": "ru-socks",
     "default_interface": "{{ entry_wan_interface }}",
+{% if reality_fallback_enabled | default(false) | bool %}
+    "default_domain_resolver": "bootstrap-unbound",
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "reality-ru-domains",
+        "format": "source",
+        "path": "{{ reality_fallback_ru_rule_set_path }}"
+      },
+      {
+        "type": "local",
+        "tag": "reality-ru-zone",
+        "format": "source",
+        "path": "{{ reality_fallback_ru_zone_rule_set_path }}"
+      }
+    ],
+{% endif %}
     "rules": [
       {
         "inbound": ["dns-in"],
         "action": "hijack-dns"
-      }
+      }{% if reality_fallback_enabled | default(false) | bool %},
+      {
+        "inbound": ["reality-in"],
+        "domain_suffix": [".ru", ".xn--p1ai"],
+        "outbound": "ru-socks"
+      },
+      {
+        "inbound": ["reality-in"],
+        "rule_set": ["reality-ru-domains"],
+        "outbound": "ru-socks"
+      },
+      {
+        "inbound": ["reality-in"],
+        "rule_set": ["reality-ru-zone"],
+        "outbound": "ru-socks"
+      },
+      {
+        "inbound": ["reality-in"],
+        "outbound": "direct-exit"
+      }{% endif %}
     ]
   },
   "dns": {

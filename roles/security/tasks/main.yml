@@ -751,6 +751,32 @@
     - awg_node_role == 'exit'
     - not (entry_dns_default_via_exit | default(false) | bool)
 
+# Открыт всем намеренно — REALITY должен отвечать любому, кто постучится,
+# в том числе активным зондам DPI, точно как настоящий HTTPS-сервер.
+- name: "Разрешение запасного транспорта VLESS+REALITY"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    comment: Запасной транспорт VLESS+REALITY
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+
+- name: "Удаление правила запасного транспорта VLESS+REALITY при отключении"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - not (reality_fallback_enabled | default(false) | bool)
+
 - name: "Разрешение служебного трафика только от второго сервера внутри AWG 3+"
   community.general.ufw:
     rule: allow

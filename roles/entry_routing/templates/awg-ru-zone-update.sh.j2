@@ -48,3 +48,21 @@ done < <(sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$tmp")
 ipset swap "$TMP_SET" "$RU_SET"
 ipset flush "$TMP_SET"
 install -o root -g root -m 0644 "$tmp" "$CACHE"
+
+{% if reality_fallback_enabled | default(false) | bool %}
+# Тот же провалидированный список подсетей, что и выше в ipset ru —
+# производный rule-set для запасного транспорта VLESS+REALITY. sing-box сам
+# перечитывает локальные rule-set файлы при изменении на диске.
+readonly REALITY_RU_ZONE_RULE_SET={{ reality_fallback_ru_zone_rule_set_path | quote }}
+reality_zone_tmp="$(mktemp /run/awg-ru-zone-reality.XXXXXX)"
+networks_json="$(sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$tmp" |
+    grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$' |
+    jq -R -s 'split("\n") | map(select(length > 0))')"
+jq -n --argjson networks "$networks_json" \
+    '{"rules": (if ($networks | length) > 0 then [{"ip_cidr": $networks}] else [] end)}' \
+    >"$reality_zone_tmp"
+if [[ ! -f "$REALITY_RU_ZONE_RULE_SET" ]] || ! cmp --silent "$reality_zone_tmp" "$REALITY_RU_ZONE_RULE_SET"; then
+    install -o root -g root -m 0644 "$reality_zone_tmp" "$REALITY_RU_ZONE_RULE_SET"
+fi
+rm -f -- "$reality_zone_tmp"
+{% endif %}

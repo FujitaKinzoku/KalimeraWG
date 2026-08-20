@@ -264,6 +264,13 @@ udp_ru_bypass_absent() {
         grep -Eq -- '-p udp .*--match-set (force_ru|ru) dst .* -j RETURN'
 }
 
+{% if reality_fallback_enabled | default(false) | bool %}
+tcp_port_listening() {
+    local port="$1"
+    ss -H -ltn "( sport = :${port} )" | grep -q .
+}
+{% endif %}
+
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
@@ -474,6 +481,11 @@ check 'sing-box намеренно отключён' service_inactive {{ sing_bo
 check 'watchdog российского прокси намеренно отключён' service_inactive {{ entry_ru_proxy_watch_timer_name | quote }}
 check 'правило policy routing для mark 0x2 отсутствует' rule_absent {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
 check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
+{% endif %}
+{% if reality_fallback_enabled | default(false) | bool %}
+check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
+check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}

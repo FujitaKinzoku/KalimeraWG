@@ -167,6 +167,23 @@ if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
     systemctl restart dnsmasq.service
     changed=true
 fi
+
+{% if reality_fallback_enabled | default(false) | bool %}
+# Тот же источник (ru-domain), что и dnsmasq выше — производный rule-set для
+# запасного транспорта VLESS+REALITY. sing-box сам перечитывает локальные
+# rule-set файлы при изменении на диске (с версии 1.10.0), перезапуск не
+# нужен.
+readonly REALITY_RU_RULE_SET={{ reality_fallback_ru_rule_set_path | quote }}
+reality_tmp="$(mktemp /run/awg-domain-policy-reality.XXXXXX)"
+ru_domains_json="$(sed -E '/^[[:space:]]*(#|$)/d' "$DIR/ru-domain" | jq -R -s 'split("\n") | map(select(length > 0))')"
+jq -n --argjson domains "$ru_domains_json" \
+    '{"rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}' \
+    >"$reality_tmp"
+if [[ ! -f "$REALITY_RU_RULE_SET" ]] || ! cmp --silent "$reality_tmp" "$REALITY_RU_RULE_SET"; then
+    install -m 0644 "$reality_tmp" "$REALITY_RU_RULE_SET"
+fi
+rm -f "$reality_tmp"
+{% endif %}
 completed=true
 
 if [[ "$action" == sync ]]; then

@@ -40,6 +40,15 @@
               - "{{ sing_box_test_root }}/package"
           changed_when: false
 
+        - name: Создание заготовок rule-set REALITY для проверки шаблона
+          ansible.builtin.copy:
+            dest: "{{ sing_box_test_root }}/reality-{{ item }}.json"
+            content: "{\"rules\":[]}\n"
+            mode: "0600"
+          loop:
+            - ru-domains
+            - ru-zone
+
         - name: Формирование тестовых SOCKS5-конфигураций с аутентификацией и без неё
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
@@ -50,10 +59,12 @@
               username: example-user
               password: example-value
               override: {}
+              reality_enabled: false
             - name: anonymous
               username: ""
               password: ""
               override: {}
+              reality_enabled: false
             - name: runtime-override
               username: ignored-user
               password: ignored-value
@@ -62,10 +73,25 @@
                 server_port: 1081
                 username: runtime-user
                 password: runtime-value
+              reality_enabled: false
+            - name: reality-enabled
+              username: ""
+              password: ""
+              override: {}
+              reality_enabled: true
           vars:
             vault_proxy_username: "{{ item.username }}"
             vault_proxy_password: "{{ item.password }}"
             sing_box_runtime_proxy_override: "{{ item.override }}"
+            reality_fallback_enabled: "{{ item.reality_enabled }}"
+            reality_fallback_port: 443
+            reality_fallback_dest: www.microsoft.com
+            reality_fallback_dest_port: 443
+            reality_fallback_private_key: uHHrnirWwMVonDSitTtNG3uglRPIuParW0SmLJZtknQ
+            reality_fallback_short_id: 23c5103f099e9c03
+            reality_fallback_client_uuid: 64906bb8-2b9a-40c1-882a-208e9ff20449
+            reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
+            reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
           no_log: true
 
         - name: Семантическая проверка конфигураций закреплённой версией sing-box
@@ -79,6 +105,7 @@
             - authenticated
             - anonymous
             - runtime-override
+            - reality-enabled
           changed_when: false
           no_log: true
 
