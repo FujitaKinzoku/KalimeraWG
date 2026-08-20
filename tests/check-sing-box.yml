@@ -49,6 +49,52 @@
             - ru-domains
             - ru-zone
 
+        # Генерируется закреплённым бинарником на каждом запуске, а не хранится в
+        # репозитории как литерал — так же, как это делает роль sing_box в
+        # продакшене (roles/sing_box/tasks/main.yml), и без ложных срабатываний
+        # scripts/check-secrets.sh на структуру base64-ключа WireGuard-формата.
+        - name: "Проверка REALITY: генерация тестовой ключевой пары"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - reality-keypair
+          register: sing_box_test_reality_keypair
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: генерация тестового short_id"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - rand
+              - --hex
+              - "8"
+          register: sing_box_test_reality_short_id
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: генерация тестового UUID клиента"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - uuid
+          register: sing_box_test_reality_uuid
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: разбор сгенерированного тестового материала"
+          ansible.builtin.set_fact:
+            sing_box_test_reality_private_key: >-
+              {{ (sing_box_test_reality_keypair.stdout_lines
+                  | select('match', '^PrivateKey:')
+                  | first).split(':')[1] | trim }}
+            sing_box_test_reality_short_id: "{{ sing_box_test_reality_short_id.stdout | trim }}"
+            sing_box_test_reality_uuid: "{{ sing_box_test_reality_uuid.stdout | trim }}"
+          no_log: true
+
         - name: Формирование тестовых SOCKS5-конфигураций с аутентификацией и без неё
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
@@ -87,11 +133,9 @@
             reality_fallback_port: 443
             reality_fallback_dest: www.microsoft.com
             reality_fallback_dest_port: 443
-            # Заведомо фиктивные, нулевые значения — только для проверки схемы
-            # конфигурации sing-box, а не реальный секретный материал.
-            reality_fallback_private_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-            reality_fallback_short_id: "0000000000000000"
-            reality_fallback_client_uuid: "00000000-0000-0000-0000-000000000000"
+            reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
+            reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
+            reality_fallback_client_uuid: "{{ sing_box_test_reality_uuid }}"
             reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
             reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
           no_log: true
