@@ -13,7 +13,7 @@
 AmneziaWG 3+ · automatic PMTU/MTU · route-aware DNS · optional SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.0.1"><img src="https://img.shields.io/badge/release-v2.0.1-7B2CBF" alt="KalimeraWG v2.0.1"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-7B2CBF" alt="KalimeraWG v2.1.0"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3+-7B2CBF" alt="AmneziaWG 3+">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -22,7 +22,7 @@ AmneziaWG 3+ · automatic PMTU/MTU · route-aware DNS · optional SOAX/SOCKS5</e
 
 KalimeraWG turns two clean Ubuntu 24.04 VPS instances into a reproducible
 ENTRY/EXIT cascade, creates the first client, and installs operational tools.
-Release `v2.0.1` has been verified through repeated clean VPS deployments.
+Release `v2.1.0` has been verified through repeated clean VPS deployments.
 
 > **v2.0.0 is a major security-hardening release.** The access model changed
 > (a dedicated `kalimera` administrator instead of everyday root), on-disk
@@ -44,10 +44,10 @@ Release `v2.0.1` has been verified through repeated clean VPS deployments.
 Run as `root` on ENTRY:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.0.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.1.0/install.sh | bash
 ```
 
-The command installs the immutable `v2.0.1` tag rather than the moving `main`
+The command installs the immutable `v2.1.0` tag rather than the moving `main`
 branch. Confirm the local version with `./deploy --version`.
 
 ## What's new in v2.0.0
@@ -101,7 +101,7 @@ and transit segments use separate interfaces, keys, and parameters.
 
 ### Validated compatibility
 
-| Path | `v2.0.1` validation |
+| Path | `v2.1.0` validation |
 |---|---|
 | Ubuntu 24.04 LTS | repeated clean deployments across different VPS providers, reboot, and strict audit |
 | ENTRY–EXIT | fresh AWG 3+ handshake, coordinated MTU, and post-reboot recovery |
@@ -144,7 +144,7 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | health/audit gates | detect service, firewall, DNS, and routing drift |
 | Telegram | alerts on reboot, failover, and recovery |
 
-## Security in v2.0.1
+## Security in v2.1.0
 
 | Boundary | Implementation |
 |---|---|
@@ -155,7 +155,7 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | Firewall | deny-by-default UFW; AWG3 limited to known ENTRY/EXIT IPv4 peers |
 | Updates | candidate validation, exact applied-version lock, automatic rollback |
 | Kernel | headers, DKMS and `modinfo` verified for the running and newest installed kernels |
-| DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience; `/etc/resolv.conf` and `nsswitch.conf` are forced onto `systemd-resolved` regardless of hosting provider (v2.0.1) |
+| DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience; `/etc/resolv.conf` and `nsswitch.conf` are forced onto `systemd-resolved` regardless of hosting provider (v2.0.1); optionally, the default branch resolves via its own DNSSEC-validating recursion on EXIT inside the AWG tunnel instead of external DoT, so no separate TLS ClientHello leaves ENTRY (v2.1.0) |
 | No-logs | journal and login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
 | On-disk secrets | Shamir `2-of-5` + AES-256-GCM; plaintext configuration only in `/run`; services receive AWG/AWG3/sing-box/Telegram config via systemd credentials |
 | AWG3 failures | bounded retries and sanitized diagnostics without key material |
@@ -211,4 +211,4 @@ lawful use and provider terms.
 KalimeraWG is not an official Amnezia VPN project. Third-party notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v2.0.1 · two servers, one managed route</b></p>
+<p align="center"><b>KalimeraWG v2.1.0 · two servers, one managed route</b></p>

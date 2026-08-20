@@ -61,6 +61,14 @@
       - entry_dns_effective_dot_upstreams | length >= 1
     fail_msg: "Для DNS ENTRY требуются проверенные listeners, upstream-серверы и доменные политики"
 
+- name: "Проверка: DNS ENTRY сервера — этап 2b"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - (awg3_peer_tunnel_address | default('') | ansible.utils.ipv4) == (awg3_peer_tunnel_address | default(''))
+    fail_msg: "entry_dns_default_via_exit требует корректный awg3_peer_tunnel_address (адрес EXIT на межсерверном канале)"
+  when: entry_dns_default_via_exit | default(false) | bool
+
 - name: "Установка: DNS ENTRY сервера — этап 3"
   ansible.builtin.apt:
     name:
@@ -283,3 +291,8 @@
   until:
     - entry_dns_system_resolution.rc == 0
     - entry_dns_system_resolution.stdout | trim | length > 0
+  # При entry_dns_default_via_exit дефолтная ветка резолвится через EXIT, чья
+  # роль exit_dns выполняется позже в отдельном play — на этом шаге EXIT ещё
+  # не готов. Сквозная проверка перенесена в отдельный play после play EXIT
+  # (playbooks/site.yml, "Проверка DNS зарубежной ветки через EXIT").
+  when: not (entry_dns_default_via_exit | default(false) | bool)

@@ -72,3 +72,11 @@ runtime_secrets_peer_timeout_seconds: 7
 runtime_secrets_unlock_timeout_seconds: 180
 runtime_secrets_service_name: kalimera-secrets-unlock.service
 runtime_secrets_ctl_path: /usr/local/sbin/kalimera-secretctl
+
+# Экспериментально (отдельная ветка, не влито в main): дефолтная/зарубежная
+# ветка системного DNS на ENTRY резолвится не через внешний DoT (Mullvad), а
+# рекурсивно на EXIT внутри уже существующего межсерверного AWG-канала. Наружу
+# с ENTRY перестаёт уходить TLS ClientHello к стороннему DNS-провайдеру.
+# RU-ветка (.ru/.рф, ru-domain) не затрагивается и продолжает идти через
+# DoH RU-прокси. По умолчанию выключено ради обратной совместимости.
+entry_dns_default_via_exit: false

@@ -13,7 +13,7 @@
 AmneziaWG 3+ · автоматический PMTU/MTU · маршрутный DNS · SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.0.1"><img src="https://img.shields.io/badge/release-v2.0.1-7B2CBF" alt="KalimeraWG v2.0.1"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-7B2CBF" alt="KalimeraWG v2.1.0"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3+-7B2CBF" alt="AmneziaWG 3+">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -23,7 +23,7 @@ AmneziaWG 3+ · автоматический PMTU/MTU · маршрутный DN
 
 KalimeraWG превращает две чистые VPS с Ubuntu 24.04 в воспроизводимый каскад,
 создаёт первого VPN-клиента и устанавливает инструменты эксплуатации. Выпуск
-`v2.0.1` проверен повторными чистыми установками на разных VPS.
+`v2.1.0` проверен повторными чистыми установками на разных VPS.
 
 > **v2.0.0 — крупный релиз усиления безопасности.** Переработана модель
 > доступа (отдельный администратор `kalimera` вместо повседневного root),
@@ -45,10 +45,10 @@ KalimeraWG превращает две чистые VPS с Ubuntu 24.04 в во�
 Запустите на ENTRY от `root`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.0.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.1.0/install.sh | bash
 ```
 
-Команда загружает и устанавливает именно выпуск `v2.0.1`, а не изменяемое
+Команда загружает и устанавливает именно выпуск `v2.1.0`, а не изменяемое
 состояние ветки `main`. Проверить версию локальной копии:
 
 ```bash
@@ -62,7 +62,7 @@ cd /root/KalimeraWG
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v2.0.1 --depth 1 \
+git clone --branch v2.1.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -157,7 +157,7 @@ ru-direct-ports add 993
 
 ### Проверенная совместимость
 
-| Контур | Проверка выпуска `v2.0.1` |
+| Контур | Проверка выпуска `v2.1.0` |
 |---|---|
 | Ubuntu 24.04 LTS | повторные чистые установки на VPS разных провайдеров, перезагрузка и строгий аудит |
 | ENTRY–EXIT | свежий AWG 3+ handshake, согласованный MTU и восстановление после перезагрузки |
@@ -191,9 +191,9 @@ vpn-user delete phone
 | `awg-health` и `server-audit` | незаметный дрейф служб, UFW, DNS и маршрутов |
 | Telegram | отсутствие уведомлений о перезагрузке, отказе и восстановлении |
 
-## Безопасность v2.0.1
+## Безопасность v2.1.0
 
-В `v2.0.0`/`v2.0.1` усилены следующие границы:
+В `v2.0.0`–`v2.1.0` усилены следующие границы:
 
 | Область | Реализация |
 |---|---|
@@ -204,7 +204,7 @@ vpn-user delete phone
 | Firewall | запрещающие политики UFW; AWG3 разрешён только между известными IPv4 ENTRY/EXIT |
 | Обновления | проверка кандидатов, фиксация применённых версий и автоматический rollback |
 | Ядро | заголовки, DKMS и `modinfo` проверяются для текущего и наиболее нового установленного ядра |
-| DNS | локальный Unbound, контроль DoT/DoH, защита от DNS-сбоев образа VPS; `/etc/resolv.conf` и `nsswitch.conf` принудительно приводятся к `systemd-resolved` независимо от провайдера (v2.0.1) |
+| DNS | локальный Unbound, контроль DoT/DoH, защита от DNS-сбоев образа VPS; `/etc/resolv.conf` и `nsswitch.conf` принудительно приводятся к `systemd-resolved` независимо от провайдера (v2.0.1); опционально — дефолтная ветка резолвится через собственную DNSSEC-рекурсию на EXIT внутри AWG-туннеля вместо внешнего DoT, без утечки отдельного TLS ClientHello с ENTRY (v2.1.0) |
 | No-logs | journal и учёт входов только в RAM; UFW/sing-box/DNS query logs, shell history и coredump отключены |
 | Секреты на диске | Shamir 2-of-5 + AES-256-GCM; открытые конфигурации только в `/run`, службы используют systemd credentials |
 | Ошибки AWG3 | ограниченные повторные попытки и очищенная диагностика без ключевого материала |
@@ -284,4 +284,4 @@ KalimeraWG не переключает установленный сервер �
 KalimeraWG не является официальным проектом Amnezia VPN. Сторонние компоненты и
 лицензии перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v2.0.1 · два сервера, один управляемый маршрут</b></p>
+<p align="center"><b>KalimeraWG v2.1.0 · два сервера, один управляемый маршрут</b></p>

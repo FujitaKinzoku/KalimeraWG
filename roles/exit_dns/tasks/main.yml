@@ -1,0 +1,136 @@
+---
+- name: "Проверка: рекурсивный DNS EXIT сервера — этап 1"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - exit_awg_address | default('') | length > 0
+      - (exit_awg_address | ansible.utils.ipaddr('address')) is truthy
+    fail_msg: "Для рекурсивного DNS EXIT требуется корректный exit_awg_address"
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Установка: рекурсивный DNS EXIT сервера — этап 2"
+  ansible.builtin.apt:
+    name:
+      - unbound
+      - unbound-anchor
+    state: present
+    lock_timeout: 600
+  when: entry_dns_default_via_exit | default(false) | bool
+
+# Тот же вспомогательный юнит пакета unbound, что и на ENTRY, конфликтует с
+# управляемой конфигурацией и не нужен — маскируем его так же.
+- name: "Отключение: рекурсивный DNS EXIT сервера — этап 2b"
+  ansible.builtin.systemd_service:
+    name: unbound-resolvconf.service
+    enabled: false
+    state: stopped
+    masked: true
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Очистка: рекурсивный DNS EXIT сервера — этап 2c"
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, unbound-resolvconf.service]
+  changed_when: false
+  failed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+# unbound.service слушает на реальном IP AWG-интерфейса (не на loopback, как
+# на ENTRY), поэтому без явного порядка загрузки systemd может запустить его
+# раньше, чем интерфейс получит адрес — bind падает, юнит остаётся failed
+# после перезагрузки. Restart=on-failure — подстраховка на случай гонки.
+- name: "Создание: рекурсивный DNS EXIT сервера — этап 2d"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ exit_dns_service_name }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Формирование: рекурсивный DNS EXIT сервера — этап 2e"
+  ansible.builtin.template:
+    src: 90-awg-recursive.service.conf.j2
+    dest: "/etc/systemd/system/{{ exit_dns_service_name }}.d/90-awg-recursive.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: exit_dns_service_dropin
+  when: entry_dns_default_via_exit | default(false) | bool
+
+# Пакет unbound на Ubuntu 24.04 сам обновляет auto-trust-anchor-file через
+# ExecStartPre=unbound-helper root_trust_anchor_update при каждом запуске
+# службы. Отдельный ручной unbound-anchor -a здесь лишний и конфликтовал со
+# штатным механизмом (дублирующаяся запись анкоря — "trust anchor presented
+# twice", служба падала при старте).
+
+- name: "Создание: рекурсивный DNS EXIT сервера — этап 5"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ exit_dns_config_dir }}"
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Создание: рекурсивный DNS EXIT сервера — этап 6"
+  ansible.builtin.file:
+    path: "{{ exit_dns_candidate_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Формирование: рекурсивный DNS EXIT сервера — этап 7"
+  ansible.builtin.template:
+    src: 90-awg-recursive.conf.j2
+    dest: "{{ exit_dns_candidate_root }}/90-awg-recursive.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  changed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Проверка: рекурсивный DNS EXIT сервера — этап 8"
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/unbound-checkconf
+      - "{{ exit_dns_candidate_root }}/90-awg-recursive.conf"
+  changed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Установка: рекурсивный DNS EXIT сервера — этап 9"
+  ansible.builtin.include_tasks: manage_file.yml
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Удаление: рекурсивный DNS EXIT сервера — этап 10"
+  ansible.builtin.file:
+    path: "{{ exit_dns_candidate_root }}"
+    state: absent
+  changed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Применение: рекурсивный DNS EXIT сервера — этап 11"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Включение: рекурсивный DNS EXIT сервера — этап 12"
+  ansible.builtin.systemd_service:
+    name: "{{ exit_dns_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: "Удаление: рекурсивный DNS EXIT сервера при отключении"
+  ansible.builtin.file:
+    path: "{{ exit_dns_config_path }}"
+    state: absent
+  notify: Перезапустить рекурсивный резолвер EXIT
+  when: not (entry_dns_default_via_exit | default(false) | bool)
+
+# UFW-правило для этого порта живёт в роли security (задачи "рекурсивного DNS
+# EXIT сервера"), а не здесь: отпечаток управляемой политики UFW фиксируется в
+# конце роли security, и правило, добавленное позже (в этой роли), делало бы
+# строгую проверку UFW постоянно устаревшей относительно снимка.

@@ -1,0 +1,30 @@
+server:
+    interface: {{ exit_awg_address | ansible.utils.ipaddr('address') }}
+    port: {{ exit_dns_port }}
+    access-control: {{ exit_awg_address | ansible.utils.ipaddr('network/prefix') }} allow
+    access-control: 0.0.0.0/0 refuse
+    do-ip4: yes
+    do-ip6: no
+    do-udp: yes
+    do-tcp: yes
+    hide-identity: yes
+    hide-version: yes
+    qname-minimisation: yes
+    aggressive-nsec: yes
+    harden-glue: yes
+    harden-dnssec-stripped: yes
+    harden-below-nxdomain: yes
+    val-permissive-mode: no
+    auto-trust-anchor-file: "{{ exit_dns_trust_anchor_path }}"
+    verbosity: 0
+    statistics-interval: 0
+    extended-statistics: no
+    log-queries: no
+    log-replies: no
+    log-tag-queryreply: no
+    log-local-actions: no
+    log-servfail: no
+
+remote-control:
+    control-enable: yes
+    control-interface: /run/unbound.ctl

@@ -1,0 +1,58 @@
+---
+- name: "Проверка: применение конфигурации DNS EXIT сервера — этап 1"
+  ansible.builtin.stat:
+    path: "{{ exit_dns_config_path }}"
+  register: exit_dns_live_file
+
+- name: "Проверка: применение конфигурации DNS EXIT сервера — этап 2"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/cmp
+      - --silent
+      - "{{ exit_dns_config_path }}"
+      - "{{ exit_dns_candidate_root }}/90-awg-recursive.conf"
+  register: exit_dns_file_compare
+  changed_when: false
+  failed_when: exit_dns_file_compare.rc not in [0, 1]
+  when: exit_dns_live_file.stat.exists
+
+- name: "Определение: применение конфигурации DNS EXIT сервера — этап 3"
+  ansible.builtin.set_fact:
+    exit_dns_file_changed: >-
+      {{ (not exit_dns_live_file.stat.exists) or
+         (exit_dns_file_compare.rc | default(1) == 1) }}
+
+- name: "Создание: применение конфигурации DNS EXIT сервера — этап 4"
+  ansible.builtin.file:
+    path: "{{ exit_dns_backup_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - exit_dns_live_file.stat.exists
+    - exit_dns_file_changed | bool
+
+- name: "Резервное копирование: применение конфигурации DNS EXIT сервера — этап 5"
+  ansible.builtin.copy:
+    src: "{{ exit_dns_config_path }}"
+    dest: >-
+      {{ exit_dns_backup_root }}/90-awg-recursive.conf.{{ ansible_date_time.iso8601_basic_short }}
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - exit_dns_live_file.stat.exists
+    - exit_dns_file_changed | bool
+
+- name: "Установка: применение конфигурации DNS EXIT сервера — этап 6"
+  ansible.builtin.copy:
+    src: "{{ exit_dns_candidate_root }}/90-awg-recursive.conf"
+    dest: "{{ exit_dns_config_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: exit_dns_file_changed | bool
+  notify: Перезапустить рекурсивный резолвер EXIT
