@@ -27,5 +27,6 @@
     reality_fallback_client_uuid: "{{ sing_box_test_reality_uuid }}"
     reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
     reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
+    reality_fallback_se_rule_set_path: "{{ sing_box_test_root }}/reality-se-domains.json"
     reality_fallback_ru_outbound: "{{ item.ru_outbound | default('ru-socks') }}"
   no_log: true

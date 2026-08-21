@@ -36,6 +36,12 @@ reality_fallback_server_names:
   - "{{ reality_fallback_dest }}"
 reality_fallback_ru_rule_set_path: /etc/sing-box/reality/ru-domains.json
 reality_fallback_ru_zone_rule_set_path: /etc/sing-box/reality/ru-zone.json
+# Список se-domain («всегда через EXIT») — производный от того же файла, что
+# питает ipset force_exit для клиентов AmneziaWG. Нужен, чтобы исключения
+# работали одинаково на обоих транспортах: классификация по российским
+# подсетям даёт ложные срабатывания на зарубежных сервисах, отдающихся с
+# кеш-узлов внутри РФ (googlevideo.com и прочий Google Global Cache).
+reality_fallback_se_rule_set_path: /etc/sing-box/reality/se-domains.json
 
 # Второй REALITY-клиент, зарезервированный за FRONT-релеем (roles/front) —
 # CDN-фронтированный VLESS+XHTTP на отдельной VPS, который сам подключается

@@ -465,6 +465,20 @@
   changed_when: false
   when: reality_fallback_enabled | default(false) | bool
 
+- name: "Проверка: заготовка rule-set REALITY для se-domain"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_se_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Проверка: заготовка rule-set REALITY для российских подсетей"
   ansible.builtin.shell:
     cmd: |

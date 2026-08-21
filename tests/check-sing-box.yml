@@ -54,6 +54,8 @@
               content: '{"version": 1, "rules": [{"domain_suffix": ["example.ru"]}]}'
             - name: ru-zone
               content: '{"version": 1, "rules": [{"ip_cidr": ["203.0.113.0/24"]}]}'
+            - name: se-domains
+              content: '{"version": 1, "rules": [{"domain_suffix": ["example.invalid"]}]}'
 
         # Генерируется закреплённым бинарником на каждом запуске, а не хранится в
         # репозитории как литерал — так же, как это делает роль sing_box в
@@ -170,11 +172,36 @@
             that:
               - sing_box_test_reality_rules[1].inbound == ["reality-in"]
               - sing_box_test_reality_rules[1].action == "sniff"
-              - sing_box_test_reality_rules[2].domain_suffix == [".ru", ".xn--p1ai"]
+              - sing_box_test_reality_rules[3].domain_suffix == [".ru", ".xn--p1ai"]
             fail_msg: >-
               Правило sniff должно стоять сразу после hijack-dns и раньше
               доменных RU-правил REALITY, иначе клиент, присылающий уже
               разрешённый IP вместо домена, никогда не попадёт в RU-ветку.
+
+        # Регрессия на баг из живого теста: классификация по российским
+        # подсетям — эвристика, и зарубежные сервисы, отдающиеся с кеш-узлов
+        # внутри РФ (googlevideo.com через Google Global Cache российского
+        # оператора), ложно попадали в неё и уходили в российский прокси.
+        # se-domain — операторское исключение из этой эвристики; у клиентов
+        # AmneziaWG оно работает через ipset force_exit, который в цепочке
+        # mangle проверяется раньше набора ru. Здесь тот же приоритет должен
+        # соблюдаться, иначе исключение не имеет силы.
+        - name: "Проверка: se-domain перекрывает RU-правила REALITY"
+          vars:
+            sing_box_test_reality_config: "{{ sing_box_test_reality_config_raw.content | b64decode | from_json }}"
+            sing_box_test_reality_rules: "{{ sing_box_test_reality_config.route.rules }}"
+          ansible.builtin.assert:
+            that:
+              - sing_box_test_reality_rules[2].rule_set == ["reality-se-domains"]
+              - sing_box_test_reality_rules[2].outbound == "direct-exit"
+              - sing_box_test_reality_rules[4].rule_set == ["reality-ru-domains"]
+              - sing_box_test_reality_rules[5].rule_set == ["reality-ru-zone"]
+            fail_msg: >-
+              Правило se-domain должно стоять раньше всех RU-правил REALITY и
+              вести в direct-exit, иначе операторское исключение «всегда через
+              EXIT» не сработает: адрес зарубежного сервиса, отданный с
+              кеш-узла внутри РФ, попадёт в reality-ru-zone и уйдёт в
+              российский прокси.
 
       always:
         - name: Удаление изолированного каталога проверки sing-box

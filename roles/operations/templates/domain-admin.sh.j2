@@ -186,6 +186,23 @@ if [[ ! -f "$REALITY_RU_RULE_SET" ]] || ! cmp --silent "$reality_tmp" "$REALITY_
     install -m 0644 "$reality_tmp" "$REALITY_RU_RULE_SET"
 fi
 rm -f "$reality_tmp"
+
+# То же самое для se-domain. У клиентов AmneziaWG этот список работает через
+# ipset force_exit (roles/entry_routing), который проверяется раньше списка
+# российских подсетей; без производного rule-set запасной транспорт
+# VLESS+REALITY о таких исключениях не знал вовсе, и зарубежные сервисы,
+# отдающиеся с кеш-узлов внутри РФ, уходили в российский прокси.
+readonly REALITY_SE_RULE_SET={{ reality_fallback_se_rule_set_path | quote }}
+reality_se_tmp="$(mktemp /run/awg-domain-policy-reality-se.XXXXXX)"
+sed -E '/^[[:space:]]*(#|$)/d' "$DIR/se-domain" |
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $domains |
+        {"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}
+    ' >"$reality_se_tmp"
+if [[ ! -f "$REALITY_SE_RULE_SET" ]] || ! cmp --silent "$reality_se_tmp" "$REALITY_SE_RULE_SET"; then
+    install -m 0644 "$reality_se_tmp" "$REALITY_SE_RULE_SET"
+fi
+rm -f "$reality_se_tmp"
 {% endif %}
 completed=true
 
