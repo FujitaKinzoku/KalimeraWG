@@ -42,7 +42,15 @@
 # дублирования одного и того же выражения по всем шаблонам.
 - name: "Чтение параметров ENTRY, нужных FRONT-релею"
   ansible.builtin.set_fact:
-    front_entry_address: "{{ hostvars[groups['entry'][0]].ansible_host }}"
+    # ansible_host у ENTRY равен 127.0.0.1, когда каскад ставился локально
+    # на самом ENTRY (./deploy, "Установить ENTRY сервер на этой машине") —
+    # для FRONT это был бы адрес его самого. Публичный endpoint ENTRY лежит
+    # в group_vars/entry.yml и виден через hostvars (это group_var, а не
+    # default роли); тот же приём уже используется при выпуске клиентских
+    # конфигураций.
+    front_entry_address: >-
+      {{ hostvars[groups['entry'][0]].entry_public_endpoint
+         | default(hostvars[groups['entry'][0]].ansible_host) }}
     front_entry_reality_port: "{{ hostvars[groups['entry'][0]].reality_fallback_port }}"
     front_entry_reality_dest: "{{ hostvars[groups['entry'][0]].reality_fallback_effective_dest }}"
     front_entry_reality_public_key: "{{ hostvars[groups['entry'][0]].reality_fallback_public_key }}"

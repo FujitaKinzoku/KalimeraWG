@@ -513,6 +513,10 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
 
     front_vars = {
         "awg_node_role": "front",
+        # runtime_secrets_enabled лежит в group_vars/all и наследуется всеми
+        # хостами, но пороговое хранилище — свойство пары ENTRY/EXIT: доли и
+        # peer-списки задаются только в их group_vars (docs/front-relay.md).
+        "runtime_secrets_enabled": False,
         "front_relay_enabled": True,
         "front_origin_domain": front_origin_domain,
         "front_certbot_email": front_certbot_email,

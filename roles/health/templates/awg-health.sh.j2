@@ -296,19 +296,24 @@ reality_ru_failover_synced() {
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+# Всё в этом блоке — артефакты ролей amneziawg/security/operations, которые
+# к FRONT не применяются (docs/front-relay.md, "Известные ограничения"):
+# модуля AmneziaWG, sysctl-профиля, journald/coredump/wtmp-политики и
+# таймера аудита там нет, поэтому на FRONT эти проверки не имеют смысла и
+# всегда падали бы, а health запускается с --strict прямо во время deploy.
 check 'модуль AmneziaWG' modprobe -n amneziawg
 check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
 check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
 check 'UFW активен' ufw_active
-{% if awg_node_role in ['entry', 'exit'] %}
 check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
-{% endif %}
 check 'журналирование UFW отключено' ufw_logging_is_disabled
 check 'systemd journal хранится только в RAM' journald_is_volatile
 check 'постоянный rsyslog отключён' rsyslog_is_disabled
 check 'coredump не сохраняются' coredump_storage_is_disabled
 check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+{% endif %}
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
     ufw_interserver_restricted \
@@ -332,6 +337,7 @@ check 'SSH активен' systemctl is-active --quiet ssh.service
 {% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
 check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
 check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
@@ -343,6 +349,7 @@ if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
 else
     check 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
 fi
+{% endif %}
 {% endif %}
 
 {% if awg_node_role == 'entry' %}
@@ -548,9 +555,14 @@ check 'рекурсивный DNS EXIT сервера активен' systemctl 
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
 {% endif %}
 {% elif awg_node_role == 'front' %}
-front_reality_connected_to_entry() {
-    ss -H -tn state established "( dport = :{{ front_entry_reality_port }} )" |
-        grep -Fq " {{ front_entry_address }}:{{ front_entry_reality_port }}"
+# Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво — только
+# когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
+# поэтому проверка established-соединения всегда падала бы, а health
+# запускается с --strict и заблокировал бы установку. Проверяем то, что
+# обязано быть верно всегда: reality-порт ENTRY доступен с FRONT.
+front_entry_reality_reachable() {
+    timeout 5 bash -c \
+        'exec 3<>/dev/tcp/{{ front_entry_address }}/{{ front_entry_reality_port }}'
 }
 
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
@@ -558,7 +570,7 @@ check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.se
 check 'синтаксис Nginx FRONT-релея' nginx -t
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
-check 'исходящее REALITY-соединение FRONT к ENTRY установлено' front_reality_connected_to_entry
+check 'REALITY-порт ENTRY доступен с FRONT' front_entry_reality_reachable
 {% endif %}
 
 if [[ "$failures" -eq 0 ]]; then

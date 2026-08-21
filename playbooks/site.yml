@@ -543,6 +543,11 @@
         - awg_adoption_mode == 'apply'
         - entry_dns_default_via_exit | default(false) | bool
 
+# Пороговое (Shamir 2-of-N) хранилище — свойство пары ENTRY/EXIT: доли,
+# индексы и peer-списки задаются только в group_vars entry/exit, а на FRONT
+# нет ни ключей AmneziaWG, ни доли (docs/front-relay.md). Флаг
+# runtime_secrets_enabled лежит в group_vars/all, поэтому FRONT наследует
+# его как true — отсюда явная привязка к роли узла, а не к одному флагу.
 - name: Подготовка взаимной аутентификации держателей Shamir-долей
   hosts: all
   gather_facts: false
@@ -554,6 +559,7 @@
       register: runtime_secrets_host_public_key_file
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
     - name: Сохранение проверенного host key только в памяти Ansible
@@ -564,6 +570,7 @@
       no_log: true
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Шифрование постоянных секретов и перенос открытых данных в tmpfs
@@ -574,6 +581,7 @@
     - role: runtime_secrets
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Фиксация контрольных сумм управляемой конфигурации
