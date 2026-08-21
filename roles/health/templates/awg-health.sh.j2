@@ -111,7 +111,7 @@ ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
 
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
 managed_admin_is_ready() {
     id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
         id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
@@ -175,6 +175,7 @@ ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
 
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
@@ -191,6 +192,7 @@ ufw_matches_managed_snapshot() {
     actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     [[ -n "$expected" && "$actual" == "$expected" ]]
 }
+{% endif %}
 
 interface_mtu_is() {
     local interface="$1" expected="$2" actual
@@ -327,7 +329,7 @@ check 'состояние Fail2Ban хранится только в RAM' fail2ba
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
 check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
 {% if runtime_secrets_enabled | default(false) | bool %}
@@ -335,7 +337,7 @@ check 'пороговое хранилище 2-of-N открыто и аутен
 check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
-{% if awg_telegram_monitor_enabled | bool %}
+{% if awg_telegram_monitor_enabled | default(false) | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
     printf 'OK   запуск мониторинга Telegram отложен до финальной проверки\n'
 else
