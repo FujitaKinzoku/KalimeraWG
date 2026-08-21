@@ -148,6 +148,15 @@
     - front_relay_enabled | default(false) | bool
     - not front_origin_cert_file.stat.exists
 
+- name: "Создание: каталог кеша пакетов"
+  ansible.builtin.file:
+    path: "{{ front_xray_package_cache | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: front_relay_enabled | default(false) | bool
+
 - name: "Скачивание: закреплённый релиз Xray-core"
   ansible.builtin.get_url:
     url: "{{ front_xray_packages[ansible_architecture].url }}"
