@@ -39,6 +39,22 @@ front_xhttp_listen_port: 8080
 # ("uplinkHTTPMethod can be GET only in packet-up mode"), поэтому GET
 # подставляется в конфигурацию только для packet-up.
 front_xhttp_mode: packet-up
+
+# Flow VLESS на хопе FRONT -> ENTRY.
+#
+# В Xray "xtls-rprx-vision" ПЕРЕХВАТЫВАЕТ UDP/443 (QUIC), чтобы браузер на
+# самом клиенте откатился на обычный HTTPS. Для клиента, стоящего прямо на
+# устройстве, это безвредно — приложение сразу видит отказ и переключается
+# на TCP. Но FRONT стоит посередине: телефон отправляет QUIC, перехват
+# происходит на FRONT, и до приложения отказ не доходит — оно ждёт
+# таймаута. Именно так ломается воспроизведение YouTube при работающих
+# Telegram и обычных сайтах.
+#
+# "xtls-rprx-vision-udp443" — то же самое, но без перехвата UDP/443, и
+# именно ему соответствует "xtls-rprx-vision" в sing-box (ENTRY): там
+# UDP/443 не блокируется. То есть это значение приводит поведение Xray в
+# соответствие с тем, что уже настроено на стороне ENTRY.
+front_reality_flow: xtls-rprx-vision-udp443
 # Путь VLESS+XHTTP на CDN — намеренно не дефолтный "/api/stream" при
 # развёртывании, чтобы не давать лёгкий fingerprint по общеизвестному пути
 # (переопределяется в group_vars/front.yml).

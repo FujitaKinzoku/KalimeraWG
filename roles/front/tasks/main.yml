@@ -8,6 +8,7 @@
       - front_certbot_email | length > 0
       - front_xhttp_path is match('^/[A-Za-z0-9/_-]+$')
       - front_xhttp_mode in ['packet-up', 'stream-up', 'stream-one', 'auto']
+      - front_reality_flow in ['xtls-rprx-vision-udp443', 'xtls-rprx-vision']
       - ansible_architecture in front_xray_packages
       - front_xray_packages[ansible_architecture].url is match('^https://github.com/XTLS/Xray-core/releases/download/')
       - front_xray_packages[ansible_architecture].checksum is match('^sha256:[0-9a-f]{64}$')
