@@ -18,9 +18,12 @@ server {
 {% if front_cert_present %}
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # Ubuntu 24.04 ставит из apt nginx 1.24.0 — отдельная директива
+    # "http2 on;" появилась только в 1.25.1, на 1.24.0 это "unknown
+    # directive". Совмещённый синтаксис "listen ... ssl http2;" работает
+    # на обеих версиях (устарел в новых, но не удалён).
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name {{ front_origin_domain }};
 
     ssl_certificate {{ front_origin_cert_path }};
