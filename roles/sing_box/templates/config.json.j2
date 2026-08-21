@@ -36,7 +36,12 @@
         {
           "uuid": "{{ reality_fallback_client_uuid }}",
           "flow": "xtls-rprx-vision"
-        }
+        }{% if front_relay_enabled | default(false) | bool %},
+        {
+          "uuid": "{{ reality_fallback_front_client_uuid }}",
+          "flow": "xtls-rprx-vision",
+          "name": "front-relay"
+        }{% endif %}
       ],
       "tls": {
         "enabled": true,

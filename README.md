@@ -124,6 +124,8 @@ ENTRY. Клиентский и межсерверный каналы испол�
 | Российский residential/mobile IP | SOAX или другой SOCKS5 |
 | Максимальная скорость клиента | профиль `performance` |
 | Уведомления об отказах | Telegram-мониторинг |
+| AmneziaWG заблокирован по фингерпринту UDP | VLESS+REALITY (`reality_fallback_enabled`) |
+| Строгий режим белых списков на мобильном интернете | FRONT-релей через Yandex Cloud CDN, [docs/front-relay.md](docs/front-relay.md) |
 
 ## Маршрутизация и DNS
 
@@ -223,6 +225,8 @@ vpn-user delete phone
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Домены | `ru-domain`, `se-domain`, `entry-domain` |
 | RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
+| REALITY | `reality-dest-switch status\|list\|set\|reset` |
+| FRONT-релей | `./deploy --resume --enable-front`, [docs/front-relay.md](docs/front-relay.md) |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 

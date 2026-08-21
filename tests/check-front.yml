@@ -1,0 +1,156 @@
+---
+- name: Проверка конфигурации FRONT-релея закреплённой версией Xray-core
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    front_test_root: /tmp/awg-front-validation
+
+  tasks:
+    - name: Загрузка безопасных примерных переменных FRONT
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/front/defaults/main.yml"
+
+    - name: Проверка закреплённого артефакта и конфигурации Xray-core
+      block:
+        - name: Создание изолированного каталога проверки FRONT
+          ansible.builtin.file:
+            path: "{{ front_test_root }}"
+            state: directory
+            mode: "0700"
+
+        - name: Загрузка официального релиза Xray-core с проверкой checksum
+          ansible.builtin.get_url:
+            url: "{{ front_xray_packages[ansible_architecture].url }}"
+            dest: "{{ front_test_root }}/xray.zip"
+            checksum: "{{ front_xray_packages[ansible_architecture].checksum }}"
+            mode: "0600"
+
+        - name: Распаковка релиза Xray-core
+          ansible.builtin.unarchive:
+            src: "{{ front_test_root }}/xray.zip"
+            dest: "{{ front_test_root }}"
+            remote_src: true
+
+        - name: Права на исполнение бинарника Xray-core
+          ansible.builtin.file:
+            path: "{{ front_test_root }}/xray"
+            mode: "0755"
+
+        # Тестовые REALITY-факты ENTRY генерируются закреплённым sing-box, а не
+        # хранятся в репозитории литералом — та же практика, что в
+        # tests/check-sing-box.yml, без ложных срабатываний check-secrets.sh.
+        - name: "Проверка: генерация тестовой ключевой пары REALITY (ENTRY)"
+          ansible.builtin.command:
+            argv:
+              - "{{ front_test_root }}/xray"
+              - uuid
+          register: front_test_entry_client_uuid
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка: генерация второго тестового uuid (front-relay ENTRY)"
+          ansible.builtin.command:
+            argv:
+              - "{{ front_test_root }}/xray"
+              - uuid
+          register: front_test_entry_front_uuid
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка: генерация тестовой пары X25519 (заглушка REALITY publicKey/shortId)"
+          ansible.builtin.command:
+            argv:
+              - "{{ front_test_root }}/xray"
+              - x25519
+          register: front_test_entry_keypair
+          changed_when: false
+          no_log: true
+
+        # Вывод "xray x25519" в v26 — "Password (PublicKey): <значение>" (в
+        # более старых версиях был просто "Public key:") — regex без якоря
+        # на конкретную скобочную часть устойчив к обоим вариантам метки.
+        - name: "Проверка: разбор тестового материала ENTRY"
+          ansible.builtin.set_fact:
+            front_test_entry_public_key: >-
+              {{ front_test_entry_keypair.stdout
+                 | regex_search('Password[^:]*:\s*(\S+)', '\1')
+                 | first }}
+          no_log: true
+
+        # front_entry_* — простые факты (не groups/hostvars, это служебные
+        # переменные Ansible, их нельзя подменить через vars: в задаче) —
+        # тот же набор, что roles/front/tasks/main.yml вычисляет один раз
+        # через set_fact из hostvars ENTRY перед рендерингом обоих шаблонов.
+        - name: Рендер тестовой конфигурации Xray-core FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/front/templates/xray-config.json.j2"
+            dest: "{{ front_test_root }}/config.json"
+            mode: "0600"
+          vars:
+            front_xhttp_listen_port: 8080
+            front_xhttp_path: /api/stream
+            front_entry_address: 198.51.100.10
+            front_entry_reality_port: 443
+            front_entry_reality_dest: yandex.ru
+            front_entry_reality_client_uuid: "{{ front_test_entry_client_uuid.stdout | trim }}"
+            front_entry_reality_front_client_uuid: "{{ front_test_entry_front_uuid.stdout | trim }}"
+            front_entry_reality_public_key: "{{ front_test_entry_public_key }}"
+            front_entry_reality_short_id: "0011223344556677"
+          no_log: true
+
+        - name: Семантическая проверка конфигурации Xray-core закреплённым бинарником
+          ansible.builtin.command:
+            argv:
+              - "{{ front_test_root }}/xray"
+              - run
+              - -test
+              - -c
+              - "{{ front_test_root }}/config.json"
+          changed_when: false
+
+        - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком)
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/front/templates/nginx-front.conf.j2"
+            dest: "{{ front_test_root }}/nginx-front.conf"
+            mode: "0644"
+          vars:
+            front_cert_present: true
+            front_origin_domain: origin.example.invalid
+            front_origin_cert_path: "{{ front_test_root }}/fake-fullchain.pem"
+            front_origin_key_path: "{{ front_test_root }}/fake-privkey.pem"
+            front_xhttp_listen_port: 8080
+            front_xhttp_path: /api/stream
+
+        - name: Проверка синтаксиса Nginx, если бинарник доступен в CI
+          ansible.builtin.command:
+            argv:
+              - nginx
+              - -t
+              - -c
+              - "{{ front_test_root }}/nginx-front.conf"
+          register: front_test_nginx_syntax
+          changed_when: false
+          failed_when: false
+
+        - name: Отчёт о проверке синтаксиса Nginx
+          ansible.builtin.debug:
+            msg: >-
+              {{ 'nginx недоступен в этом окружении — синтаксис не проверен'
+                 if front_test_nginx_syntax.rc is undefined or front_test_nginx_syntax.rc == 127
+                 else front_test_nginx_syntax.stderr }}
+
+        - name: Проверка отсутствия синтаксических ошибок Nginx (если бинарник был доступен)
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - front_test_nginx_syntax.rc is undefined or front_test_nginx_syntax.rc in [0, 127]
+            fail_msg: "roles/front/templates/nginx-front.conf.j2 рендерит невалидный конфиг Nginx"
+
+      always:
+        - name: Удаление изолированного каталога проверки FRONT
+          ansible.builtin.file:
+            path: "{{ front_test_root }}"
+            state: absent
+          changed_when: false

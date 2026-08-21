@@ -1,0 +1,59 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": {{ front_xhttp_listen_port }},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "{{ front_entry_reality_client_uuid }}"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "{{ front_xhttp_path }}",
+          "mode": "packet-up",
+          "uplinkHTTPMethod": "GET"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-entry",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "{{ front_entry_address }}",
+            "port": {{ front_entry_reality_port }},
+            "users": [
+              {
+                "id": "{{ front_entry_reality_front_client_uuid }}",
+                "flow": "xtls-rprx-vision",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "fingerprint": "firefox",
+          "serverName": "{{ front_entry_reality_dest }}",
+          "publicKey": "{{ front_entry_reality_public_key }}",
+          "shortId": "{{ front_entry_reality_short_id }}"
+        }
+      }
+    }
+  ]
+}

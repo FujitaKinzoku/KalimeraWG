@@ -1,0 +1,44 @@
+---
+# FRONT: CDN-фронтированный VLESS+XHTTP релей на Xray-core, авторизуется на
+# ENTRY как обычный REALITY-клиент (см. docs/front-relay.md). Выключено по
+# умолчанию — роль не создаёт файлов/сервисов, пока не включено явно через
+# ./deploy --enable-front.
+front_relay_enabled: false
+
+front_xray_service_name: xray.service
+front_xray_binary_path: /usr/local/bin/xray
+front_xray_package_cache: /var/cache/ansible/xray.zip
+front_xray_config_path: /usr/local/etc/xray/config.json
+front_xray_state_dir: /usr/local/etc/xray
+
+# Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по
+# архитектуре — тот же паттерн, что entry_sing_box_packages в roles/sing_box.
+# Xray-core не публикует .deb — только сырой архив с бинарником, поэтому
+# устанавливается вручную (unzip + install), не через apt.
+front_xray_version: v26.3.27
+front_xray_packages:
+  x86_64:
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+    checksum: "sha256:23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+  aarch64:
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-arm64-v8a.zip"
+    checksum: "sha256:4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+
+# Origin-домен, на который указывает A-запись FRONT и CNAME CDN-ресурса
+# (настраивается вручную вне Ansible — см. docs/front-relay.md). Обязателен,
+# если front_relay_enabled: true.
+front_origin_domain: ""
+front_certbot_email: ""
+
+front_xhttp_listen_port: 8080
+# Путь VLESS+XHTTP на CDN — намеренно не дефолтный "/api/stream" при
+# развёртывании, чтобы не давать лёгкий fingerprint по общеизвестному пути
+# (переопределяется в group_vars/front.yml).
+front_xhttp_path: /api/stream
+
+front_origin_cert_path: "/etc/letsencrypt/live/{{ front_origin_domain }}/fullchain.pem"
+front_origin_key_path: "/etc/letsencrypt/live/{{ front_origin_domain }}/privkey.pem"
+
+front_nginx_site_path: /etc/nginx/sites-available/front-relay.conf
+front_nginx_site_link_path: /etc/nginx/sites-enabled/front-relay.conf
+front_nginx_default_site_link_path: /etc/nginx/sites-enabled/default

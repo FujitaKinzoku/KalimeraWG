@@ -354,6 +354,38 @@
     mode: "0644"
   when: reality_fallback_enabled | default(false) | bool
 
+# Второй REALITY-клиент для FRONT-релея (roles/front, docs/front-relay.md) —
+# тот же идемпотентный паттерн generate-if-missing, что и у обычного
+# client_uuid выше. Отдельный uuid: он используется только для внутреннего
+# хопа FRONT→ENTRY, не раздаётся конечным пользователям.
+- name: "Проверка: UUID FRONT-релея REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+  register: reality_fallback_front_client_uuid_file
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Генерация: UUID FRONT-релея REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate uuid > {{ reality_fallback_front_client_uuid_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+    - not reality_fallback_front_client_uuid_file.stat.exists
+
+- name: "Ограничение прав: UUID FRONT-релея REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
 - name: "Чтение: параметры REALITY для рендеринга конфигурации"
   ansible.builtin.slurp:
     path: "{{ item }}"
@@ -361,6 +393,7 @@
     - "{{ reality_fallback_private_key_path }}"
     - "{{ reality_fallback_short_id_path }}"
     - "{{ reality_fallback_client_uuid_path }}"
+    - "{{ reality_fallback_state_dir }}/public.key"
   register: reality_fallback_material_raw
   no_log: true
   when: reality_fallback_enabled | default(false) | bool
@@ -376,8 +409,33 @@
     reality_fallback_client_uuid: >-
       {{ (reality_fallback_material_raw.results[2].content | b64decode | trim)
          if reality_fallback_enabled | default(false) | bool else '' }}
+    # Публичный ключ читается из уже сохранённого public.key (а не из вывода
+    # команды генерации), потому что задача генерации выполняется только
+    # один раз — на всех последующих запусках reality_fallback_keypair_output
+    # не заполнен, а public.key на диске присутствует всегда.
+    reality_fallback_public_key: >-
+      {{ (reality_fallback_material_raw.results[3].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
   no_log: true
   when: reality_fallback_enabled | default(false) | bool
+
+- name: "Чтение: UUID FRONT-релея REALITY для рендеринга конфигурации"
+  ansible.builtin.slurp:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+  register: reality_fallback_front_client_uuid_raw
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Разбор: UUID FRONT-релея REALITY для рендеринга конфигурации"
+  ansible.builtin.set_fact:
+    reality_fallback_front_client_uuid: >-
+      {{ reality_fallback_front_client_uuid_raw.content | b64decode | trim }}
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
 
 # Реальное содержимое этих rule-set файлов формируют domain-admin.sh.j2
 # (ru-domain/se-domain) и awg-ru-zone-update.sh.j2 (статический список RU

@@ -36,3 +36,12 @@ reality_fallback_server_names:
   - "{{ reality_fallback_dest }}"
 reality_fallback_ru_rule_set_path: /etc/sing-box/reality/ru-domains.json
 reality_fallback_ru_zone_rule_set_path: /etc/sing-box/reality/ru-zone.json
+
+# Второй REALITY-клиент, зарезервированный за FRONT-релеем (roles/front) —
+# CDN-фронтированный VLESS+XHTTP на отдельной VPS, который сам подключается
+# сюда как обычный REALITY-клиент, чтобы отдать клиентам путь, устойчивый к
+# режиму белых списков (см. docs/front-relay.md). Требует reality_fallback_enabled.
+# Отдельный uuid — не для распространения конечным пользователям, только для
+# внутреннего хопа FRONT→ENTRY.
+front_relay_enabled: false
+reality_fallback_front_client_uuid_path: "{{ reality_fallback_state_dir }}/front_client_uuid"

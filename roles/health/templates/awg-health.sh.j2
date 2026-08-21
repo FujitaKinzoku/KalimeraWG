@@ -299,7 +299,9 @@ check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
 check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
 check 'UFW активен' ufw_active
+{% if awg_node_role in ['entry', 'exit'] %}
 check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+{% endif %}
 check 'журналирование UFW отключено' ufw_logging_is_disabled
 check 'systemd journal хранится только в RAM' journald_is_volatile
 check 'постоянный rsyslog отключён' rsyslog_is_disabled
@@ -508,6 +510,9 @@ check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {
 check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
 check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
 check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }}
+{% if front_relay_enabled | default(false) | bool %}
+check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
+{% endif %}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}
@@ -540,6 +545,18 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
 {% endif %}
+{% elif awg_node_role == 'front' %}
+front_reality_connected_to_entry() {
+    ss -H -tn state established "( dport = :{{ front_entry_reality_port }} )" |
+        grep -Fq " {{ front_entry_address }}:{{ front_entry_reality_port }}"
+}
+
+check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
+check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
+check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
+    openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+check 'исходящее REALITY-соединение FRONT к ENTRY установлено' front_reality_connected_to_entry
 {% endif %}
 
 if [[ "$failures" -eq 0 ]]; then
