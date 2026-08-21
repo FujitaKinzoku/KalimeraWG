@@ -44,9 +44,7 @@
   ansible.builtin.set_fact:
     front_entry_address: "{{ hostvars[groups['entry'][0]].ansible_host }}"
     front_entry_reality_port: "{{ hostvars[groups['entry'][0]].reality_fallback_port }}"
-    front_entry_reality_dest: >-
-      {{ hostvars[groups['entry'][0]].reality_fallback_effective_dest
-         | default(hostvars[groups['entry'][0]].reality_fallback_dest) }}
+    front_entry_reality_dest: "{{ hostvars[groups['entry'][0]].reality_fallback_effective_dest }}"
     front_entry_reality_public_key: "{{ hostvars[groups['entry'][0]].reality_fallback_public_key }}"
     front_entry_reality_short_id: "{{ hostvars[groups['entry'][0]].reality_fallback_short_id }}"
     front_entry_reality_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_client_uuid }}"

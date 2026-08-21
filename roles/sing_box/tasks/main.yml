@@ -148,6 +148,11 @@
       {{ sing_box_runtime_reality_override.dest | default(reality_fallback_dest) }}
     reality_fallback_effective_dest_port: >-
       {{ sing_box_runtime_reality_override.dest_port | default(reality_fallback_dest_port) | int }}
+    # reality_fallback_port сам по себе — дефолт роли (roles/sing_box/defaults),
+    # он не виден через hostvars с другого хоста (roles/front читает его
+    # именно так, см. docs/front-relay.md); переприсваивание через set_fact
+    # публикует текущее значение как факт.
+    reality_fallback_port: "{{ reality_fallback_port }}"
   when: reality_fallback_enabled | default(false) | bool
 
 - name: "Создание: прокси sing-box — этап 3"
