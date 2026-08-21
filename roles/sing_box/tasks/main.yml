@@ -327,10 +327,19 @@
     - reality_fallback_enabled | default(false) | bool
     - not reality_fallback_keypair_file.stat.exists
 
+# Тот же стиль YAML-блока, что и у закрытого ключа выше. Раньше здесь была
+# строка в двойных кавычках с "\n" на конце, и на живом сервере в файл
+# попадали два литеральных символа — обратный слеш и n. Для закрытого ключа
+# этого не происходило, потому что он пишется через >-. Испорченный
+# публичный ключ уезжал в конфигурацию Xray на FRONT, где в JSON "\n"
+# превращается в перевод строки, и хоп FRONT->ENTRY не мог установиться.
 - name: "Сохранение: публичный ключ REALITY"
   ansible.builtin.copy:
     dest: "{{ reality_fallback_state_dir }}/public.key"
-    content: "{{ (reality_fallback_keypair_output.stdout_lines | select('match', '^PublicKey:') | first).split(':')[1] | trim }}\n"
+    content: >-
+      {{ (reality_fallback_keypair_output.stdout_lines
+          | select('match', '^PublicKey:')
+          | first).split(':')[1] | trim }}
     owner: root
     group: root
     mode: "0644"
@@ -443,10 +452,27 @@
     # команды генерации), потому что задача генерации выполняется только
     # один раз — на всех последующих запусках reality_fallback_keypair_output
     # не заполнен, а public.key на диске присутствует всегда.
+    # split('\\')[0] отрезает мусор, оставшийся от прежней записи файла: там
+    # в конец попадали два литеральных символа — обратный слеш и n, а trim
+    # такое не убирает. Ключ в base64url обратных слешей не содержит, поэтому
+    # обрезка безопасна и на уже развёрнутых серверах чинит файл без
+    # перегенерации ключевой пары.
     reality_fallback_public_key: >-
-      {{ (reality_fallback_material_raw.results[3].content | b64decode | trim)
+      {{ ((reality_fallback_material_raw.results[3].content | b64decode).split('\\')[0] | trim)
          if reality_fallback_enabled | default(false) | bool else '' }}
   no_log: true
+  when: reality_fallback_enabled | default(false) | bool
+
+# Файл переписывается уже очищенным значением: его читают не только роли, но
+# и оператор при сборке клиентских ссылок.
+- name: "Нормализация: файл публичного ключа REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_state_dir }}/public.key"
+    content: >-
+      {{ reality_fallback_public_key }}
+    owner: root
+    group: root
+    mode: "0644"
   when: reality_fallback_enabled | default(false) | bool
 
 - name: "Чтение: UUID FRONT-релея REALITY для рендеринга конфигурации"
