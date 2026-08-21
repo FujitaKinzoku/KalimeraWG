@@ -123,13 +123,47 @@
             front_xhttp_listen_port: 8080
             front_xhttp_path: /api/stream
 
+        - name: Генерация одноразового самоподписанного сертификата для проверки синтаксиса
+          ansible.builtin.command:
+            argv:
+              - openssl
+              - req
+              - -x509
+              - -newkey
+              - rsa:2048
+              - -keyout
+              - "{{ front_test_root }}/fake-privkey.pem"
+              - -out
+              - "{{ front_test_root }}/fake-fullchain.pem"
+              - -days
+              - "1"
+              - -nodes
+              - -subj
+              - /CN=origin.example.invalid
+          changed_when: false
+
+        # roles/front/templates/nginx-front.conf.j2 рендерит только фрагмент
+        # server{} (в реальном деплое подключается через sites-enabled внутри
+        # системного http{} из /etc/nginx/nginx.conf) — nginx -t -c ожидает
+        # ПОЛНЫЙ конфиг с events{}/http{}, поэтому для проверки синтаксиса
+        # оборачиваем фрагмент через include в минимальный конфиг-обёртку.
+        - name: Формирование конфига-обёртки для проверки синтаксиса Nginx
+          ansible.builtin.copy:
+            dest: "{{ front_test_root }}/nginx-wrapper.conf"
+            content: |
+              events {}
+              http {
+                  include {{ front_test_root }}/nginx-front.conf;
+              }
+            mode: "0644"
+
         - name: Проверка синтаксиса Nginx, если бинарник доступен в CI
           ansible.builtin.command:
             argv:
               - nginx
               - -t
               - -c
-              - "{{ front_test_root }}/nginx-front.conf"
+              - "{{ front_test_root }}/nginx-wrapper.conf"
           register: front_test_nginx_syntax
           changed_when: false
           failed_when: false
