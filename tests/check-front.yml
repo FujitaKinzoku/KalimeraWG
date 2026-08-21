@@ -12,6 +12,20 @@
       ansible.builtin.include_vars:
         file: "{{ playbook_dir }}/../roles/front/defaults/main.yml"
 
+    # include_vars имеет более высокий приоритет, чем vars: на уровне
+    # отдельной задачи (та же ловушка, что уже чинили в check-sing-box.yml
+    # для reality_fallback_enabled) — front_origin_domain из defaults пустой,
+    # и любой последующий vars: front_origin_domain: ... в задачах ниже
+    # молча игнорировался бы. set_fact стоит выше include_vars и переопределяет
+    # его для всех последующих задач без необходимости повторять в каждой.
+    - name: Установка тестовых значений FRONT, переопределяющих defaults
+      ansible.builtin.set_fact:
+        front_origin_domain: origin.example.invalid
+        front_origin_cert_path: "{{ front_test_root_path }}/fake-fullchain.pem"
+        front_origin_key_path: "{{ front_test_root_path }}/fake-privkey.pem"
+      vars:
+        front_test_root_path: /tmp/awg-front-validation
+
     - name: Проверка закреплённого артефакта и конфигурации Xray-core
       block:
         - name: Создание изолированного каталога проверки FRONT
@@ -110,6 +124,10 @@
               - "{{ front_test_root }}/config.json"
           changed_when: false
 
+        # front_origin_domain/front_origin_cert_path/front_origin_key_path
+        # приходят из set_fact выше (тестовые значения), не отсюда — задавать
+        # их здесь через vars: бессмысленно, include_vars/set_fact в этом
+        # плейбуке имеют более высокий приоритет, чем vars: отдельной задачи.
         - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком)
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/front/templates/nginx-front.conf.j2"
@@ -117,9 +135,6 @@
             mode: "0644"
           vars:
             front_cert_present: true
-            front_origin_domain: origin.example.invalid
-            front_origin_cert_path: "{{ front_test_root }}/fake-fullchain.pem"
-            front_origin_key_path: "{{ front_test_root }}/fake-privkey.pem"
             front_xhttp_listen_port: 8080
             front_xhttp_path: /api/stream
 
