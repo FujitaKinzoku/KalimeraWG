@@ -2,7 +2,10 @@
 enabled = true
 backend = systemd
 mode = aggressive
-port = {{ ssh_listen_port }}
+# ssh_listen_port задаёт только roles/security (SSH-хардening) — на FRONT
+# эта роль не применяется, порт SSH там не меняется, поэтому используем
+# фактический ansible_port.
+port = {{ ssh_listen_port | default(ansible_port) | default(22) }}
 banaction = ufw
 usedns = no
 ignoreip = 127.0.0.1/8 ::1
