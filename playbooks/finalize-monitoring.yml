@@ -1,6 +1,13 @@
 ---
+# Telegram-мониторинг целиком принадлежит roles/operations (таймер
+# awg-telegram-monitor.timer), которая применяется только к ENTRY и EXIT —
+# на FRONT этого юнита нет, и "Включение Telegram-мониторинга" упало бы там
+# даже при выключенном мониторинге, потому что у этой задачи нет условия и
+# systemd не находит юнит. Флаг awg_telegram_monitor_enabled лежит в
+# group_vars/all, то есть FRONT его наследует, — поэтому ограничиваем
+# область самим плеем, а не флагом.
 - name: Запуск Telegram-мониторинга после завершения настройки
-  hosts: all
+  hosts: entry:exit
   gather_facts: false
   any_errors_fatal: true
   vars:
