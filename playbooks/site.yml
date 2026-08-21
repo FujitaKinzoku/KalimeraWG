@@ -356,7 +356,7 @@
         entry_legacy_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1280] | min }}"
         entry_mobile_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
       when:
-        - awg_node_role == 'entry'
+        - awg_node_role | default('') == 'entry'
         - awg_adoption_mode == 'apply'
         - awg3_transit_enabled | default(false) | bool
 
@@ -581,11 +581,15 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    # Манифест ставит roles/operations, которая на FRONT не применяется
+    # (см. "Настройка FRONT сервера" выше) — бинарника там нет.
     - name: Создание манифеста после полного применения ролей
       ansible.builtin.command:
         argv: [/usr/local/sbin/awg-managed-integrity, seal]
       changed_when: true
-      when: awg_adoption_mode == 'apply'
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
 
 - name: Восстановление автоматических обновлений
   hosts: all

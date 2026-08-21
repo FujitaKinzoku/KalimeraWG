@@ -512,6 +512,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         yaml_write(entry_path, entry_vars)
 
     front_vars = {
+        "awg_node_role": "front",
         "front_relay_enabled": True,
         "front_origin_domain": front_origin_domain,
         "front_certbot_email": front_certbot_email,
