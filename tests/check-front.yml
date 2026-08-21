@@ -97,32 +97,20 @@
         # переменные Ansible, их нельзя подменить через vars: в задаче) —
         # тот же набор, что roles/front/tasks/main.yml вычисляет один раз
         # через set_fact из hostvars ENTRY перед рендерингом обоих шаблонов.
-        - name: Рендер тестовой конфигурации Xray-core FRONT
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../roles/front/templates/xray-config.json.j2"
-            dest: "{{ front_test_root }}/config.json"
-            mode: "0600"
-          vars:
-            front_xhttp_listen_port: 8080
-            front_xhttp_path: /api/stream
-            front_entry_address: 198.51.100.10
-            front_entry_reality_port: 443
-            front_entry_reality_dest: yandex.ru
-            front_entry_reality_client_uuid: "{{ front_test_entry_client_uuid.stdout | trim }}"
-            front_entry_reality_front_client_uuid: "{{ front_test_entry_front_uuid.stdout | trim }}"
-            front_entry_reality_public_key: "{{ front_test_entry_public_key }}"
-            front_entry_reality_short_id: "0011223344556677"
-          no_log: true
-
-        - name: Семантическая проверка конфигурации Xray-core закреплённым бинарником
-          ansible.builtin.command:
-            argv:
-              - "{{ front_test_root }}/xray"
-              - run
-              - -test
-              - -c
-              - "{{ front_test_root }}/config.json"
-          changed_when: false
+        #
+        # Проверяются ВСЕ комбинации, которые допускает assert роли, а не
+        # только значения по умолчанию: роль разрешает переключать
+        # front_xhttp_mode и front_reality_flow через inventory, и
+        # недопустимое сочетание должно падать здесь, а не на живом сервере.
+        - name: Проверка конфигурации Xray-core во всех допустимых режимах
+          ansible.builtin.include_tasks: tasks/render-front-xray-fixture.yml
+          loop: >-
+            {{ ['packet-up', 'stream-up', 'stream-one', 'auto']
+               | product(['xtls-rprx-vision-udp443', 'xtls-rprx-vision'])
+               | list }}
+          loop_control:
+            loop_var: front_case
+            label: "{{ front_case.0 }}/{{ front_case.1 }}"
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
         # приходят из set_fact выше (тестовые значения), не отсюда — задавать

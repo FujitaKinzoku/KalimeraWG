@@ -1,3 +1,15 @@
+{% if front_cert_present %}
+# Пустой заголовок Connection сам по себе keepalive до Xray не включает:
+# nginx переиспользует соединения с upstream только при наличии директивы
+# keepalive в блоке upstream. Без этого в режиме packet-up, где КАЖДЫЙ
+# пакет аплинка — отдельный HTTP-запрос, на каждый пакет открывалось бы
+# новое TCP-соединение к Xray.
+upstream front_xhttp_backend {
+    server 127.0.0.1:{{ front_xhttp_listen_port }};
+    keepalive 64;
+}
+
+{% endif %}
 server {
     listen 80;
     listen [::]:80;
@@ -32,7 +44,7 @@ server {
     ssl_prefer_server_ciphers off;
 
     location {{ front_xhttp_path }} {
-        proxy_pass http://127.0.0.1:{{ front_xhttp_listen_port }};
+        proxy_pass http://front_xhttp_backend;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -49,8 +61,12 @@ server {
         proxy_set_header Connection "";
         proxy_socket_keepalive on;
 
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
+        # Даунлинк XHTTP — долгоживущий поток, который при простое телефона
+        # (экран выключен) молчит дольше пяти минут; на 300s nginx рвал бы
+        # его и вынуждал переподключаться. Час — то же значение, что в
+        # эталонном примере nginx у XTLS.
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
         client_max_body_size 0;
     }
 
