@@ -19,8 +19,8 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "{{ front_xhttp_path }}",
-          "mode": "auto",
-          "uplinkHTTPMethod": "GET"
+          "mode": "{{ front_xhttp_mode }}"{% if front_xhttp_mode == 'packet-up' %},
+          "uplinkHTTPMethod": "GET"{% endif %}
         }
       }
     }

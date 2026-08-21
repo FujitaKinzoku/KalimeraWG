@@ -31,6 +31,14 @@ front_origin_domain: ""
 front_certbot_email: ""
 
 front_xhttp_listen_port: 8080
+# Режим загрузки XHTTP: packet-up | stream-up | stream-one | auto.
+# packet-up — самый совместимый с CDN (аплинк идёт обычными GET-запросами,
+# которые CDN гарантированно пропускает), но и самый накладный. Остальные
+# режимы быстрее, однако требуют, чтобы CDN пропускал POST и не буферизовал
+# тело запроса. Сам Xray запрещает "uplinkHTTPMethod": "GET" вне packet-up
+# ("uplinkHTTPMethod can be GET only in packet-up mode"), поэтому GET
+# подставляется в конфигурацию только для packet-up.
+front_xhttp_mode: packet-up
 # Путь VLESS+XHTTP на CDN — намеренно не дефолтный "/api/stream" при
 # развёртывании, чтобы не давать лёгкий fingerprint по общеизвестному пути
 # (переопределяется в group_vars/front.yml).
