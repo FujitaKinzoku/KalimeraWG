@@ -201,20 +201,45 @@
       RU-ветки маршрутизации, отдельного механизма для неё нет.
   when: reality_fallback_enabled | default(false) | bool
 
-# Fail-open REALITY RU-ветки использует тот же флаг, что и ядерный каскад
-# (awg-ru-proxy-watch), чтобы не было двух независимых источников истины о
-# состоянии SOAX. Если SOAX уже недоступен на момент deploy — сразу рендерим
-# direct-entry, не дожидаясь первого срабатывания watchdog.
+# Fail-open REALITY RU-ветки использует те же флаги, что и ядерный каскад
+# (awg-ru-proxy-watch и ручное отключение), чтобы не было независимых
+# источников истины о состоянии SOAX. Если SOAX уже недоступен на момент
+# deploy — сразу рендерим direct-entry, не дожидаясь срабатывания watchdog.
 - name: "Проверка состояния fail-open RU-прокси для REALITY"
   ansible.builtin.stat:
     path: "{{ entry_ru_proxy_disabled_flag }}"
   register: sing_box_reality_ru_proxy_disabled
   when: reality_fallback_enabled | default(false) | bool
 
+- name: "Проверка ручного отключения RU-прокси для REALITY"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_manual_disabled_flag }}"
+  register: sing_box_reality_ru_proxy_manual_off
+  when: reality_fallback_enabled | default(false) | bool
+
+# Публикуется как обычный факт, чтобы FRONT-релей мог его прочитать через
+# hostvars: при ручном отключении прокси sing-box останавливается целиком и
+# REALITY-инбаунд вместе с ним, поэтому проверять доступность его порта с
+# FRONT в этом режиме бессмысленно.
+- name: "Публикация состояния запасного транспорта REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_stopped_with_proxy: >-
+      {{ sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool }}
+  when: reality_fallback_enabled | default(false) | bool
+
+# Учитываются ОБА флага. Раньше проверялся только watchdog-флаг
+# (/run/awg-ru-proxy.disabled), а ручное отключение прокси оператором ставит
+# другой (/var/lib/awg-routing/ru-proxy.manual-off). Из-за этого ядро
+# корректно переставало пользоваться SOAX, а REALITY-путь продолжал слать
+# RU-ветку в outbound ru-socks, то есть в заведомо отключённый прокси:
+# ломалось всё, что классифицировано как российское, включая зарубежные
+# сервисы на адресах кеш-узлов внутри РФ, при полностью рабочем AmneziaWG.
 - name: "Выбор действующего RU-outbound для REALITY"
   ansible.builtin.set_fact:
     reality_fallback_ru_outbound: >-
-      {{ 'direct-entry' if (sing_box_reality_ru_proxy_disabled.stat.exists | default(false))
+      {{ 'direct-entry'
+         if ((sing_box_reality_ru_proxy_disabled.stat.exists | default(false) | bool) or
+             (sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool))
          else 'ru-socks' }}
   when: reality_fallback_enabled | default(false) | bool
 

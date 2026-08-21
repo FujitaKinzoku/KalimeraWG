@@ -281,13 +281,17 @@ reality_dest_tls13() {
 }
 
 reality_ru_failover_synced() {
-    local config="$1" disabled_flag="$2" expected current
+    local config="$1" disabled_flag="$2" manual_flag="$3" expected current
     expected=ru-socks
-    [[ -e "$disabled_flag" ]] && expected=direct-entry
+    # Ручное отключение прокси оператором ставит собственный флаг, отличный от
+    # watchdog-флага; учитывать нужно оба, иначе REALITY продолжит слать
+    # RU-ветку в отключённый SOAX, пока ядро уже ходит напрямую.
+    { [[ -e "$disabled_flag" ]] || [[ -e "$manual_flag" ]]; } && expected=direct-entry
+    # Именно правило по российским подсетям, а не «первое правило с rule_set»:
+    # выше него стоит правило se-domain, ведущее в direct-exit, и по позиции
+    # проверка брала бы его.
     current="$(jq -r '
-        [.route.rules[] | select(
-            (.inbound? // []) as $in | ($in | index("reality-in")) and (.rule_set? or .domain_suffix?)
-        )][0].outbound // empty
+        [.route.rules[] | select((.rule_set? // []) | index("reality-ru-zone"))][0].outbound // empty
     ' "$config")"
     [[ "$current" == "$expected" ]]
 }
@@ -514,11 +518,24 @@ check 'правило policy routing для mark 0x2 отсутствует' rul
 check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
 {% endif %}
 {% if reality_fallback_enabled | default(false) | bool %}
-check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
 check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
 check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
 check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
-check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }}
+check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }} {{ entry_ru_proxy_manual_disabled_flag | quote }}
+{% if entry_ru_proxy_manual_disabled_flag is defined %}
+# REALITY живёт внутри того же процесса sing-box, что и российский прокси,
+# поэтому при ручном отключении прокси служба останавливается целиком и
+# запасной транспорт вместе с ней. Требовать здесь слушающий порт нельзя:
+# health запускается с --strict во время deploy и блокировал бы установку в
+# штатном для оператора режиме. Известное ограничение, см. docs/front-relay.md.
+if [[ ! -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
+    check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+else
+    printf 'OK   запасной транспорт REALITY остановлен вместе с отключённым прокси\n'
+fi
+{% else %}
+check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+{% endif %}
 {% if front_relay_enabled | default(false) | bool %}
 check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
 {% endif %}
@@ -570,7 +587,11 @@ check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.se
 check 'синтаксис Nginx FRONT-релея' nginx -t
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if front_entry_reality_stopped | default(false) | bool %}
+printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
+{% else %}
 check 'REALITY-порт ENTRY доступен с FRONT' front_entry_reality_reachable
+{% endif %}
 {% endif %}
 
 if [[ "$failures" -eq 0 ]]; then

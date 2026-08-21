@@ -59,6 +59,11 @@
     front_entry_reality_short_id: "{{ hostvars[groups['entry'][0]].reality_fallback_short_id }}"
     front_entry_reality_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_client_uuid }}"
     front_entry_reality_front_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_front_client_uuid }}"
+    # REALITY-инбаунд живёт в том же процессе sing-box, что и российский
+    # прокси; при ручном отключении прокси служба останавливается целиком, и
+    # проверять доступность её порта с FRONT в этом режиме бессмысленно.
+    front_entry_reality_stopped: >-
+      {{ hostvars[groups['entry'][0]].reality_fallback_stopped_with_proxy | default(false) | bool }}
   no_log: true
   when: front_relay_enabled | default(false) | bool
 
