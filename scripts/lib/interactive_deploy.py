@@ -518,6 +518,11 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         # peer-списки задаются только в их group_vars (docs/front-relay.md).
         "runtime_secrets_enabled": False,
         "front_relay_enabled": True,
+        # Дефолт роли ("/api/stream") — общеизвестный путь и лёгкий
+        # fingerprint; путь генерируется здесь, потому что он должен быть
+        # постоянным (входит в клиентские ссылки и правила кэширования CDN),
+        # а не пересчитываться при каждом deploy.
+        "front_xhttp_path": "/" + secrets.token_urlsafe(9),
         "front_origin_domain": front_origin_domain,
         "front_certbot_email": front_certbot_email,
     }
