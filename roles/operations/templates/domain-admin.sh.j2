@@ -167,6 +167,43 @@ if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
     systemctl restart dnsmasq.service
     changed=true
 fi
+
+{% if reality_fallback_enabled | default(false) | bool %}
+# Тот же источник (ru-domain), что и dnsmasq выше — производный rule-set для
+# запасного транспорта VLESS+REALITY. sing-box сам перечитывает локальные
+# rule-set файлы при изменении на диске (с версии 1.10.0), перезапуск не
+# нужен.
+readonly REALITY_RU_RULE_SET={{ reality_fallback_ru_rule_set_path | quote }}
+reality_tmp="$(mktemp /run/awg-domain-policy-reality.XXXXXX)"
+# Через stdin одним jq-вызовом, а не --argjson с большой shell-переменной —
+# см. аналогичный фикс "Argument list too long" в awg-ru-zone-update.sh.j2.
+sed -E '/^[[:space:]]*(#|$)/d' "$DIR/ru-domain" |
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $domains |
+        {"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}
+    ' >"$reality_tmp"
+if [[ ! -f "$REALITY_RU_RULE_SET" ]] || ! cmp --silent "$reality_tmp" "$REALITY_RU_RULE_SET"; then
+    install -m 0644 "$reality_tmp" "$REALITY_RU_RULE_SET"
+fi
+rm -f "$reality_tmp"
+
+# То же самое для se-domain. У клиентов AmneziaWG этот список работает через
+# ipset force_exit (roles/entry_routing), который проверяется раньше списка
+# российских подсетей; без производного rule-set запасной транспорт
+# VLESS+REALITY о таких исключениях не знал вовсе, и зарубежные сервисы,
+# отдающиеся с кеш-узлов внутри РФ, уходили в российский прокси.
+readonly REALITY_SE_RULE_SET={{ reality_fallback_se_rule_set_path | quote }}
+reality_se_tmp="$(mktemp /run/awg-domain-policy-reality-se.XXXXXX)"
+sed -E '/^[[:space:]]*(#|$)/d' "$DIR/se-domain" |
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $domains |
+        {"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}
+    ' >"$reality_se_tmp"
+if [[ ! -f "$REALITY_SE_RULE_SET" ]] || ! cmp --silent "$reality_se_tmp" "$REALITY_SE_RULE_SET"; then
+    install -m 0644 "$reality_se_tmp" "$REALITY_SE_RULE_SET"
+fi
+rm -f "$reality_se_tmp"
+{% endif %}
 completed=true
 
 if [[ "$action" == sync ]]; then

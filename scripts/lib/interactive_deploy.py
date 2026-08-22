@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -455,6 +456,104 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
     return entry_changed or vault_changed
 
 
+_DOMAIN_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def enable_front_profile(production: Path, vault_password: Path) -> bool:
+    """Добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) к production inventory.
+
+    В отличие от enable_mobile_profile это добавляет НОВЫЙ хост, а не просто
+    флаги существующему — требует интерактивных данных подключения. См.
+    docs/front-relay.md для ручных шагов (DNS/CDN), которые нужны отдельно.
+    """
+    hosts_path = production / "hosts.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    if not hosts_path.is_file() or not entry_path.is_file() or not vault_password.is_file():
+        fail("Для включения FRONT-релея нужны production inventory и пароль Vault")
+
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.setdefault("all", {}).setdefault("children", {})
+    if "front" in children and children["front"].get("hosts"):
+        print("FRONT-релей уже подключён к production inventory; повторное включение не требуется.")
+        return False
+
+    ui_panel(
+        "FRONT-РЕЛЕЙ: CDN-ФРОНТИРОВАННЫЙ VLESS ДЛЯ РЕЖИМА БЕЛЫХ СПИСКОВ",
+        [
+            "Отдельная VPS с Nginx+Xray-core, авторизуется на ENTRY как ещё",
+            "один REALITY-клиент. Требует УЖЕ настроенных вручную DNS",
+            "(A-запись на этот сервер) и CDN-ресурса перед сертификатом —",
+            "подробности в docs/front-relay.md.",
+        ],
+        "cyan",
+    )
+    front_host = prompt("IP-адрес или DNS-имя FRONT сервера")
+    if not front_host:
+        fail("Необходимо указать адрес FRONT сервера")
+    require_public_endpoint(front_host, "Адрес FRONT сервера")
+    # Постоянный публичный IPv4, а не front_host как есть (может быть
+    # DNS-именем) — нужен для изолированного UFW-правила на ENTRY, тем же
+    # способом, что security_interserver_peer_ipv4 для пары ENTRY/EXIT.
+    front_public_ipv4 = resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
+    front_user = prompt("Пользователь SSH FRONT сервера", "root")
+    front_port = prompt_port("Текущий SSH-порт FRONT сервера", 22)
+
+    front_origin_domain = prompt("Origin-домен FRONT (A-запись уже указывает на этот сервер)")
+    if not _DOMAIN_RE.match(front_origin_domain or ""):
+        fail("Origin-домен FRONT должен быть корректным DNS-именем")
+    front_certbot_email = prompt("E-mail для уведомлений Let's Encrypt/Certbot")
+    if not _EMAIL_RE.match(front_certbot_email or ""):
+        fail("Некорректный e-mail для Certbot")
+
+    entry_vars = load_yaml(entry_path)
+    entry_changed = not bool(entry_vars.get("front_relay_enabled", False))
+    if entry_changed:
+        entry_vars["front_relay_enabled"] = True
+        entry_vars["front_public_ipv4"] = front_public_ipv4
+        yaml_write(entry_path, entry_vars)
+
+    front_vars = {
+        "awg_node_role": "front",
+        # runtime_secrets_enabled лежит в group_vars/all и наследуется всеми
+        # хостами, но пороговое хранилище — свойство пары ENTRY/EXIT: доли и
+        # peer-списки задаются только в их group_vars (docs/front-relay.md).
+        "runtime_secrets_enabled": False,
+        "front_relay_enabled": True,
+        # Дефолт роли ("/api/stream") — общеизвестный путь и лёгкий
+        # fingerprint; путь генерируется здесь, потому что он должен быть
+        # постоянным (входит в клиентские ссылки и правила кэширования CDN),
+        # а не пересчитываться при каждом deploy.
+        "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+        "front_origin_domain": front_origin_domain,
+        "front_certbot_email": front_certbot_email,
+    }
+    yaml_write(front_path, front_vars)
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    front_host_vars: dict[str, object] = {
+        "ansible_host": front_host,
+        "ansible_user": front_user,
+        "ansible_port": front_port,
+        "ansible_become": True,
+        "ansible_ssh_private_key_file": str(ssh_private),
+    }
+    children["front"] = {"hosts": {"front-managed": front_host_vars}}
+    yaml_write(hosts_path, hosts_document)
+
+    print(
+        "Production inventory обновлён: добавлен FRONT-релей "
+        f"({front_origin_domain}); интерфейс пока не применён.\n"
+        "Перед 'deploy --resume' убедитесь, что DNS и ресурс CDN настроены "
+        "вручную (docs/front-relay.md), затем запустите:\n"
+        "  ./deploy --resume"
+    )
+    return True
+
+
 def prompt(label: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default is not None else ""
     marker = styled("◆", "cyan")
@@ -578,6 +677,30 @@ def resolve_single_public_ipv4(value: str, label: str) -> str:
     if not ipaddress.ip_address(address).is_global:
         fail(f"{label} должен быть публичным IPv4-адресом")
     return address
+
+
+def probe_reality_dest(host: str, port: int = 443, attempts: int = 3) -> bool:
+    """Проверить, что dest-сайт REALITY стабильно отвечает TLS 1.3 одним
+    и тем же сертификатом — та же логика (три пробы), что применяется
+    сервером при deploy и в reality-dest-switch."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    fingerprints: set[str] = set()
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=8) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+                    if tls_sock.version() != "TLSv1.3":
+                        return False
+                    der = tls_sock.getpeercert(binary_form=True)
+                    if not der:
+                        return False
+                    fingerprints.add(hashlib.sha256(der).hexdigest())
+        except (OSError, ssl.SSLError):
+            return False
+    return len(fingerprints) == 1
 
 
 def detect_local_public_ipv4(route_target: str) -> str:
@@ -2207,6 +2330,14 @@ def main() -> None:
         help="при --resume безопасно добавить отсутствующий mobile AWG UDP/8443",
     )
     parser.add_argument(
+        "--enable-front",
+        action="store_true",
+        help=(
+            "при --resume добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) "
+            "как отдельный хост — интерактивно запросит данные подключения"
+        ),
+    )
+    parser.add_argument(
         "--update-components",
         action="store_true",
         help=(
@@ -2219,6 +2350,8 @@ def main() -> None:
         parser.error("--mobile-i1-mode используется только вместе с --resume")
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
+    if args.enable_front and not args.resume:
+        parser.error("--enable-front используется только вместе с --resume")
     if args.update_components and not args.resume:
         parser.error("--update-components используется только вместе с --resume")
     if args.terminal_only and (
@@ -2226,6 +2359,7 @@ def main() -> None:
         or args.summary
         or args.mobile_i1_mode
         or args.enable_mobile
+        or args.enable_front
         or args.update_components
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
@@ -2273,6 +2407,8 @@ def main() -> None:
         )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
+        if args.enable_front:
+            enable_front_profile(production, vault_password)
         if args.mobile_i1_mode:
             set_mobile_i1_mode(production, args.mobile_i1_mode)
         update_saved_client_configs_cps(state_root / "clients")
@@ -2525,6 +2661,58 @@ def main() -> None:
         if bool(proxy_username) != bool(proxy_password):
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
         expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
+
+    reality_fallback_enabled = False
+    reality_fallback_dest = "yandex.ru"
+    # yandex.ru первым — RU-правдоподобный, собственная инфраструктура
+    # Yandex (не CDN), стабильно проходит preflight-проверку сертификата на
+    # живом каскаде. www.microsoft.com исключён — отдаётся через Akamai
+    # (сторонний CDN), что на практике повышало долю сорванных
+    # REALITY-хендшейков. www.debian.org сюда намеренно не включён —
+    # резолвится в несколько IP (DNS round-robin) и не проходит
+    # preflight-проверку стабильности сертификата.
+    reality_candidates = [
+        "yandex.ru", "vk.ru", "vk.com", "kinopoisk.ru",
+        "market.yandex.ru", "maps.yandex.ru", "music.yandex.ru",
+        "dzen.ru", "tinkoff.ru",
+    ]
+    if proxy_enabled:
+        ui_panel(
+            "ЗАПАСНОЙ ТРАНСПОРТ VLESS+REALITY",
+            [
+                "Опционально: маскирует ENTRY под настоящий HTTPS-сайт на случай,",
+                "если сам AmneziaWG заблокируют по фингерпринту UDP-хендшейка.",
+                "Требует уже включённый выше RU-прокси (используется как RU-ветка).",
+            ],
+            "cyan",
+        )
+        reality_fallback_enabled = prompt_bool(
+            "Включить запасной транспорт VLESS+REALITY", False
+        )
+        if reality_fallback_enabled:
+            print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
+            results = {host: probe_reality_dest(host) for host in reality_candidates}
+            ui_panel(
+                "КАНДИДАТЫ DEST-САЙТА REALITY",
+                [
+                    f"{index} · {host} [{'OK' if results[host] else 'FAIL'}]"
+                    for index, host in enumerate(reality_candidates, start=1)
+                ] + ["0 · указать свой домен"],
+                "cyan",
+            )
+            dest_choice = prompt("Номер кандидата или 0 для своего домена", "1")
+            if dest_choice == "0":
+                reality_fallback_dest = prompt("Домен маскировочного сайта (например www.example.com)")
+            elif dest_choice.isdigit() and 1 <= int(dest_choice) <= len(reality_candidates):
+                reality_fallback_dest = reality_candidates[int(dest_choice) - 1]
+            else:
+                fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
+            if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
+                fail(
+                    f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 —"
+                    " выберите другой (та же проверка также выполняется во время deploy)"
+                )
+            print(f"dest-сайт {reality_fallback_dest} проверен.")
 
     ui_section(
         5,
@@ -2931,6 +3119,8 @@ def main() -> None:
             "entry_proxy_server": proxy_host or "127.0.0.1",
             "entry_proxy_port": proxy_port or 1080,
             "entry_ru_proxy_expected_ip": expected_proxy_ip,
+            "reality_fallback_enabled": reality_fallback_enabled,
+            "reality_fallback_dest": reality_fallback_dest,
             "entry_dot_upstreams": dot_upstreams,
             "entry_dns_doh_server": doh_server,
             "entry_dns_doh_tls_name": doh_tls_name,

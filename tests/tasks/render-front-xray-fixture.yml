@@ -1,0 +1,55 @@
+---
+# include_tasks (а не template с loop:) — потому что check-front.yml заранее
+# include_vars-ит roles/front/defaults/main.yml, где front_xhttp_mode,
+# front_reality_flow и оба новых переключателя заданы значениями по
+# умолчанию. include_vars по приоритету Ansible перебивает обычный vars: на
+# уровне задачи, поэтому перебор режимов через vars: молча проверял бы один
+# и тот же дефолт — set_fact стоит выше include_vars и действительно
+# переопределяет значение на каждой итерации (та же ловушка, что в
+# render-sing-box-fixture.yml).
+- name: >-
+    Установка режима XHTTP, flow и переключателей VLESS Encryption/маскировки
+    для фикстуры {{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }}
+  ansible.builtin.set_fact:
+    front_xhttp_mode: "{{ front_case.0 }}"
+    front_reality_flow: "{{ front_case.1 }}"
+    front_vless_encryption_enabled: "{{ front_case.2 }}"
+    front_xhttp_disguise_enabled: "{{ front_case.3 }}"
+
+- name: >-
+    Рендер конфигурации Xray-core FRONT
+    ({{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }})
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../roles/front/templates/xray-config.json.j2"
+    dest: >-
+      {{ front_test_root }}/config-{{ front_case.0 }}-{{ front_case.1 }}-{{ front_case.2 }}-{{ front_case.3 }}.json
+    mode: "0600"
+  vars:
+    front_entry_address: 198.51.100.10
+    front_entry_reality_port: 443
+    front_entry_reality_dest: yandex.ru
+    front_entry_reality_client_uuid: "{{ front_test_entry_client_uuid.stdout | trim }}"
+    front_entry_reality_front_client_uuid: "{{ front_test_entry_front_uuid.stdout | trim }}"
+    front_entry_reality_public_key: "{{ front_test_entry_public_key }}"
+    front_entry_reality_short_id: "0011223344556677"
+    front_vless_decryption: "{{ front_test_vless_decryption }}"
+  no_log: true
+
+# Именно здесь ловится класс ошибок, который шаблон пройти не мешает, а
+# настоящий бинарник отвергает — например "uplinkHTTPMethod can be GET only
+# in packet-up mode": роль допускает четыре режима XHTTP, два flow и два
+# независимых переключателя (VLESS Encryption, маскировка XHTTP), и
+# недопустимое сочетание должно падать здесь, а не на живом сервере.
+- name: >-
+    Семантическая проверка конфигурации
+    ({{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }})
+    закреплённым бинарником
+  ansible.builtin.command:
+    argv:
+      - "{{ front_test_root }}/xray"
+      - run
+      - -test
+      - -c
+      - >-
+        {{ front_test_root }}/config-{{ front_case.0 }}-{{ front_case.1 }}-{{ front_case.2 }}-{{ front_case.3 }}.json
+  changed_when: false

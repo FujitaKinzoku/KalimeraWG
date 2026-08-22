@@ -43,6 +43,7 @@
         entry_mobile_client_available: true
         entry_mobile_client_enabled: false
         awg3_transit_enabled: true
+        reality_fallback_enabled: true
         runtime_secrets_enabled: true
         security_manage_admin_account: true
         security_finalize_admin_access: true
@@ -225,6 +226,8 @@
               dest: dot-switch
             - src: roles/operations/templates/doh-switch.sh.j2
               dest: doh-switch
+            - src: roles/operations/templates/reality-dest-switch.sh.j2
+              dest: reality-dest-switch
             - src: roles/operations/templates/dns-status.sh.j2
               dest: dns-status
             - src: roles/operations/templates/ru-direct-ports.sh.j2
@@ -361,6 +364,12 @@
             dest: "{{ rendered_shell_root }}/awg-ru-proxy-watch.service"
             mode: "0600"
 
+        - name: Формирование модуля systemd credentials для awg-quick@
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/awg-quick-credential.conf.j2"
+            dest: "{{ rendered_shell_root }}/90-kalimerawg-runtime-secrets.conf"
+            mode: "0600"
+
         - name: Выбор ветви health-шаблона ENTRY
           ansible.builtin.set_fact:
             awg_node_role: entry
@@ -434,6 +443,7 @@
               - "{{ rendered_shell_root }}/ru-proxy-set"
               - "{{ rendered_shell_root }}/dot-switch"
               - "{{ rendered_shell_root }}/doh-switch"
+              - "{{ rendered_shell_root }}/reality-dest-switch"
               - "{{ rendered_shell_root }}/dns-status"
               - "{{ rendered_shell_root }}/ru-direct-ports"
               - "{{ rendered_shell_root }}/vpn-user"

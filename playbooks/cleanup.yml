@@ -23,6 +23,11 @@
       changed_when: false
       failed_when: false
 
+    # FRONT (и любая будущая третья роль) не участвует в ENTRY-EXIT
+    # ICMP/MTU-обвязке вообще — не измеряет MTU и не открывает временных
+    # ICMP-правил, поэтому этим трём задачам тут нечего восстанавливать.
+    # cleanup.yml идёт по hosts: all, так что нужно явно пропускать такие
+    # хосты, а не падать на неопределённой awg_node_role.
     - name: Выбор внешнего интерфейса для аварийной очистки ICMP
       ansible.builtin.set_fact:
         awg_cleanup_wan_interface: >-
@@ -31,6 +36,7 @@
       vars:
         configured_wan: >-
           {{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}
+      when: awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление временного разрешения ICMP после прерванной установки
       ansible.builtin.command:
@@ -56,6 +62,7 @@
           - ACCEPT
       changed_when: false
       failed_when: false
+      when: awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление временного запрета ICMP после прерванной установки
       ansible.builtin.command:
@@ -79,6 +86,7 @@
           - DROP
       changed_when: false
       failed_when: false
+      when: awg_node_role | default('') in ['entry', 'exit']
 
     - name: Получение списка установленных служб
       ansible.builtin.service_facts:

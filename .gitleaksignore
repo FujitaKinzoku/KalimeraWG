@@ -1,2 +1,8 @@
 # Исторический fingerprint фиктивного cluster_id из тестового шаблона.
 dee4d253ee13e46d3a04161e13881cca272008db:tests/render-shell.yml:generic-api-key:46
+
+# Исторический fingerprint фиктивного base64-placeholder приватного ключа
+# REALITY в tests/check-sing-box.yml — впоследствии заменён на генерацию
+# ключевого материала на лету (commit c833053), но сама исходная строка
+# навсегда остаётся в истории git и должна быть проигнорирована здесь.
+7b5109d4b625b07aa41ae0333c6b75545daf5a6e:tests/check-sing-box.yml:generic-api-key:90

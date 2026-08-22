@@ -1,0 +1,17 @@
+---
+- name: Перезагрузить модули systemd для Xray-core FRONT
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Перезагрузить модули systemd для Xray-core FRONT
+
+- name: Перезапустить Xray-core FRONT
+  ansible.builtin.systemd_service:
+    name: "{{ front_xray_service_name }}"
+    state: restarted
+  listen: Перезапустить Xray-core FRONT
+
+- name: Перезагрузить Nginx FRONT
+  ansible.builtin.systemd_service:
+    name: nginx.service
+    state: reloaded
+  listen: Перезагрузить Nginx FRONT

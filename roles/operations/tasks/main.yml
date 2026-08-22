@@ -132,6 +132,7 @@
     - {src: ru-proxy-set.sh.j2, dest: ru-proxy-set}
     - {src: dot-switch.sh.j2, dest: dot-switch}
     - {src: doh-switch.sh.j2, dest: doh-switch}
+    - {src: reality-dest-switch.sh.j2, dest: reality-dest-switch}
     - {src: dns-status.sh.j2, dest: dns-status}
     - {src: ru-direct-ports.sh.j2, dest: ru-direct-ports}
     - {src: vpn-user.sh.j2, dest: vpn-user}

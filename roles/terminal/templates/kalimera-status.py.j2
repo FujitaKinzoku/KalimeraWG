@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 CONFIG = {
-    "role": {{ awg_node_role | to_json }},
+    "role": {{ awg_node_role | default('front') | to_json }},
     "entry_host": {{ terminal_summary_entry_host | to_json }},
     "exit_host": {{ terminal_summary_exit_host | to_json }},
     "entry_user": {{ terminal_summary_entry_user | to_json }},

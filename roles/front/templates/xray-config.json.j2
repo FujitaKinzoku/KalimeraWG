@@ -1,0 +1,83 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": {{ front_xhttp_listen_port }},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "{{ front_entry_reality_client_uuid }}"
+          }
+        ],
+        "decryption": "{{ front_vless_decryption if front_vless_encryption_enabled | default(false) | bool else 'none' }}"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": "{{ front_xhttp_path }}",
+          "mode": "{{ front_xhttp_mode }}"{% if front_xhttp_mode == 'packet-up' %},
+          "uplinkHTTPMethod": "GET"{% endif %}
+
+{% if front_xhttp_disguise_enabled | default(false) | bool %}
+          ,"extra": {
+            "sessionIDKey": "{{ front_xhttp_disguise_session_cookie }}",
+            "sessionIDPlacement": "cookie",
+            "sessionIDLength": "16-32",
+            "sessionIDTable": "Base36",
+            "uplinkDataKey": "{{ front_xhttp_disguise_uplink_param }}",
+            "uplinkDataPlacement": "body",
+            "seqKey": "chunk",
+            "seqPlacement": "query",
+            "xPaddingKey": "{{ front_xhttp_disguise_padding_key }}",
+            "xPaddingPlacement": "cookie",
+            "xPaddingMethod": "tokenish",
+            "xPaddingObfsMode": true,
+            "xPaddingBytes": "10-50",
+            "xmux": {
+              "maxConnections": 3,
+              "cMaxReuseTimes": "200-300",
+              "hMaxRequestTimes": "2000-3000",
+              "hMaxReusableSecs": "1800-2400"
+            }
+          }
+{% endif %}
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "to-entry",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "{{ front_entry_address }}",
+            "port": {{ front_entry_reality_port }},
+            "users": [
+              {
+                "id": "{{ front_entry_reality_front_client_uuid }}",
+                "flow": "{{ front_reality_flow }}",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "fingerprint": "firefox",
+          "serverName": "{{ front_entry_reality_dest }}",
+          "publicKey": "{{ front_entry_reality_public_key }}",
+          "shortId": "{{ front_entry_reality_short_id }}"
+        }
+      }
+    }
+  ]
+}

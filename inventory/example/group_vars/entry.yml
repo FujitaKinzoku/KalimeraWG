@@ -125,14 +125,14 @@ entry_force_ru_domains: []
 entry_force_exit_domains: []
 entry_direct_domains: []
 
-entry_sing_box_version: "1.13.15"
+entry_sing_box_version: "1.13.19"
 entry_sing_box_packages:
   x86_64:
-    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box_1.13.15_linux_amd64.deb
-    checksum: sha256:49a889611318a35a259077033ba6bd4139d99d953c0bc1778b1950ecd88b63d6
+    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box_1.13.19_linux_amd64.deb
+    checksum: sha256:e243c2856d62df33dd2ee588dc3327899a4e4605300c10fa252fdaefeca6c144
   aarch64:
-    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.15/sing-box_1.13.15_linux_arm64.deb
-    checksum: sha256:06983de010295bf577eb26b25e503fac0b342c43c8345928ad1713707ffbce34
+    url: https://github.com/SagerNet/sing-box/releases/download/v1.13.19/sing-box_1.13.19_linux_arm64.deb
+    checksum: sha256:0ae0b12d42129c9afdaa800f0d12cafa16001b16923524e987816787eebcebb2
 entry_ru_tun_stack: gvisor
 entry_ru_endpoint_independent_nat: true
 entry_soax_server: proxy.soax.com
@@ -149,3 +149,9 @@ entry_ru_zone_primary_url: https://www.ipdeny.com/ipblocks/data/aggregated/ru-ag
 entry_ru_zone_fallback_url: https://raw.githubusercontent.com/bivlked/amneziawg-installer/2c86966f59d54c0fd0bcf66639c537558a1a0c25/cascade/ru.zone
 entry_ru_zone_min_networks: 1000
 entry_ru_zone_update_calendar: "*-*-* 03:17:00"
+
+# Запасной транспорт VLESS+REALITY поверх sing-box — маскируется под настоящий
+# HTTPS-сайт (reality_fallback_dest) для клиентов, у которых сам AmneziaWG
+# заблокирован по фингерпринту UDP-хендшейка. Требует entry_ru_proxy_enabled.
+# По умолчанию выключено ради обратной совместимости.
+reality_fallback_enabled: false

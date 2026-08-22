@@ -1,0 +1,32 @@
+---
+# include_tasks (не просто template с loop:) — потому что этот плейбук
+# заранее include_vars-ит inventory/example/group_vars/entry.yml, где
+# reality_fallback_enabled: false задан как реальный inventory-переключатель
+# по умолчанию. include_vars по приоритету Ansible перебивает обычный vars:
+# на уровне задачи, поэтому reality_fallback_enabled из vars: ниже молча
+# игнорировался для всех фикстур — set_fact стоит выше include_vars и
+# действительно переопределяет значение для каждой итерации цикла.
+- name: "Установка reality_fallback_enabled для фикстуры {{ item.name }}"
+  ansible.builtin.set_fact:
+    reality_fallback_enabled: "{{ item.reality_enabled }}"
+
+- name: "Рендер тестовой конфигурации {{ item.name }}"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
+    dest: "{{ sing_box_test_root }}/config-{{ item.name }}.json"
+    mode: "0600"
+  vars:
+    vault_proxy_username: "{{ item.username }}"
+    vault_proxy_password: "{{ item.password }}"
+    sing_box_runtime_proxy_override: "{{ item.override }}"
+    reality_fallback_port: 443
+    reality_fallback_dest: yandex.ru
+    reality_fallback_dest_port: 443
+    reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
+    reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
+    reality_fallback_client_uuid: "{{ sing_box_test_reality_uuid }}"
+    reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
+    reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
+    reality_fallback_se_rule_set_path: "{{ sing_box_test_root }}/reality-se-domains.json"
+    reality_fallback_ru_outbound: "{{ item.ru_outbound | default('ru-socks') }}"
+  no_log: true
