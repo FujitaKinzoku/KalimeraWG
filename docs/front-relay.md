@@ -153,3 +153,23 @@ vless://<uuid>@cdn.example.com:443?encryption=none&security=tls&sni=cdn.example.
   ломается воспроизведение YouTube при полностью рабочих Telegram и
   обычных сайтах. В sing-box на ENTRY `xtls-rprx-vision` соответствует
   именно варианту `-udp443` и UDP/443 не блокирует.
+- `front_vless_encryption_enabled` (`false` по умолчанию) — независимый
+  от TLS слой шифрования самого VLESS (ML-KEM-768 + X25519, PFS +
+  anti-replay 0-RTT; XTLS/Xray-core PR #5067). При включении роль один раз
+  генерирует пару `xray vlessenc` (`front_vless_decryption_path`/
+  `front_vless_encryption_path` в `front_xray_state_dir`, идемпотентно —
+  тем же приёмом, что ключи REALITY). Значение из
+  `front_vless_encryption_path` подставляется в клиентскую ссылку вместо
+  `encryption=none`; узнать его —
+  `cat front_vless_encryption_path` на FRONT.
+- `front_xhttp_disguise_enabled` (`false` по умолчанию) — маскирует XHTTP
+  под конкретное веб-приложение, а не просто случайный путь: id сессии в
+  cookie (`front_xhttp_disguise_session_cookie`, по умолчанию `PHPESSID`),
+  аплинк в теле запроса под именем рекламного параметра
+  (`front_xhttp_disguise_uplink_param`, по умолчанию `_dc`), паддинг под
+  токен (`front_xhttp_disguise_padding_key`, по умолчанию `mc_token`).
+  **Не выражается в короткой ссылке `vless://`** — вложенный объект
+  `extra` не помещается в query-параметры, клиенту нужен полный JSON-конфиг
+  outbound'а (см. `xray vlessenc`/`xhttpSettings.extra` в документации
+  Xray). Это меняет процесс выдачи конфигурации: вместо ссылки —
+  файл конфигурации.

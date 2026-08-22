@@ -93,6 +93,26 @@
                  | first }}
           no_log: true
 
+        # xray vlessenc всегда выводит обе пары (X25519 и ML-KEM-768) без
+        # флага выбора — тот же разбор по якорной строке, что и в
+        # roles/front/tasks/main.yml.
+        - name: "Проверка: генерация тестовой пары VLESS Encryption"
+          ansible.builtin.command:
+            argv:
+              - "{{ front_test_root }}/xray"
+              - vlessenc
+          register: front_test_vlessenc
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка: разбор тестовой пары VLESS Encryption (ML-KEM-768)"
+          ansible.builtin.set_fact:
+            front_test_vless_decryption: >-
+              {{ front_test_vlessenc.stdout
+                 | regex_search('ML-KEM-768[\s\S]*?"decryption": "([^"]+)"', '\1')
+                 | first }}
+          no_log: true
+
         # front_entry_* — простые факты (не groups/hostvars, это служебные
         # переменные Ansible, их нельзя подменить через vars: в задаче) —
         # тот же набор, что roles/front/tasks/main.yml вычисляет один раз
@@ -106,11 +126,11 @@
           ansible.builtin.include_tasks: tasks/render-front-xray-fixture.yml
           loop: >-
             {{ ['packet-up', 'stream-up', 'stream-one', 'auto']
-               | product(['xtls-rprx-vision-udp443', 'xtls-rprx-vision'])
+               | product(['xtls-rprx-vision-udp443', 'xtls-rprx-vision'], [false, true], [false, true])
                | list }}
           loop_control:
             loop_var: front_case
-            label: "{{ front_case.0 }}/{{ front_case.1 }}"
+            label: "{{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }}"
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
         # приходят из set_fact выше (тестовые значения), не отсюда — задавать

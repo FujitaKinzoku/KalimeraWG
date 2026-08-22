@@ -13,7 +13,7 @@
             "id": "{{ front_entry_reality_client_uuid }}"
           }
         ],
-        "decryption": "none"
+        "decryption": "{{ front_vless_decryption if front_vless_encryption_enabled | default(false) | bool else 'none' }}"
       },
       "streamSettings": {
         "network": "xhttp",
@@ -21,6 +21,30 @@
           "path": "{{ front_xhttp_path }}",
           "mode": "{{ front_xhttp_mode }}"{% if front_xhttp_mode == 'packet-up' %},
           "uplinkHTTPMethod": "GET"{% endif %}
+
+{% if front_xhttp_disguise_enabled | default(false) | bool %}
+          ,"extra": {
+            "sessionIDKey": "{{ front_xhttp_disguise_session_cookie }}",
+            "sessionIDPlacement": "cookie",
+            "sessionIDLength": "16-32",
+            "sessionIDTable": "Base36",
+            "uplinkDataKey": "{{ front_xhttp_disguise_uplink_param }}",
+            "uplinkDataPlacement": "body",
+            "seqKey": "chunk",
+            "seqPlacement": "query",
+            "xPaddingKey": "{{ front_xhttp_disguise_padding_key }}",
+            "xPaddingPlacement": "cookie",
+            "xPaddingMethod": "tokenish",
+            "xPaddingObfsMode": true,
+            "xPaddingBytes": "10-50",
+            "xmux": {
+              "maxConnections": 3,
+              "cMaxReuseTimes": "200-300",
+              "hMaxRequestTimes": "2000-3000",
+              "hMaxReusableSecs": "1800-2400"
+            }
+          }
+{% endif %}
         }
       }
     }

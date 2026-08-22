@@ -218,6 +218,70 @@
     mode: "0700"
   when: front_relay_enabled | default(false) | bool
 
+- name: "Проверка: пара VLESS Encryption уже создана"
+  ansible.builtin.stat:
+    path: "{{ front_vless_decryption_path }}"
+  register: front_vless_encryption_file
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+
+# "xray vlessenc" всегда выводит две пары — X25519 (не постквантовый) и
+# ML-KEM-768 (постквантовый), выбора флагом нет. Берём именно ML-KEM-768,
+# тем же способом (awk/sed по якорной строке), что уже используется в
+# tests/check-front.yml для разбора вывода "xray x25519".
+- name: "Генерация: пара VLESS Encryption (ML-KEM-768 + X25519)"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      raw=$(mktemp)
+      {{ front_xray_binary_path | quote }} vlessenc >"$raw"
+      awk '/ML-KEM-768/{p=1} p' "$raw" |
+        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >{{ front_vless_decryption_path | quote }}
+      awk '/ML-KEM-768/{p=1} p' "$raw" |
+        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >{{ front_vless_encryption_path | quote }}
+      rm -f "$raw"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+    - not front_vless_encryption_file.stat.exists
+
+- name: "Ограничение прав: файлы VLESS Encryption"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+
+- name: "Чтение: пара VLESS Encryption для конфигурации"
+  ansible.builtin.slurp:
+    path: "{{ item }}"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  register: front_vless_encryption_raw
+  no_log: true
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+
+- name: "Разбор: пара VLESS Encryption для конфигурации"
+  ansible.builtin.set_fact:
+    front_vless_decryption: "{{ front_vless_encryption_raw.results[0].content | b64decode | trim }}"
+    front_vless_encryption: "{{ front_vless_encryption_raw.results[1].content | b64decode | trim }}"
+  no_log: true
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+
 - name: "Установка: конфигурация Xray-core FRONT"
   ansible.builtin.template:
     src: xray-config.json.j2
