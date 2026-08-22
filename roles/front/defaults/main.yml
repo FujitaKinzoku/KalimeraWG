@@ -15,14 +15,27 @@ front_xray_state_dir: /usr/local/etc/xray
 # архитектуре — тот же паттерн, что entry_sing_box_packages в roles/sing_box.
 # Xray-core не публикует .deb — только сырой архив с бинарником, поэтому
 # устанавливается вручную (unzip + install), не через apt.
-front_xray_version: v26.3.27
+#
+# v26.3.27 -> v26.7.28: клиенты (Happ v5.6.0 подтверждённо бандлит именно
+# v26.7.28 — видно в его собственном логе "Xray <версия> started" при
+# JSON-профиле) успели уйти вперёд закреплённой здесь версии, и это не
+# косметика — между этими версиями реально разошлось поведение XHTTP:
+# v26.3.27 строго валидирует путь с завершающим слэшем, которого новые
+# клиенты не шлют ("failed to validate path"), и по-другому договаривается
+# о packet-up/stream-one режиме ("stream-one mode is not allowed" даже при
+# явном mode: packet-up). Оба факта воспроизведены локально парой
+# client+server на реальных бинарниках, не выведены из документации.
+# Обновление версии клиентов ПЕРИОДИЧЕСКОЕ и происходит вне контроля этого
+# проекта — см. "Актуальность версии Xray-core" в docs/front-relay.md за
+# тем, как и когда проверять, не отстала ли эта версия снова.
+front_xray_version: v26.7.28
 front_xray_packages:
   x86_64:
-    url: "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
-    checksum: "sha256:23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-64.zip"
+    checksum: "sha256:8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
   aarch64:
-    url: "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-arm64-v8a.zip"
-    checksum: "sha256:4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-arm64-v8a.zip"
+    checksum: "sha256:f5698bb218ada3b4022db26fafc39601c5f53b46b19eb76c9616325985807501"
 
 # Origin-домен, на который указывает A-запись FRONT и CNAME CDN-ресурса
 # (настраивается вручную вне Ansible — см. docs/front-relay.md). Обязателен,
