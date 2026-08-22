@@ -205,19 +205,19 @@ aaaa_filtered() {
 }
 
 ufw_interserver_restricted() {
-    local interface="$1" peer="$2" port="$3"
-    iptables -w 10 -C ufw-user-input -i "$interface" -p udp \
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}"
+    iptables -w 10 -C ufw-user-input -i "$interface" -p "$proto" \
         -s "${peer}/32" --dport "$port" -j ACCEPT
 }
 
 ufw_interserver_has_no_broad_allow() {
-    local interface="$1" peer="$2" port="$3" rule
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}" rule
     while IFS= read -r rule; do
         [[ "$rule" == *"-s ${peer}/32"* ]] || return 1
     done < <(
         iptables -w 10 -S ufw-user-input |
             grep -F -- "-i ${interface}" |
-            grep -F -- '-p udp' |
+            grep -F -- "-p ${proto}" |
             grep -F -- "--dport ${port}" |
             grep -F -- '-j ACCEPT' || true
     )
@@ -538,6 +538,12 @@ check 'запасной транспорт REALITY прослушивает по
 {% endif %}
 {% if front_relay_enabled | default(false) | bool %}
 check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
+check 'UFW ограничивает REALITY адресом FRONT-релея' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+check 'UFW не разрешает REALITY для всех адресов' \
+    ufw_interserver_has_no_broad_allow \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
 {% endif %}
 {% endif %}
 {% elif awg_node_role == 'exit' %}

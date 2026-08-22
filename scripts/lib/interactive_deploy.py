@@ -495,6 +495,10 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     if not front_host:
         fail("Необходимо указать адрес FRONT сервера")
     require_public_endpoint(front_host, "Адрес FRONT сервера")
+    # Постоянный публичный IPv4, а не front_host как есть (может быть
+    # DNS-именем) — нужен для изолированного UFW-правила на ENTRY, тем же
+    # способом, что security_interserver_peer_ipv4 для пары ENTRY/EXIT.
+    front_public_ipv4 = resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
     front_user = prompt("Пользователь SSH FRONT сервера", "root")
     front_port = prompt_port("Текущий SSH-порт FRONT сервера", 22)
 
@@ -509,6 +513,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     entry_changed = not bool(entry_vars.get("front_relay_enabled", False))
     if entry_changed:
         entry_vars["front_relay_enabled"] = True
+        entry_vars["front_public_ipv4"] = front_public_ipv4
         yaml_write(entry_path, entry_vars)
 
     front_vars = {

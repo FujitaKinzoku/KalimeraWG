@@ -753,7 +753,14 @@
 
 # Открыт всем намеренно — REALITY должен отвечать любому, кто постучится,
 # в том числе активным зондам DPI, точно как настоящий HTTPS-сервер.
-- name: "Разрешение запасного транспорта VLESS+REALITY"
+# Запасной транспорт REALITY изолируется так же, как межсерверный AWG между
+# ENTRY и EXIT (front_public_ipv4 — постоянный публичный IPv4 FRONT,
+# записывается при ./deploy --enable-front тем же приёмом, что
+# security_interserver_peer_ipv4 для пары ENTRY/EXIT). Прямые подключения к
+# ENTRY принимаются только пока FRONT не подключён — как только он есть,
+# единственный поддерживаемый путь клиента к REALITY идёт через него, а
+# порт на ENTRY открыт исключительно для этого одного адреса.
+- name: "Разрешение запасного транспорта VLESS+REALITY (без FRONT)"
   community.general.ufw:
     rule: allow
     port: "{{ reality_fallback_port | default(443) | int | string }}"
@@ -764,8 +771,51 @@
   when:
     - awg_node_role == 'entry'
     - reality_fallback_enabled | default(false) | bool
+    - not (front_relay_enabled | default(false) | bool)
 
-- name: "Удаление правила запасного транспорта VLESS+REALITY при отключении"
+- name: "Удаление общего правила REALITY при подключении FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Разрешение запасного транспорта VLESS+REALITY только от FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    comment: REALITY изолирован для FRONT-релея
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Удаление правила REALITY для FRONT при отсутствии FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - not (front_relay_enabled | default(false) | bool)
+    - front_public_ipv4 is defined
+
+- name: "Удаление общего правила запасного транспорта VLESS+REALITY при отключении"
   community.general.ufw:
     rule: allow
     port: "{{ reality_fallback_port | default(443) | int | string }}"
@@ -776,6 +826,20 @@
   when:
     - awg_node_role == 'entry'
     - not (reality_fallback_enabled | default(false) | bool)
+
+- name: "Удаление правила REALITY для FRONT при отключении REALITY"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - not (reality_fallback_enabled | default(false) | bool)
+    - front_public_ipv4 is defined
 
 - name: "Разрешение служебного трафика только от второго сервера внутри AWG 3+"
   community.general.ufw:
