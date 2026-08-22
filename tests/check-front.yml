@@ -136,7 +136,10 @@
         # приходят из set_fact выше (тестовые значения), не отсюда — задавать
         # их здесь через vars: бессмысленно, include_vars/set_fact в этом
         # плейбуке имеют более высокий приоритет, чем vars: отдельной задачи.
-        - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком)
+        # front_subscription_enabled: true проверяет новый location — nginx -t
+        # проверяет только синтаксис, физическое существование файла из
+        # alias ему не требуется.
+        - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком и подпиской)
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/front/templates/nginx-front.conf.j2"
             dest: "{{ front_test_root }}/nginx-front.conf"
@@ -145,6 +148,11 @@
             front_cert_present: true
             front_xhttp_listen_port: 8080
             front_xhttp_path: /api/stream
+            front_subscription_enabled: true
+            front_subscription_path: /api/v1/sub
+            front_subscription_file_path: "{{ front_test_root }}/subscription.b64"
+            front_subscription_title: Kalimera-FRONT
+            front_subscription_update_interval_hours: 24
 
         - name: Генерация одноразового самоподписанного сертификата для проверки синтаксиса
           ansible.builtin.command:

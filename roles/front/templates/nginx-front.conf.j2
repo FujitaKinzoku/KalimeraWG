@@ -70,6 +70,15 @@ server {
         client_max_body_size 0;
     }
 
+{% if front_subscription_enabled | default(false) | bool %}
+    location {{ front_subscription_path }} {
+        alias {{ front_subscription_file_path }};
+        default_type text/plain;
+        add_header profile-title "{{ front_subscription_title }}" always;
+        add_header profile-update-interval "{{ front_subscription_update_interval_hours }}" always;
+    }
+{% endif %}
+
     location / {
         return 404;
     }

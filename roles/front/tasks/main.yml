@@ -9,6 +9,7 @@
       - front_xhttp_path is match('^/[A-Za-z0-9/_-]+$')
       - front_xhttp_mode in ['packet-up', 'stream-up', 'stream-one', 'auto']
       - front_reality_flow in ['xtls-rprx-vision-udp443', 'xtls-rprx-vision']
+      - not (front_subscription_enabled | default(false) | bool) or front_subscription_path is match('^/[A-Za-z0-9/_-]+$')
       - ansible_architecture in front_xray_packages
       - front_xray_packages[ansible_architecture].url is match('^https://github.com/XTLS/Xray-core/releases/download/')
       - front_xray_packages[ansible_architecture].checksum is match('^sha256:[0-9a-f]{64}$')
@@ -281,6 +282,48 @@
   when:
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
+
+- name: "Создание: каталог подписки FRONT"
+  ansible.builtin.file:
+    path: "{{ front_subscription_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_subscription_enabled | default(false) | bool
+
+# Подписка отражает те же переменные, что уходят в xray-config.json.j2 —
+# при следующем ./deploy --resume после смены front_xhttp_path/mode или
+# ключа VLESS Encryption содержимое подписки обновится само, отдельно
+# ничего пересобирать не нужно.
+#
+# Маскировка XHTTP (front_xhttp_disguise_enabled) в ссылку не попадает
+# принципиально — Happ ожидает от подписки список ссылок vless://, а не
+# JSON, и объект "extra" в такую ссылку не помещается (см. комментарий в
+# defaults/main.yml). Значение шифрования VLESS в ссылку попадает: это
+# обычный query-параметр, а не вложенный объект.
+- name: "Формирование: содержимое подписки FRONT"
+  ansible.builtin.set_fact:
+    # Одной строкой намеренно: YAML folded-block (">-") вставил бы пробел
+    # на месте каждого переноса, а пробел внутри URL ссылку ломает.
+    front_subscription_link: "vless://{{ front_entry_reality_client_uuid }}@{{ front_client_domain }}:443?encryption={{ front_vless_encryption if front_vless_encryption_enabled | default(false) | bool else 'none' }}&security=tls&sni={{ front_client_domain }}&type=xhttp&path={{ front_xhttp_path | replace('/', '%2F') }}&mode={{ front_xhttp_mode }}#{{ front_subscription_title }}"
+  no_log: true
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_subscription_enabled | default(false) | bool
+
+- name: "Установка: файл подписки FRONT"
+  ansible.builtin.copy:
+    dest: "{{ front_subscription_file_path }}"
+    content: "{{ ('#profile-title: ' ~ front_subscription_title ~ '\n' ~ front_subscription_link ~ '\n') | b64encode }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_subscription_enabled | default(false) | bool
 
 - name: "Установка: конфигурация Xray-core FRONT"
   ansible.builtin.template:

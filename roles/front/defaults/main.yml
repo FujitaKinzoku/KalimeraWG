@@ -93,3 +93,27 @@ front_xhttp_disguise_enabled: false
 front_xhttp_disguise_session_cookie: PHPESSID
 front_xhttp_disguise_uplink_param: _dc
 front_xhttp_disguise_padding_key: mc_token
+
+# Домен, на который в итоге смотрит клиент — сегодня совпадает с
+# origin-доменом (CDN ещё не настроен), после подключения Yandex CDN
+# достаточно переопределить только эту переменную в group_vars/front.yml.
+front_client_domain: "{{ front_origin_domain }}"
+
+# Подписка (Happ и совместимые клиенты периодически перезапрашивают эту
+# ссылку и сами подтягивают изменения — без переустановки профиля вручную
+# при каждой смене пути/режима/ключа). Подтверждено официальной
+# документацией Happ (happ.su/main/dev-docs/app-management): тело подписки
+# — обычный список ссылок vless:// (в base64), метаданные — через
+# HTTP-заголовки profile-title/profile-update-interval. JSON — отдельный,
+# одноразовый способ импорта ОДНОГО сервера, а не формат подписки, поэтому
+# маскировка XHTTP (front_xhttp_disguise_enabled, объект "extra") через
+# подписку недоступна принципиально — только обычная ссылка без неё.
+# Выключено по умолчанию: путь публичный и никем, кроме самой ссылки, не
+# защищён — при включении переопределите front_subscription_path на
+# непубличный.
+front_subscription_enabled: false
+front_subscription_path: /api/v1/sub
+front_subscription_title: Kalimera-FRONT
+front_subscription_update_interval_hours: 24
+front_subscription_dir: /var/www/front-subscription
+front_subscription_file_path: "{{ front_subscription_dir }}/subscription.b64"
