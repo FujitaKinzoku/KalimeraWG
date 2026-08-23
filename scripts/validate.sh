@@ -11,6 +11,7 @@ ansible-playbook --syntax-check playbooks/site.yml
 ansible-playbook --syntax-check playbooks/entry.yml
 ansible-playbook --syntax-check playbooks/exit.yml
 ansible-playbook --syntax-check playbooks/front.yml
+ansible-playbook --syntax-check playbooks/update-vless-client-export.yml
 ansible-playbook --syntax-check playbooks/verify.yml
 ansible-playbook --syntax-check playbooks/finalize-monitoring.yml
 ansible-playbook --syntax-check playbooks/terminal.yml

@@ -57,6 +57,23 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn('"domainStrategy": "AsIs"', manager)
         self.assertIn('"remarks": "Kalimera-FRONT-disguiseV2"', manager)
 
+    def test_client_export_has_isolated_update_playbook(self) -> None:
+        playbook = (
+            ROOT / "playbooks/update-vless-client-export.yml"
+        ).read_text(encoding="utf-8")
+        tasks = (
+            ROOT / "roles/front/tasks/client-export-update.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("tasks_from: client-export-update.yml", playbook)
+        self.assertIn("vless-client-settings.json.j2", tasks)
+        self.assertIn("vless-user.py.j2", tasks)
+        self.assertIn("front_vless_user_command_path", tasks)
+        self.assertIn("run\n      - -test", tasks)
+        self.assertIn("kalimera-secretctl", tasks)
+        self.assertIn("awg-managed-integrity", tasks)
+        self.assertNotIn("systemd_service", tasks)
+        self.assertNotIn("restart", tasks)
+
     def test_xray_cannot_modify_runtime_configuration_tree(self) -> None:
         tasks = (ROOT / "roles/front/tasks/main.yml").read_text(encoding="utf-8")
         service = (ROOT / "roles/front/templates/xray.service.j2").read_text(

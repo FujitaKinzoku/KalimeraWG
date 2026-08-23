@@ -1,0 +1,11 @@
+---
+- name: Точечное обновление клиентского VLESS JSON на FRONT
+  hosts: front
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Применение только экспортёра VLESS JSON
+      ansible.builtin.include_role:
+        name: front
+        tasks_from: client-export-update.yml
+

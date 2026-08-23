@@ -1,0 +1,92 @@
+---
+- name: Проверка роли перед точечным обновлением VLESS JSON
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_node_role == 'front'
+      - front_relay_enabled | default(false) | bool
+    fail_msg: Точечное обновление VLESS JSON разрешено только на активном FRONT.
+
+- name: Чтение клиентской части VLESS Encryption
+  ansible.builtin.slurp:
+    path: "{{ front_vless_encryption_path }}"
+  register: front_client_export_encryption_raw
+  no_log: true
+  when: front_vless_encryption_enabled | default(false) | bool
+
+- name: Подготовка клиентской части VLESS Encryption
+  ansible.builtin.set_fact:
+    front_vless_encryption: >-
+      {{ front_client_export_encryption_raw.content | b64decode | trim }}
+  no_log: true
+  when: front_vless_encryption_enabled | default(false) | bool
+
+- name: Точечная установка параметров VLESS JSON
+  ansible.builtin.template:
+    src: vless-client-settings.json.j2
+    dest: "{{ front_vless_client_settings_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Точечная установка команды vless-user
+  ansible.builtin.template:
+    src: vless-user.py.j2
+    dest: "{{ front_vless_user_command_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Получение существующего VLESS-пользователя для проверки экспорта
+  ansible.builtin.command:
+    argv: ["{{ front_vless_user_command_path }}", list]
+  register: front_client_export_users
+  changed_when: false
+  no_log: true
+
+- name: Проверка наличия VLESS-пользователя для контрольного экспорта
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_client_export_users.stdout_lines | length > 0
+    fail_msg: В реестре FRONT отсутствуют VLESS-пользователи для проверки.
+
+- name: Выбор существующего VLESS-пользователя для проверки экспорта
+  ansible.builtin.set_fact:
+    front_client_export_test_name: >-
+      {{ (front_client_export_users.stdout_lines | first).split()[0] }}
+  no_log: true
+
+- name: Формирование обновлённого клиентского JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ front_vless_user_command_path }}"
+      - export
+      - "{{ front_client_export_test_name }}"
+  changed_when: false
+  no_log: true
+
+- name: Семантическая проверка обновлённого клиентского JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ front_xray_binary_path }}"
+      - run
+      - -test
+      - -c
+      - "{{ front_vless_export_dir }}/{{ front_client_export_test_name }}.json"
+  changed_when: false
+  no_log: true
+
+- name: Сохранение обновлённых параметров в защищённом runtime-хранилище
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') }}", seal]
+  changed_when: false
+  no_log: true
+  when: runtime_secrets_enabled | default(false) | bool
+
+- name: Обновление контрольных сумм после точечного применения
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/awg-managed-integrity, seal]
+  changed_when: false
+  no_log: true
