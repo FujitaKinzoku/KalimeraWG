@@ -118,7 +118,7 @@ managed_admin_is_ready() {
         passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
         passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
         test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
-        test -x {{ security_admin_command_path | quote }} &&
+        test -x {{ security_admin_command_path | default('/usr/local/libexec/kalimera-admin-command') | quote }} &&
         visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
         ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
 }

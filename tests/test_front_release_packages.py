@@ -69,6 +69,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("tasks_from: client-export-update.yml", playbook)
         self.assertIn("tasks_from: front-export-facts.yml", playbook)
+        self.assertIn("public: true", playbook)
         self.assertIn("name: health", playbook)
         self.assertIn(
             "{{ playbook_dir }}/../inventory/production/group_vars/front.yml",
@@ -156,6 +157,10 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("front_vless_encryption_is_enabled", health)
         self.assertIn("mlkem768x25519plus.native.0rtt.", health)
         self.assertIn("VLESS Encryption ML-KEM-768 включён", health)
+        self.assertIn(
+            "security_admin_command_path | default('/usr/local/libexec/kalimera-admin-command')",
+            health,
+        )
 
     def test_front_ufw_is_only_managed_by_security_role(self) -> None:
         front_tasks = (ROOT / "roles/front/tasks/main.yml").read_text(
