@@ -79,6 +79,8 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("root:xray:640", audit)
         self.assertIn('target="$(readlink -f -- "$file")"', audit)
         self.assertIn('"$target" == /run/kalimera-secrets/*', audit)
+        self.assertIn('"$group" == root || "$group" == xray', audit)
+        self.assertIn('! runuser -u xray -- test -w "$target"', audit)
 
         health = (ROOT / "roles/health/templates/awg-health.sh.j2").read_text(
             encoding="utf-8"

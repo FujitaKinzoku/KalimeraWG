@@ -97,7 +97,7 @@ EOF
 
 {% if awg_node_role == 'front' %}
 xray_read_only_config_ok() {
-    local file metadata target
+    local file group mode owner target
     for file in \
         {{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') | quote }} \
         {{ front_xray_config_path | default('/usr/local/etc/xray/config.json') | quote }}; do
@@ -105,13 +105,16 @@ xray_read_only_config_ok() {
         target="$(readlink -f -- "$file")"
         [[ -n "$target" && -f "$target" ]] || return 1
         if [[ "$target" == /run/kalimera-secrets/* ]]; then
-            metadata="$(stat -c '%U:%G:%a' "$target")"
-            [[ "$metadata" == 'root:root:640' ]] || return 1
+            owner="$(stat -c '%U' "$target")"
+            group="$(stat -c '%G' "$target")"
+            mode="$(stat -c '%a' "$target")"
+            [[ "$owner" == root && "$mode" == 640 ]] || return 1
+            [[ "$group" == root || "$group" == xray ]] || return 1
         else
             [[ "$target" == "$file" ]] || return 1
-            metadata="$(stat -c '%U:%G:%a' "$target")"
-            [[ "$metadata" == 'root:xray:640' ]] || return 1
+            [[ "$(stat -c '%U:%G:%a' "$target")" == 'root:xray:640' ]] || return 1
         fi
+        ! runuser -u xray -- test -w "$target" || return 1
     done
 }
 {% endif %}
