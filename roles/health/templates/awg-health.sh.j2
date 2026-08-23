@@ -190,7 +190,7 @@ ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
 
-{% if awg_node_role | default('') in ['entry', 'exit'] %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1

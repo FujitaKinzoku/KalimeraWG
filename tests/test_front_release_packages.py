@@ -96,6 +96,10 @@ class FrontReleasePackagesTest(unittest.TestCase):
             "Разрешение веб-доступа к FRONT в управляемой политике UFW",
             security_tasks,
         )
+        health = (ROOT / "roles/health/templates/awg-health.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("['entry', 'exit', 'front']", health)
 
     def test_front_backend_gets_minimal_rule_set_access(self) -> None:
         backend_tasks = (
