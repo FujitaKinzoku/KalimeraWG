@@ -30,6 +30,7 @@ front_xray_group: xray
 front_vless_users_path: "{{ front_xray_state_dir }}/users.json"
 front_vless_client_settings_path: "{{ front_xray_state_dir }}/client-settings.json"
 front_vless_user_command_path: /usr/local/sbin/vless-user
+front_vless_export_dir: /run/kalimera-vless-exports
 front_vless_initial_user_name: initial
 
 # Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по

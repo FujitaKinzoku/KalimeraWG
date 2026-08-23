@@ -146,6 +146,8 @@
             front_vless_users_path: "{{ front_test_root }}/state/users.json"
             front_vless_client_settings_path: "{{ front_test_root }}/state/client-settings.json"
             front_vless_user_command_path: "{{ front_test_root }}/vless-user"
+            front_vless_export_dir: "{{ front_test_root }}/exports"
+            security_admin_user: root
             front_xray_user: root
             front_xray_group: root
             front_xray_service_name: xray-validation.service
@@ -247,6 +249,21 @@
               - (front_test_active_created.content | b64decode | from_json).inbounds[0].settings.clients | length == 2
           no_log: true
 
+        - name: Проверка защищённого файла JSON нового пользователя
+          ansible.builtin.stat:
+            path: "{{ front_vless_export_dir }}/test-cdn.json"
+          register: front_test_vless_export_file
+
+        - name: Подтверждение прав защищённого файла JSON
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - front_test_vless_export_file.stat.isreg | default(false)
+              - front_test_vless_export_file.stat.mode == '0600'
+              - front_test_vless_export_file.stat.pw_name == 'root'
+              - "('Файл JSON сохранён: ' ~ front_vless_export_dir ~ '/test-cdn.json') in front_test_vless_create.stderr"
+              - "('Открыть конфигурацию: nano ' ~ front_vless_export_dir ~ '/test-cdn.json') in front_test_vless_create.stderr"
+
         - name: Удаление тестового CDN-пользователя
           ansible.builtin.command:
             argv: ["{{ front_vless_user_command_path }}", delete, test-cdn, --yes]
@@ -261,6 +278,17 @@
             - "{{ front_test_root }}/systemctl.log"
           register: front_test_final_files
           no_log: true
+
+        - name: Проверка удаления временного JSON отозванного пользователя
+          ansible.builtin.stat:
+            path: "{{ front_vless_export_dir }}/test-cdn.json"
+          register: front_test_vless_deleted_export
+
+        - name: Подтверждение удаления временного JSON
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - not (front_test_vless_deleted_export.stat.exists | default(false))
 
         - name: Проверка возврата к исходному пользователю
           ansible.builtin.assert:

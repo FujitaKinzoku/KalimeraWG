@@ -46,6 +46,9 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("seal_runtime()", manager)
         self.assertIn("seal_integrity()", manager)
         self.assertIn("restart_xray()", manager)
+        self.assertIn("EXPORT_DIR / f\"{record['name']}.json\"", manager)
+        self.assertIn('print(f"Открыть конфигурацию: nano {path}"', manager)
+        self.assertIn("0o600", manager)
 
     def test_xray_cannot_modify_runtime_configuration_tree(self) -> None:
         tasks = (ROOT / "roles/front/tasks/main.yml").read_text(encoding="utf-8")

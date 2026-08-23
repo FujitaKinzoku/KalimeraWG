@@ -60,19 +60,22 @@ branch. Confirm the local version with `./deploy --version`.
 > availability guarantee.
 
 <p align="center">
-  <img src="assets/whitelist-cascade-en.svg" alt="Three KalimeraWG ingress paths including the field-validated CDN and FRONT fallback" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-en-mobile.svg">
+    <img src="assets/whitelist-cascade-en.svg" alt="Three KalimeraWG ingress paths including the field-validated CDN and FRONT fallback" width="760">
+  </picture>
 </p>
 
 The ingress paths are alternatives rather than stacked transports. AWG remains
-the fast primary path, direct REALITY is the TCP fallback, and CDN/XHTTP is the
-allowlist-oriented emergency path when that CDN edge is reachable.
+the fast primary path. VLESS/XHTTP always terminates on FRONT: the client can
+use the FRONT origin directly or a reachable CDN edge.
 
 | Client path | Transport | Purpose | Validation status |
 |---|---|---|---|
 | client → ENTRY | AmneziaWG 3+, UDP/443 or mobile UDP/8443 | lowest-overhead primary path | previously validated |
-| client → ENTRY | VLESS+REALITY, TCP/443 | direct fallback when UDP/AWG is filtered | implemented on the feature branch |
+| client → FRONT | TLS + VLESS/XHTTP, TCP/443 | direct VLESS without CDN; no public VLESS listener on ENTRY | implemented on the test branch |
 | client → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | ingress through a reachable CDN edge | field-validated |
-| FRONT → ENTRY | VLESS+REALITY | hides the ENTRY origin from the CDN-path client | field-validated |
+| FRONT → ENTRY | VLESS+REALITY | protected service hop available only from FRONT | field-validated |
 | ENTRY → EXIT / RU | AWG 3+ or SOCKS5/fail-open | unchanged destination policy | retained |
 
 Carrier, region, DNS, CDN edge, and filtering policy can change independently.
@@ -104,7 +107,10 @@ threat model for the new mechanisms in
 ## Architecture
 
 <p align="center">
-  <img src="assets/cascade-en.svg" alt="KalimeraWG routing diagram" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/cascade-en-mobile.svg">
+    <img src="assets/cascade-en.svg" alt="KalimeraWG routing diagram" width="760">
+  </picture>
 </p>
 
 | Segment | Purpose | Default state |

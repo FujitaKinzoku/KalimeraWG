@@ -7,18 +7,55 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallResilienceTests(unittest.TestCase):
-    def test_readmes_use_fixed_valid_cascade_diagrams(self) -> None:
-        for readme_name, asset_name in (
-            ("README.md", "cascade-ru.svg"),
-            ("README.en.md", "cascade-en.svg"),
-        ):
-            readme = (ROOT / readme_name).read_text(encoding="utf-8")
-            diagram = ROOT / "assets" / asset_name
-            root = ET.parse(diagram).getroot()
+    def test_docs_use_responsive_valid_cascade_diagrams(self) -> None:
+        documents = {
+            "README.md": (
+                "cascade-ru.svg",
+                "cascade-ru-mobile.svg",
+                "whitelist-cascade-ru.svg",
+                "whitelist-cascade-ru-mobile.svg",
+            ),
+            "README.en.md": (
+                "cascade-en.svg",
+                "cascade-en-mobile.svg",
+                "whitelist-cascade-en.svg",
+                "whitelist-cascade-en-mobile.svg",
+            ),
+            "docs/front-relay.md": (
+                "whitelist-cascade-ru.svg",
+                "whitelist-cascade-ru-mobile.svg",
+            ),
+        }
+        expected_viewboxes = {
+            "cascade-ru.svg": "0 0 760 650",
+            "cascade-en.svg": "0 0 760 650",
+            "cascade-ru-mobile.svg": "0 0 390 1120",
+            "cascade-en-mobile.svg": "0 0 390 1120",
+            "whitelist-cascade-ru.svg": "0 0 760 790",
+            "whitelist-cascade-en.svg": "0 0 760 790",
+            "whitelist-cascade-ru-mobile.svg": "0 0 390 1060",
+            "whitelist-cascade-en-mobile.svg": "0 0 390 1060",
+        }
 
-            self.assertIn(f'assets/{asset_name}', readme)
-            self.assertNotIn("```mermaid", readme)
-            self.assertEqual(root.attrib["viewBox"], "0 0 1440 620")
+        for document_name, asset_names in documents.items():
+            document = (ROOT / document_name).read_text(encoding="utf-8")
+            self.assertNotIn("```mermaid", document)
+            self.assertIn('<source media="(max-width: 600px)"', document)
+            for asset_name in asset_names:
+                diagram = ROOT / "assets" / asset_name
+                svg_root = ET.parse(diagram).getroot()
+                asset_reference = (
+                    f"../assets/{asset_name}"
+                    if document_name.startswith("docs/")
+                    else f"assets/{asset_name}"
+                )
+                self.assertIn(asset_reference, document)
+                self.assertEqual(
+                    svg_root.attrib["viewBox"], expected_viewboxes[asset_name]
+                )
+                self.assertFalse(
+                    any(element.tag.endswith("polygon") for element in svg_root.iter())
+                )
 
     def test_release_version_is_used_by_installer_and_deploy(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()

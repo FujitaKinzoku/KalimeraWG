@@ -85,7 +85,10 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
 > релиз и не гарантия одинаковой доступности у всех операторов.
 
 <p align="center">
-  <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-ru-mobile.svg">
+    <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="760">
+  </picture>
 </p>
 
 Основной AWG идёт прямо на ENTRY. VLESS всегда завершается на FRONT: клиент
@@ -142,7 +145,10 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
 ## Как устроен каскад
 
 <p align="center">
-  <img src="assets/cascade-ru.svg" alt="Схема маршрутизации KalimeraWG" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/cascade-ru-mobile.svg">
+    <img src="assets/cascade-ru.svg" alt="Схема маршрутизации KalimeraWG" width="760">
+  </picture>
 </p>
 
 | Сегмент | Назначение | Состояние по умолчанию |

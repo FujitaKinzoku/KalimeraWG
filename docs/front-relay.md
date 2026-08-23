@@ -22,7 +22,10 @@
 ## Архитектура
 
 <p align="center">
-  <img src="../assets/whitelist-cascade-ru.svg" alt="AWG и два режима VLESS через FRONT" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="../assets/whitelist-cascade-ru-mobile.svg">
+    <img src="../assets/whitelist-cascade-ru.svg" alt="AWG и два режима VLESS через FRONT" width="760">
+  </picture>
 </p>
 
 | Путь | Транспорт | Назначение |
@@ -115,7 +118,11 @@ vless-user export phone
 vless-user delete laptop --yes
 ```
 
-После `create` полный JSON сразу выводится на экран. Реестр UUID, параметры
+После `create` полный JSON сразу выводится на экран. Кроме того, временная копия
+с правами `0600` сохраняется в `/run/kalimera-vless-exports/ИМЯ.json`, а команда
+печатает готовую строку `nano /run/kalimera-vless-exports/ИМЯ.json`. Каталог
+находится в RAM и очищается при перезагрузке; `vless-user export ИМЯ` повторно
+создаёт файл. Реестр UUID, параметры
 XHTTP и базовая конфигурация Xray находятся в зашифрованном runtime-хранилище.
 Изменение применяется атомарно: кандидат проверяется настоящим бинарником
 Xray, затем служба перезапускается и пакет секретов перепаковывается. При
@@ -132,7 +139,9 @@ ssh -p ПОРТ kalimera@FRONT \
   > phone.json
 ```
 
-На FRONT дополнительный открытый файл при этом не создаётся.
+Временный JSON на FRONT при этом также обновляется в
+`/run/kalimera-vless-exports`. Он не публикуется через HTTP, хранится только
+в RAM и удаляется при перезагрузке.
 
 ## Безопасная замена FRONT
 

@@ -18,6 +18,7 @@ BASE_CONFIG = Path({{ front_xray_base_config_path | to_json }})
 ACTIVE_CONFIG = Path({{ front_xray_config_path | to_json }})
 USERS_FILE = Path({{ front_vless_users_path | to_json }})
 SETTINGS_FILE = Path({{ front_vless_client_settings_path | to_json }})
+EXPORT_DIR = Path({{ front_vless_export_dir | to_json }})
 XRAY = {{ front_xray_binary_path | to_json }}
 SERVICE = {{ front_xray_service_name | to_json }}
 SYSTEMCTL = {{ front_systemctl_path | to_json }}
@@ -25,6 +26,7 @@ SECRETCTL = {{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secr
 INTEGRITY = "/usr/local/sbin/awg-managed-integrity"
 XRAY_USER = {{ front_xray_user | to_json }}
 XRAY_GROUP = {{ front_xray_group | to_json }}
+ADMIN_USER = {{ security_admin_user | default('kalimera') | to_json }}
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
@@ -210,8 +212,29 @@ def client_config(record: dict, settings: dict) -> dict:
     }
 
 
-def print_export(record: dict, settings: dict) -> None:
-    print(json.dumps(client_config(record, settings), ensure_ascii=False, indent=2))
+def export_payload(record: dict, settings: dict) -> bytes:
+    return (
+        json.dumps(client_config(record, settings), ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+
+
+def save_export(record: dict, settings: dict) -> Path:
+    account = pwd.getpwnam(ADMIN_USER)
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(EXPORT_DIR, 0o700)
+    os.chown(EXPORT_DIR, account.pw_uid, account.pw_gid)
+    path = EXPORT_DIR / f"{record['name']}.json"
+    atomic_write(path, export_payload(record, settings), 0o600, (account.pw_uid, account.pw_gid))
+    return path
+
+
+def print_export(record: dict, settings: dict) -> Path:
+    path = save_export(record, settings)
+    sys.stdout.buffer.write(export_payload(record, settings))
+    sys.stdout.flush()
+    print(f"Файл JSON сохранён: {path}", file=sys.stderr)
+    print(f"Открыть конфигурацию: nano {path}", file=sys.stderr)
+    return path
 
 
 def main() -> int:
@@ -300,6 +323,7 @@ def main() -> int:
             sync_config(validate_state(state, settings))
             restart_xray()
             persist_protected_state()
+            (EXPORT_DIR / f"{args.name}.json").unlink(missing_ok=True)
             print(f"Пользователь {args.name} удалён")
             return 0
         except BaseException:

@@ -405,6 +405,15 @@
   no_log: true
   when: front_relay_enabled | default(false) | bool
 
+- name: "Создание: временный каталог клиентских VLESS JSON"
+  ansible.builtin.file:
+    path: "{{ front_vless_export_dir }}"
+    state: directory
+    owner: "{{ security_admin_user | default('kalimera') }}"
+    group: "{{ security_admin_user | default('kalimera') }}"
+    mode: "0700"
+  when: front_relay_enabled | default(false) | bool
+
 - name: "Установка: управление VLESS-пользователями"
   ansible.builtin.template:
     src: vless-user.py.j2
