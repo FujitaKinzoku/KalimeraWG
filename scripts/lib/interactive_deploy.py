@@ -267,6 +267,8 @@ def migrate_production_inventory(production: Path) -> bool:
                 front_vars.get("front_cdn_domain", client_domain if cdn_ready else "")
             ),
             "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
             "awg3_transit_enabled": False,
         }
         front_changed = False
@@ -278,6 +280,8 @@ def migrate_production_inventory(production: Path) -> bool:
             "front_enabled": True,
             "front_relay_enabled": True,
             "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
             "awg3_transit_enabled": False,
         }.items():
             if front_vars.get(key) != value:
@@ -650,6 +654,8 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
             front_cdn_domain if front_access_modes == ["cdn"] else front_direct_domain
         ),
         "front_subscription_enabled": False,
+        "front_vless_encryption_enabled": True,
+        "front_xhttp_disguise_enabled": True,
         "awg3_transit_enabled": False,
         # Дефолт роли ("/api/stream") - общеизвестный путь и лёгкий
         # fingerprint; путь генерируется здесь, потому что он должен быть
@@ -4077,6 +4083,8 @@ def main() -> None:
                 "front_certbot_email": front_certbot_email,
                 "front_xhttp_path": "/" + secrets.token_urlsafe(9),
                 "front_subscription_enabled": False,
+                "front_vless_encryption_enabled": True,
+                "front_xhttp_disguise_enabled": True,
                 "awg3_transit_enabled": False,
                 "runtime_secrets_share_index": 3,
                 "runtime_secrets_peer_inventory_hosts": (

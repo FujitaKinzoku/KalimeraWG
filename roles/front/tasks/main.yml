@@ -313,11 +313,28 @@
 
 - name: "Проверка: пара VLESS Encryption уже создана"
   ansible.builtin.stat:
-    path: "{{ front_vless_decryption_path }}"
-  register: front_vless_encryption_file
+    path: "{{ item }}"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  register: front_vless_encryption_files
   when:
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
+
+- name: "Восстановление: удаление неполной пары VLESS Encryption"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+    - >-
+      (front_vless_encryption_files.results[0].stat.exists | bool) !=
+      (front_vless_encryption_files.results[1].stat.exists | bool)
 
 # "xray vlessenc" всегда выводит две пары - X25519 (не постквантовый) и
 # ML-KEM-768 (постквантовый), выбора флагом нет. Берём именно ML-KEM-768,
@@ -328,18 +345,29 @@
     cmd: |
       set -Eeuo pipefail
       raw=$(mktemp)
+      decryption=$(mktemp)
+      encryption=$(mktemp)
+      trap 'rm -f "$raw" "$decryption" "$encryption"' EXIT
       {{ front_xray_binary_path | quote }} vlessenc >"$raw"
       awk '/ML-KEM-768/{p=1} p' "$raw" |
-        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >{{ front_vless_decryption_path | quote }}
+        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >"$decryption"
       awk '/ML-KEM-768/{p=1} p' "$raw" |
-        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >{{ front_vless_encryption_path | quote }}
-      rm -f "$raw"
+        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >"$encryption"
+      test -s "$decryption"
+      test -s "$encryption"
+      install -o root -g root -m 0600 "$decryption" {{ front_vless_decryption_path | quote }}
+      install -o root -g root -m 0600 "$encryption" {{ front_vless_encryption_path | quote }}
     executable: /bin/bash
   changed_when: true
+  no_log: true
   when:
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
-    - not front_vless_encryption_file.stat.exists
+    - >-
+      not (
+        front_vless_encryption_files.results[0].stat.exists | bool and
+        front_vless_encryption_files.results[1].stat.exists | bool
+      )
 
 - name: "Ограничение прав: файлы VLESS Encryption"
   ansible.builtin.file:

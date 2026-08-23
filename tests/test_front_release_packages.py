@@ -71,8 +71,36 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("run\n      - -test", tasks)
         self.assertIn("kalimera-secretctl", tasks)
         self.assertIn("awg-managed-integrity", tasks)
+        self.assertIn("- key: front_vless_encryption_enabled", playbook)
+        self.assertIn("- key: front_xhttp_disguise_enabled", playbook)
+        self.assertIn("vlessenc", tasks)
+        self.assertIn("ML-KEM-768", tasks)
+        self.assertIn("Удаление неполной пары VLESS Encryption", tasks)
+        self.assertIn("xray-config.json.j2", tasks)
+        self.assertIn("notify: Перезапустить Xray-core FRONT", tasks)
+        self.assertIn("Строгая проверка FRONT", tasks)
         self.assertNotIn("systemd_service", tasks)
-        self.assertNotIn("restart", tasks)
+
+    def test_front_encryption_profile_is_enabled_by_every_installer_path(self) -> None:
+        defaults = (ROOT / "roles/front/defaults/main.yml").read_text(
+            encoding="utf-8"
+        )
+        example = (ROOT / "inventory/example/group_vars/front.yml").read_text(
+            encoding="utf-8"
+        )
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("front_vless_encryption_enabled: true", defaults)
+        self.assertIn("front_xhttp_disguise_enabled: true", defaults)
+        self.assertIn("front_vless_encryption_enabled: true", example)
+        self.assertIn("front_xhttp_disguise_enabled: true", example)
+        self.assertGreaterEqual(
+            installer.count('"front_vless_encryption_enabled": True'), 3
+        )
+        self.assertGreaterEqual(
+            installer.count('"front_xhttp_disguise_enabled": True'), 3
+        )
 
     def test_xray_cannot_modify_runtime_configuration_tree(self) -> None:
         tasks = (ROOT / "roles/front/tasks/main.yml").read_text(encoding="utf-8")

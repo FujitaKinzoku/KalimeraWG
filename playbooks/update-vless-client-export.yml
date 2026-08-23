@@ -1,11 +1,39 @@
 ---
-- name: Точечное обновление клиентского VLESS JSON на FRONT
+- name: Сохранение обязательного профиля VLESS Encryption в inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Проверка наличия production-переменных FRONT
+      ansible.builtin.stat:
+        path: "{{ inventory_dir }}/group_vars/front.yml"
+      register: front_production_vars
+
+    - name: Проверка production inventory FRONT
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - front_production_vars.stat.exists
+        fail_msg: Не найден inventory/production/group_vars/front.yml.
+
+    - name: Сохранение обязательных параметров FRONT
+      ansible.builtin.lineinfile:
+        path: "{{ inventory_dir }}/group_vars/front.yml"
+        regexp: "^{{ item.key }}:"
+        line: "{{ item.key }}: true"
+        insertafter: EOF
+        mode: "0600"
+      loop:
+        - key: front_vless_encryption_enabled
+        - key: front_xhttp_disguise_enabled
+
+- name: Включение VLESS Encryption и обновление клиентского JSON на FRONT
   hosts: front
   gather_facts: false
   any_errors_fatal: true
   tasks:
-    - name: Применение только экспортёра VLESS JSON
+    - name: Применение согласованной серверной и клиентской конфигурации VLESS
       ansible.builtin.include_role:
         name: front
         tasks_from: client-export-update.yml
-

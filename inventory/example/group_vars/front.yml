@@ -18,6 +18,8 @@ front_cdn_domain: ""
 front_client_domain: front.example.invalid
 front_certbot_email: admin@example.invalid
 front_xhttp_path: /replace-with-random-path
+front_vless_encryption_enabled: true
+front_xhttp_disguise_enabled: true
 front_subscription_enabled: false
 awg3_transit_enabled: false
 
