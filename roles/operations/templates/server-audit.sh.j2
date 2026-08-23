@@ -61,6 +61,11 @@ sensitive_modes_ok() {
     done <<'EOF'
 /etc/awg-telegram-monitor.env
 /etc/sing-box/config.json
+/etc/sing-box/front-backend.json
+/usr/local/etc/xray/config.json
+{% if awg_node_role == 'front' %}
+{{ front_origin_key_path | default('/etc/letsencrypt/live/invalid/privkey.pem') }}
+{% endif %}
 EOF
 
     for file in /etc/amnezia/amneziawg/*.conf /etc/awg/*.conf; do
@@ -171,6 +176,9 @@ known_public_listeners_only() {
     local known_tcp='{{ ssh_listen_port | int }} {{ ansible_port | default(22) | int }}'
 {% if awg_node_role == 'entry' %}
     local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}'
+{% elif awg_node_role == 'front' %}
+    known_tcp="$known_tcp 80 443"
+    local known_udp=''
 {% else %}
     local known_udp='{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) | int }}'
 {% endif %}
@@ -248,6 +256,7 @@ no_persistent_activity_logs() {
     fi
     for file in /var/log/auth.log* /var/log/syslog* /var/log/kern.log* \
                 /var/log/ufw.log* /var/log/fail2ban.log* \
+                /var/log/nginx/access.log* /var/log/nginx/error.log* \
                 /var/lib/fail2ban/fail2ban.sqlite3*; do
         [[ ! -s "$file" ]] || return 1
     done
@@ -265,7 +274,7 @@ no_persistent_activity_logs() {
     done
 }
 
-record 'строгая проверка AWG' {{ awg_health_script_path | quote }} --strict
+record 'строгая проверка роли сервера' {{ awg_health_script_path | quote }} --strict
 record 'корневой раздел заполнен менее чем на 90%' disk_ok
 record 'нет неисправных модулей systemd' no_failed_units
 record 'UFW активен' bash -c "ufw status | grep -q '^Status: active$'"
@@ -288,7 +297,9 @@ record 'рабочий администратор kalimera настроен бе
 record 'root SSH полностью отключён' root_ssh_policy_ok
 record_warn 'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' root_authorized_keys_clean
 {% endif %}
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
+{% endif %}
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
 record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled
 record_warn 'контейнерный runtime не расширяет поверхность атаки' no_container_runtime

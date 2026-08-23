@@ -56,6 +56,13 @@ def main() -> int:
         hidden_source = root / "persistent" / ".hidden-secret"
         hidden_source.write_text("hidden-acceptance-secret\n", encoding="utf-8")
         hidden_source.chmod(0o600)
+        linked_source = root / "persistent" / "linked-tree"
+        (linked_source / "archive").mkdir(parents=True, mode=0o700)
+        (linked_source / "live").mkdir(mode=0o700)
+        (linked_source / "archive" / "key.pem").write_text(
+            "linked-acceptance-secret\n", encoding="utf-8"
+        )
+        (linked_source / "live" / "key.pem").symlink_to("../archive/key.pem")
         local_share = root / "local.share"
         recovery_share = root / "recovery.share"
         identity = root / "identity"
@@ -86,6 +93,7 @@ def main() -> int:
             "mappings": [
                 {"source": str(source), "target": "test/secret.conf"},
                 {"source": str(hidden_source), "target": "test/.hidden-secret"},
+                {"source": str(linked_source), "target": "test/linked-tree"},
             ],
         }
         config_path.write_text(json.dumps(config), encoding="ascii")
@@ -112,6 +120,9 @@ def main() -> int:
             raise RuntimeError("unlocked content does not match")
         if hidden_source.read_text(encoding="utf-8") != "hidden-acceptance-secret\n":
             raise RuntimeError("hidden unlocked content does not match")
+        linked_key = linked_source / "live" / "key.pem"
+        if not linked_key.is_symlink() or linked_key.read_text(encoding="utf-8") != "linked-acceptance-secret\n":
+            raise RuntimeError("safe relative symlink was not restored")
 
         hidden_source.unlink()
         hidden_source.write_text("plaintext-copy-must-fail\n", encoding="utf-8")

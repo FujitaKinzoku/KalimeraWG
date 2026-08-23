@@ -150,8 +150,10 @@ entry_ru_zone_fallback_url: https://raw.githubusercontent.com/bivlked/amneziawg-
 entry_ru_zone_min_networks: 1000
 entry_ru_zone_update_calendar: "*-*-* 03:17:00"
 
-# Запасной транспорт VLESS+REALITY поверх sing-box - маскируется под настоящий
-# HTTPS-сайт (reality_fallback_dest) для клиентов, у которых сам AmneziaWG
-# заблокирован по фингерпринту UDP-хендшейка. Требует entry_ru_proxy_enabled.
-# По умолчанию выключено ради обратной совместимости.
+# FRONT отсутствует в example inventory. Если мастер добавляет отдельный FRONT,
+# VLESS принимается только там, а ENTRY включает независимый служебный backend.
+front_enabled: false
+front_relay_enabled: false
+front_backend_enabled: false
+reality_fallback_direct_client_enabled: false
 reality_fallback_enabled: false

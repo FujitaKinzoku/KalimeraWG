@@ -1,0 +1,26 @@
+---
+# Этот файл является примером модели FRONT. Хост FRONT намеренно отсутствует
+# в hosts.yml, поэтому example inventory по умолчанию остаётся двухсерверным.
+awg_node_role: front
+front_enabled: true
+front_relay_enabled: true
+front_active_id: front-1
+
+# direct означает TLS+XHTTP через FRONT без CDN. cdn разрешается только после
+# подготовки и проверки внешнего CDN-ресурса.
+front_access_modes:
+  - direct
+front_cdn_state: not_configured
+front_origin_domain: front.example.invalid
+front_direct_domain: front.example.invalid
+front_cdn_domain: ""
+front_client_domain: front.example.invalid
+front_certbot_email: admin@example.invalid
+front_xhttp_path: /replace-with-random-path
+front_subscription_enabled: false
+awg3_transit_enabled: false
+
+runtime_secrets_share_index: 3
+runtime_secrets_peer_inventory_hosts: >-
+  {{ (groups['entry'] | default([])) + (groups['exit'] | default([])) }}
+runtime_secrets_advertise_ipv4: "{{ ansible_host }}"

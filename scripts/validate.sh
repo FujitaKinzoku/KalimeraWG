@@ -10,6 +10,7 @@ ansible-playbook --syntax-check playbooks/audit.yml
 ansible-playbook --syntax-check playbooks/site.yml
 ansible-playbook --syntax-check playbooks/entry.yml
 ansible-playbook --syntax-check playbooks/exit.yml
+ansible-playbook --syntax-check playbooks/front.yml
 ansible-playbook --syntax-check playbooks/verify.yml
 ansible-playbook --syntax-check playbooks/finalize-monitoring.yml
 ansible-playbook --syntax-check playbooks/terminal.yml
@@ -23,6 +24,7 @@ ansible-playbook --syntax-check tests/check-sing-box.yml
 ansible-playbook --syntax-check tests/check-ansible-filters.yml
 ansible-playbook --syntax-check tests/check-runtime-secrets.yml
 ansible-playbook --syntax-check tests/check-ssh-host-key.yml
+ansible-playbook --syntax-check tests/check-front.yml
 
 python3 -m compileall -q scripts tests
 python3 -m unittest discover -s tests -p 'test_*.py'

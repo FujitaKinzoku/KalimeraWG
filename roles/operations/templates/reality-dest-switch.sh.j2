@@ -6,10 +6,17 @@ usage() {
 }
 
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+{% if front_backend_enabled | default(false) | bool %}
+readonly config={{ front_backend_config_path | default('/etc/sing-box/front-backend.json') | quote }}
+readonly service={{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}
+readonly inbound_tag=front-reality-in
+{% else %}
 readonly config={{ sing_box_config_path | quote }}
+readonly service={{ sing_box_service_name | quote }}
+readonly inbound_tag=reality-in
+{% endif %}
 readonly override={{ sing_box_reality_dest_override_path | quote }}
 readonly backup_dir=/root/config-backups/entry/sing-box
-readonly service={{ sing_box_service_name | quote }}
 readonly reality_port={{ reality_fallback_port }}
 readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
 
@@ -35,7 +42,8 @@ readonly -a candidates=(
 
 reality_in_present() {
     [[ -f "$config" ]] || return 1
-    jq -e '.inbounds[] | select(.tag == "reality-in")' "$config" >/dev/null 2>&1
+    jq -e --arg tag "$inbound_tag" \
+        '.inbounds[] | select(.tag == $tag)' "$config" >/dev/null 2>&1
 }
 
 validate_domain() {
@@ -79,8 +87,10 @@ case "$action" in
     status)
         [[ $# -eq 1 ]] || { usage >&2; exit 2; }
         reality_in_present || { echo 'REALITY выключен в текущей конфигурации.'; exit 0; }
-        jq -r '.inbounds[] | select(.tag == "reality-in") |
-            "dest: \(.tls.reality.handshake.server):\(.tls.reality.handshake.server_port)"' "$config"
+        jq -r --arg tag "$inbound_tag" \
+            '.inbounds[] | select(.tag == $tag) |
+            "dest: \(.tls.reality.handshake.server):\(.tls.reality.handshake.server_port)"' \
+            "$config"
         [[ -e "$override" ]] && echo 'Источник: локальное переопределение reality-dest-switch' || echo 'Источник: зашифрованный inventory'
         exit 0
         ;;
@@ -113,6 +123,16 @@ case "$action" in
         ;;
     *) usage >&2; exit 2 ;;
 esac
+
+{% if front_backend_enabled | default(false) | bool %}
+if [[ "$action" == set || "$action" == reset ]]; then
+    printf '%s\n' \
+        'При отдельном FRONT backend dest меняется только через production inventory.' \
+        'Это сохраняет одинаковый serverName на ENTRY и FRONT.' \
+        'Измените reality_fallback_dest и выполните kalimera-deploy --resume.' >&2
+    exit 2
+fi
+{% endif %}
 
 echo "Проверка dest-сайта ${new_dest}:${new_port}..."
 new_fingerprint="$(probe_dest "$new_dest" "$new_port")" || {
@@ -154,8 +174,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-jq --arg dest "$new_dest" --argjson port "$new_port" '
-  (.inbounds[] | select(.tag == "reality-in")) |=
+jq --arg tag "$inbound_tag" --arg dest "$new_dest" --argjson port "$new_port" '
+  (.inbounds[] | select(.tag == $tag)) |=
     (.tls.server_name = $dest | .tls.reality.handshake.server = $dest | .tls.reality.handshake.server_port = $port)
 ' "$config" >"$tmp"
 jq -n --arg dest "$new_dest" --argjson port "$new_port" '{dest:$dest,dest_port:$port}' >"$override_tmp"

@@ -9,25 +9,48 @@
       - front_xhttp_path is match('^/[A-Za-z0-9/_-]+$')
       - front_xhttp_mode in ['packet-up', 'stream-up', 'stream-one', 'auto']
       - front_reality_flow in ['xtls-rprx-vision-udp443', 'xtls-rprx-vision']
-      - not (front_subscription_enabled | default(false) | bool) or front_subscription_path is match('^/[A-Za-z0-9/_-]+$')
+      - not (front_subscription_enabled | default(false) | bool)
       - ansible_architecture in front_xray_packages
       - front_xray_packages[ansible_architecture].url is match('^https://github.com/XTLS/Xray-core/releases/download/')
       - front_xray_packages[ansible_architecture].checksum is match('^sha256:[0-9a-f]{64}$')
       - groups['entry'] | default([]) | length == 1
+      - front_access_modes is sequence
+      - front_access_modes is not string
+      - front_access_modes | length > 0
+      - front_access_modes | difference(['direct', 'cdn']) | length == 0
+      - front_cdn_state in ['not_configured', 'pending', 'ready', 'failed_validation']
+      - ('cdn' not in front_access_modes) or front_cdn_state == 'ready'
+      - ('cdn' not in front_access_modes) or front_cdn_domain | length > 0
+      - ('direct' not in front_access_modes) or front_direct_domain == front_origin_domain
     fail_msg: >-
       Нужны настоящий origin-домен (A-запись уже указывает на этот сервер),
       e-mail для Certbot, закреплённый пакет Xray-core и ровно один хост в
       группе entry.
   when: front_relay_enabled | default(false) | bool
 
-# FRONT - второй REALITY-клиент ENTRY (roles/sing_box); без включённого там
-# front_relay_enabled эти факты не вычисляются (пустые строки), и конфиг
-# Xray будет нерабочим без явной причины в логах - лучше упасть здесь сразу.
+- name: Проверка DNS и TLS готового CDN-ресурса
+  ansible.builtin.shell: |
+    set -Eeuo pipefail
+    getent ahostsv4 {{ front_cdn_domain | quote }} >/dev/null
+    printf '' | timeout 10 openssl s_client \
+      -connect {{ (front_cdn_domain ~ ':443') | quote }} \
+      -servername {{ front_cdn_domain | quote }} \
+      -verify_return_error >/dev/null 2>&1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_cdn_state == 'ready'
+
+# FRONT подключается к отдельному VLESS REALITY backend на ENTRY. Без
+# включённого backend необходимые факты не вычисляются, и конфигурация Xray
+# не сможет пройти проверку. Останавливаем deploy до внесения изменений.
 - name: "Проверка: ENTRY подготовлен для FRONT-релея"
   ansible.builtin.assert:
     quiet: true
     that:
-      - hostvars[groups['entry'][0]].reality_fallback_enabled | default(false) | bool
+      - hostvars[groups['entry'][0]].front_backend_enabled | default(false) | bool
       - hostvars[groups['entry'][0]].front_relay_enabled | default(false) | bool
       - hostvars[groups['entry'][0]].reality_fallback_public_key | default('') | length > 0
       - hostvars[groups['entry'][0]].reality_fallback_front_client_uuid | default('') | length > 0
@@ -60,11 +83,9 @@
     front_entry_reality_short_id: "{{ hostvars[groups['entry'][0]].reality_fallback_short_id }}"
     front_entry_reality_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_client_uuid }}"
     front_entry_reality_front_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_front_client_uuid }}"
-    # REALITY-инбаунд живёт в том же процессе sing-box, что и российский
-    # прокси; при ручном отключении прокси служба останавливается целиком, и
-    # проверять доступность её порта с FRONT в этом режиме бессмысленно.
-    front_entry_reality_stopped: >-
-      {{ hostvars[groups['entry'][0]].reality_fallback_stopped_with_proxy | default(false) | bool }}
+    # Backend работает независимо от RU-прокси и должен оставаться доступным
+    # при ручном и автоматическом отключении SOCKS5/TUN.
+    front_entry_reality_stopped: false
   no_log: true
   when: front_relay_enabled | default(false) | bool
 
@@ -78,6 +99,41 @@
     update_cache: true
     cache_valid_time: 3600
     lock_timeout: 600
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Отключение: глобальный access log Nginx"
+  ansible.builtin.replace:
+    path: /etc/nginx/nginx.conf
+    regexp: '(?m)^[ \t]*access_log[ \t]+[^;]+;[ \t]*$'
+    replace: '    access_log off;'
+  notify: Перезагрузить Nginx FRONT
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Отключение: глобальный error log Nginx"
+  ansible.builtin.replace:
+    path: /etc/nginx/nginx.conf
+    regexp: '(?m)^[ \t]*error_log[ \t]+[^;]+;[ \t]*$'
+    replace: 'error_log /dev/null crit;'
+  notify: Перезагрузить Nginx FRONT
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Поиск: ранее созданные журналы Nginx"
+  ansible.builtin.find:
+    paths: /var/log/nginx
+    patterns:
+      - '*.log'
+      - '*.log.*'
+    file_type: file
+  register: front_nginx_log_files
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Удаление: ранее созданные журналы Nginx"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ front_nginx_log_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
   when: front_relay_enabled | default(false) | bool
 
 - name: "Создание: каталог для ACME HTTP-01"
@@ -164,6 +220,24 @@
     - front_relay_enabled | default(false) | bool
     - not front_origin_cert_file.stat.exists
 
+- name: "Создание: каталог deploy hooks Certbot"
+  ansible.builtin.file:
+    path: /etc/letsencrypt/renewal-hooks/deploy
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Установка: безопасный deploy hook обновления TLS-сертификата"
+  ansible.builtin.template:
+    src: certbot-deploy-hook.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/90-kalimerawg-front
+    owner: root
+    group: root
+    mode: "0700"
+  when: front_relay_enabled | default(false) | bool
+
 - name: "Создание: каталог кеша пакетов"
   ansible.builtin.file:
     path: "{{ front_xray_package_cache | dirname }}"
@@ -210,12 +284,28 @@
   notify: Перезапустить Xray-core FRONT
   when: front_relay_enabled | default(false) | bool
 
+- name: "Создание: системная группа Xray-core"
+  ansible.builtin.group:
+    name: "{{ front_xray_group }}"
+    system: true
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Создание: системный пользователь Xray-core"
+  ansible.builtin.user:
+    name: "{{ front_xray_user }}"
+    group: "{{ front_xray_group }}"
+    system: true
+    create_home: false
+    home: /nonexistent
+    shell: /usr/sbin/nologin
+  when: front_relay_enabled | default(false) | bool
+
 - name: "Создание: каталог состояния Xray-core"
   ansible.builtin.file:
     path: "{{ front_xray_state_dir }}"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ front_xray_user }}"
+    group: "{{ front_xray_group }}"
     mode: "0700"
   when: front_relay_enabled | default(false) | bool
 
@@ -283,54 +373,12 @@
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
 
-- name: "Создание: каталог подписки FRONT"
-  ansible.builtin.file:
-    path: "{{ front_subscription_dir }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0755"
-  when:
-    - front_relay_enabled | default(false) | bool
-    - front_subscription_enabled | default(false) | bool
-
-# Подписка отражает те же переменные, что уходят в xray-config.json.j2 -
-# при следующем ./deploy --resume после смены front_xhttp_path/mode или
-# ключа VLESS Encryption содержимое подписки обновится само, отдельно
-# ничего пересобирать не нужно.
-#
-# Маскировка XHTTP (front_xhttp_disguise_enabled) в ссылку не попадает
-# принципиально - Happ ожидает от подписки список ссылок vless://, а не
-# JSON, и объект "extra" в такую ссылку не помещается (см. комментарий в
-# defaults/main.yml). Значение шифрования VLESS в ссылку попадает: это
-# обычный query-параметр, а не вложенный объект.
-- name: "Формирование: содержимое подписки FRONT"
-  ansible.builtin.set_fact:
-    # Одной строкой намеренно: YAML folded-block (">-") вставил бы пробел
-    # на месте каждого переноса, а пробел внутри URL ссылку ломает.
-    front_subscription_link: "vless://{{ front_entry_reality_client_uuid }}@{{ front_client_domain }}:443?encryption={{ front_vless_encryption if front_vless_encryption_enabled | default(false) | bool else 'none' }}&security=tls&sni={{ front_client_domain }}&type=xhttp&path={{ front_xhttp_path | replace('/', '%2F') }}&mode={{ front_xhttp_mode }}#{{ front_subscription_title }}"
-  no_log: true
-  when:
-    - front_relay_enabled | default(false) | bool
-    - front_subscription_enabled | default(false) | bool
-
-- name: "Установка: файл подписки FRONT"
-  ansible.builtin.copy:
-    dest: "{{ front_subscription_file_path }}"
-    content: "{{ ('#profile-title: ' ~ front_subscription_title ~ '\n' ~ front_subscription_link ~ '\n') | b64encode }}"
-    owner: root
-    group: root
-    mode: "0644"
-  when:
-    - front_relay_enabled | default(false) | bool
-    - front_subscription_enabled | default(false) | bool
-
 - name: "Установка: конфигурация Xray-core FRONT"
   ansible.builtin.template:
     src: xray-config.json.j2
     dest: "{{ front_xray_config_path }}"
-    owner: root
-    group: root
+    owner: "{{ front_xray_user }}"
+    group: "{{ front_xray_group }}"
     mode: "0600"
   notify: Перезапустить Xray-core FRONT
   when: front_relay_enabled | default(false) | bool

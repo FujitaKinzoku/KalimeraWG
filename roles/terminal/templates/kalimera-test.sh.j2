@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+usage() { echo 'Использование: kalimera-test'; }
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду через управление KalimeraWG.' >&2; exit 1; }
+
+readonly role={{ awg_node_role | default('unknown') | quote }}
+failures=0
+
+printf 'KalimeraWG: полная проверка роли %s\n' "$role"
+
+if ! /usr/local/sbin/awg-health --strict; then
+    failures=$((failures + 1))
+fi
+
+if ! /usr/local/sbin/server-audit; then
+    failures=$((failures + 1))
+fi
+
+failed_units="$(systemctl --failed --no-legend --plain --no-pager || true)"
+if [[ -n "$failed_units" ]]; then
+    printf 'FAIL обнаружены неисправные модули systemd:\n%s\n' "$failed_units"
+    failures=$((failures + 1))
+else
+    printf 'OK   неисправные модули systemd отсутствуют\n'
+fi
+
+case "$role" in
+    entry)
+        printf 'INFO проверены клиенты, AWG 3+, DNS, RU-маршрутизация и FRONT backend\n'
+        ;;
+    exit)
+        printf 'INFO проверены AWG 3+, NAT, изоляция и внешний маршрут\n'
+        ;;
+    front)
+        printf 'INFO проверены Nginx, Xray-core, TLS, доступ к ENTRY и внешняя защита\n'
+        ;;
+esac
+
+if (( failures == 0 )); then
+    printf 'GOOD: полная проверка роли %s пройдена\n' "$role"
+    exit 0
+fi
+printf 'BAD: роль %s, ошибок: %d\n' "$role" "$failures"
+exit 1

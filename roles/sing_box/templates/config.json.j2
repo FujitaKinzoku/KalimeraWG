@@ -26,7 +26,7 @@
       "listen_port": {{ entry_dns_ru_port }},
       "override_address": "{{ doh_server }}",
       "override_port": 53
-    }{% if reality_fallback_enabled | default(false) | bool %},
+    }{% if reality_fallback_enabled | default(false) | bool and not (front_backend_enabled | default(false) | bool) %},
     {
       "type": "vless",
       "tag": "reality-in",
@@ -78,7 +78,7 @@
         "server": "bootstrap-unbound",
         "strategy": "ipv4_only"
       }
-    }{% if reality_fallback_enabled | default(false) | bool %},
+    }{% if reality_fallback_enabled | default(false) | bool and not (front_backend_enabled | default(false) | bool) %},
     {
       "type": "direct",
       "tag": "direct-exit",
@@ -100,7 +100,7 @@
   "route": {
     "final": "ru-socks",
     "default_interface": "{{ entry_wan_interface }}",
-{% if reality_fallback_enabled | default(false) | bool %}
+{% if reality_fallback_enabled | default(false) | bool and not (front_backend_enabled | default(false) | bool) %}
     "default_domain_resolver": "bootstrap-unbound",
     "rule_set": [
       {
@@ -127,7 +127,7 @@
       {
         "inbound": ["dns-in"],
         "action": "hijack-dns"
-      }{% if reality_fallback_enabled | default(false) | bool %},
+      }{% if reality_fallback_enabled | default(false) | bool and not (front_backend_enabled | default(false) | bool) %},
       {
         "inbound": ["reality-in"],
         "action": "sniff"

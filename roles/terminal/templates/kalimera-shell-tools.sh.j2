@@ -43,6 +43,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
         sudo -n /usr/local/libexec/kalimera-admin-command "$@"
     }
     function kalimera-status { _kalimera_admin kalimera-status "$@"; }
+    function kalimera-test { _kalimera_admin kalimera-test "$@"; }
     function awg-health { _kalimera_admin awg-health "$@"; }
     function server-audit { _kalimera_admin server-audit "$@"; }
     function maintenance { _kalimera_admin maintenance "$@"; }

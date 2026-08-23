@@ -4,10 +4,9 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
-    # awg-kernel-guard ставит roles/operations и он обслуживает DKMS-модуль
-    # AmneziaWG - на FRONT нет ни этой роли, ни самого модуля
-    # (docs/front-relay.md). Проверка состояния ниже, наоборот, на FRONT
-    # нужна: roles/health там применяется и имеет собственную ветку.
+    # awg-kernel-guard обслуживает только DKMS-модуль AmneziaWG на ENTRY и
+    # EXIT. На FRONT общая роль operations установлена, но модуль AWG не нужен.
+    # Строгая проверка ниже выполняется для всех активных ролей.
     - name: Подготовка DKMS для текущего и следующего загрузочного ядра
       ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
       changed_when: false

@@ -17,7 +17,7 @@
       - (vault_proxy_password | default(vault_soax_password | default(''))) is string
     fail_msg: "Требуются закреплённый пакет sing-box и зашифрованные учётные данные SOCKS5, если задана аутентификация"
   no_log: true
-  when: entry_ru_proxy_enabled | bool
+  when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool
 
 - name: "Проверка постоянного локального переопределения RU-прокси"
   ansible.builtin.stat:
@@ -162,7 +162,7 @@
     owner: root
     group: root
     mode: "0755"
-  when: entry_ru_proxy_enabled | bool
+  when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool
 
 - name: "Загрузка: прокси sing-box - этап 4"
   ansible.builtin.get_url:
@@ -172,14 +172,14 @@
     owner: root
     group: root
     mode: "0644"
-  when: entry_ru_proxy_enabled | bool
+  when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool
 
 - name: "Установка: прокси sing-box - этап 5"
   ansible.builtin.apt:
     deb: "{{ sing_box_package_cache }}"
     state: present
     lock_timeout: 600
-  when: entry_ru_proxy_enabled | bool
+  when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool
 
 - name: "Подготовка: прокси sing-box - этап 6"
   ansible.builtin.file:
@@ -188,18 +188,20 @@
     owner: root
     group: root
     mode: "0700"
-  when: entry_ru_proxy_enabled | bool
+  when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool
 
-- name: "Проверка: запасной транспорт REALITY требует активный RU-прокси"
+- name: "Проверка: прежний совмещённый REALITY требует активный RU-прокси"
   ansible.builtin.assert:
     quiet: true
     that:
       - entry_ru_proxy_enabled | bool
     fail_msg: >-
-      reality_fallback_enabled требует entry_ru_proxy_enabled=true -
-      REALITY-путь переиспользует существующий outbound ru-socks (SOAX) для
-      RU-ветки маршрутизации, отдельного механизма для неё нет.
-  when: reality_fallback_enabled | default(false) | bool
+      Совмещённый REALITY-inbound в основной службе sing-box требует
+      entry_ru_proxy_enabled=true. Управляемый FRONT использует отдельную
+      службу backend и от состояния RU-прокси не зависит.
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not (front_backend_enabled | default(false) | bool)
 
 # Fail-open REALITY RU-ветки использует те же флаги, что и ядерный каскад
 # (awg-ru-proxy-watch и ручное отключение), чтобы не было независимых
@@ -217,14 +219,14 @@
   register: sing_box_reality_ru_proxy_manual_off
   when: reality_fallback_enabled | default(false) | bool
 
-# Публикуется как обычный факт, чтобы FRONT-релей мог его прочитать через
-# hostvars: при ручном отключении прокси sing-box останавливается целиком и
-# REALITY-инбаунд вместе с ним, поэтому проверять доступность его порта с
-# FRONT в этом режиме бессмысленно.
+# Состояние нужно только прежнему совмещённому режиму. Управляемый FRONT
+# обслуживает отдельная служба backend, которая не останавливается вместе с
+# RU-прокси.
 - name: "Публикация состояния запасного транспорта REALITY"
   ansible.builtin.set_fact:
     reality_fallback_stopped_with_proxy: >-
-      {{ sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool }}
+      {{ (not (front_backend_enabled | default(false) | bool)) and
+         (sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool) }}
   when: reality_fallback_enabled | default(false) | bool
 
 # Учитываются ОБА флага. Раньше проверялся только watchdog-флаг

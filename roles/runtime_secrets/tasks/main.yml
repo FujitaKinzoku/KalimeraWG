@@ -197,6 +197,10 @@
     - awg-quick@.service
     - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
     - sing-box.service
+    - "{{ front_backend_service_name | default('kalimera-front-backend.service') }}"
+    - "{{ front_xray_service_name | default('xray.service') }}"
+    - nginx.service
+    - certbot.service
     - awg-telegram-monitor.service
   when: runtime_secrets_enabled | bool
 
@@ -211,6 +215,10 @@
     - {unit: awg-quick@.service, template: awg-quick-credential.conf.j2}
     - {unit: "{{ awg3_transit_service_name | default('awg3-transit.service') }}", template: awg3-credential.conf.j2}
     - {unit: sing-box.service, template: sing-box-credential.conf.j2}
+    - {unit: "{{ front_backend_service_name | default('kalimera-front-backend.service') }}", template: front-backend-credential.conf.j2}
+    - {unit: "{{ front_xray_service_name | default('xray.service') }}", template: xray-credential.conf.j2}
+    - {unit: nginx.service, template: runtime-dependency.conf.j2}
+    - {unit: certbot.service, template: runtime-dependency.conf.j2}
     - {unit: awg-telegram-monitor.service, template: telegram-credential.conf.j2}
   notify: Перечитать systemd после настройки runtime-секретов
   register: runtime_credential_dropins
@@ -244,6 +252,9 @@
     - "awg-quick@{{ entry_legacy_client_interface | default('awg-old') }}.service"
     - "awg-quick@{{ entry_mobile_client_interface | default('awg-mobile') }}.service"
     - sing-box.service
+    - "{{ front_backend_service_name | default('kalimera-front-backend.service') }}"
+    - "{{ front_xray_service_name | default('xray.service') }}"
+    - nginx.service
   changed_when: true
   when:
     - runtime_secrets_enabled | bool

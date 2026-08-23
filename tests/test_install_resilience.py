@@ -116,7 +116,7 @@ class InstallResilienceTests(unittest.TestCase):
         )
         generation = installer.index('account_passwords = {')
         success = installer.rindex(
-            'ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")'
+            'ui_success("Все активные серверы настроены, проверены и готовы к работе.")'
         )
         summary = installer.rindex('show_deployment_summary(production)')
         display = installer.rindex('show_generated_account_passwords(account_passwords)')
@@ -133,6 +133,51 @@ class InstallResilienceTests(unittest.TestCase):
         )
         self.assertIn('if not local_entry:\n        check_ssh(entry_host', installer)
         self.assertIn('variables.get("ansible_connection") == "local"', installer)
+
+    def test_front_packages_one_through_four_remain_integrated(self) -> None:
+        site = (ROOT / "playbooks/site.yml").read_text(encoding="utf-8")
+        sing_box = (ROOT / "roles/sing_box/templates/config.json.j2").read_text(
+            encoding="utf-8"
+        )
+        backend = (
+            ROOT / "roles/front_backend/templates/front-backend.json.j2"
+        ).read_text(encoding="utf-8")
+        front_tasks = (ROOT / "roles/front/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        front_nginx = (
+            ROOT / "roles/front/templates/nginx-front.conf.j2"
+        ).read_text(encoding="utf-8")
+        runtime_config = (
+            ROOT / "roles/runtime_secrets/templates/config.json.j2"
+        ).read_text(encoding="utf-8")
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("- role: front_backend", site)
+        front_play = site[site.index("- name: Настройка FRONT сервера") :]
+        for role in ("common", "terminal", "security", "front", "operations", "fail2ban", "health"):
+            self.assertIn(f"- role: {role}", front_play)
+
+        self.assertIn("not (front_backend_enabled | default(false) | bool)", sing_box)
+        self.assertIn('"tag": "front-reality-in"', backend)
+        self.assertIn('"name": "front-service"', backend)
+        self.assertIn('"routing_mark": "{{ entry_exit_mark }}"', backend)
+        self.assertIn('"routing_mark": "{{ entry_ru_mark }}"', backend)
+        self.assertIn('"disabled": true', backend)
+        self.assertIn("{'source': '/etc/letsencrypt', 'target': 'letsencrypt'}", runtime_config)
+        runtime_tasks = (
+            ROOT / "roles/runtime_secrets/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("{unit: nginx.service, template: runtime-dependency.conf.j2}", runtime_tasks)
+        self.assertIn("{unit: certbot.service, template: runtime-dependency.conf.j2}", runtime_tasks)
+
+        self.assertIn("front_subscription_enabled", front_tasks)
+        self.assertNotIn("subscription", front_nginx.lower())
+        self.assertIn('"front_subscription_enabled": False', installer)
+        self.assertIn('"front_cdn_state": front_cdn_state', installer)
+        self.assertIn('"front_backend_enabled": front_enabled', installer)
 
 
 if __name__ == "__main__":

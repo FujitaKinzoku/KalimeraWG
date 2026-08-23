@@ -77,6 +77,7 @@
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
   changed_when: false
+  when: awg_node_role | default('') in ['entry', 'exit']
 
 - name: "Установка: администрирование - этап 7"
   ansible.builtin.template:

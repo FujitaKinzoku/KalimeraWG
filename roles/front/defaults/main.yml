@@ -3,13 +3,22 @@
 # ENTRY как обычный REALITY-клиент (см. docs/front-relay.md). Выключено по
 # умолчанию - роль не создаёт файлов/сервисов, пока не включено явно через
 # ./deploy --enable-front.
-front_relay_enabled: false
+front_enabled: false
+front_relay_enabled: "{{ front_enabled | bool }}"
+front_access_modes:
+  - direct
+front_cdn_state: not_configured
+front_active_id: front-1
+front_direct_domain: "{{ front_origin_domain }}"
+front_cdn_domain: ""
 
 front_xray_service_name: xray.service
 front_xray_binary_path: /usr/local/bin/xray
 front_xray_package_cache: /var/cache/ansible/xray.zip
 front_xray_config_path: /usr/local/etc/xray/config.json
 front_xray_state_dir: /usr/local/etc/xray
+front_xray_user: xray
+front_xray_group: xray
 
 # Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по
 # архитектуре - тот же паттерн, что entry_sing_box_packages в roles/sing_box.
@@ -112,21 +121,7 @@ front_xhttp_disguise_padding_key: mc_token
 # достаточно переопределить только эту переменную в group_vars/front.yml.
 front_client_domain: "{{ front_origin_domain }}"
 
-# Подписка (Happ и совместимые клиенты периодически перезапрашивают эту
-# ссылку и сами подтягивают изменения - без переустановки профиля вручную
-# при каждой смене пути/режима/ключа). Подтверждено официальной
-# документацией Happ (happ.su/main/dev-docs/app-management): тело подписки
-# - обычный список ссылок vless:// (в base64), метаданные - через
-# HTTP-заголовки profile-title/profile-update-interval. JSON - отдельный,
-# одноразовый способ импорта ОДНОГО сервера, а не формат подписки, поэтому
-# маскировка XHTTP (front_xhttp_disguise_enabled, объект "extra") через
-# подписку недоступна принципиально - только обычная ссылка без неё.
-# Выключено по умолчанию: путь публичный и никем, кроме самой ссылки, не
-# защищён - при включении переопределите front_subscription_path на
-# непубличный.
+# Подписки не входят в модель FRONT. Клиентские данные будут выдаваться
+# отдельными защищёнными JSON-файлами в следующем пакете управления
+# пользователями.
 front_subscription_enabled: false
-front_subscription_path: /api/v1/sub
-front_subscription_title: Kalimera-FRONT
-front_subscription_update_interval_hours: 24
-front_subscription_dir: /var/www/front-subscription
-front_subscription_file_path: "{{ front_subscription_dir }}/subscription.b64"

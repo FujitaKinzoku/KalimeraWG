@@ -16,8 +16,8 @@ RestartSec=2
 # десятки), и в режиме packet-up каждый пакет аплинка - отдельный
 # HTTP-запрос, поэтому в лимит реально упереться.
 LimitNOFILE=65535
-User=root
-Group=root
+User={{ front_xray_user }}
+Group={{ front_xray_group }}
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
@@ -29,6 +29,8 @@ ProtectKernelModules=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

@@ -22,7 +22,8 @@ AmneziaWG 3+ · VLESS+REALITY · CDN/XHTTP · маршрутный DNS · SOAX/S
 </p>
 
 KalimeraWG превращает две чистые VPS с Ubuntu 24.04 в воспроизводимый каскад,
-создаёт первого VPN-клиента и устанавливает инструменты эксплуатации. Выпуск
+создаёт первого VPN-клиента и устанавливает инструменты эксплуатации. В
+тестовой ветке можно добавить третью роль FRONT для VLESS/XHTTP. Выпуск
 `v2.1.0` проверен повторными чистыми установками на разных VPS.
 
 > **v2.0.0 - крупный релиз усиления безопасности.** Переработана модель
@@ -87,15 +88,14 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
   <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="100%">
 </p>
 
-Три входа являются **альтернативами**, а не последовательными слоями одного
-подключения. На обычной сети сохраняется быстрый AWG; при блокировке UDP можно
-использовать прямой REALITY; при IP-фильтрации клиент обращается к доступному
-CDN edge и попадает на ENTRY через FRONT.
+Основной AWG идёт прямо на ENTRY. VLESS всегда завершается на FRONT: клиент
+подключается к origin-домену напрямую либо к доступному CDN edge. Затем FRONT
+открывает служебный REALITY-хоп к отдельному backend ENTRY.
 
 | Путь клиента | Транспорт | Назначение | Статус этапа |
 |---|---|---|---|
 | клиент → ENTRY | AmneziaWG 3+, UDP/443 или mobile UDP/8443 | основной путь с минимальными накладными расходами | проверен ранее |
-| клиент → ENTRY | VLESS+REALITY, TCP/443 | прямой резерв при блокировке UDP/сигнатуры AWG | реализован в тестовой ветке |
+| клиент → FRONT | TLS + VLESS/XHTTP, TCP/443 | прямой VLESS без CDN; публичного VLESS на ENTRY нет | реализован в тестовой ветке |
 | клиент → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | вход при доступном CDN во время IP allowlist | подтверждён полевым тестом |
 | FRONT → ENTRY | VLESS+REALITY | скрывает origin ENTRY от клиента CDN-пути | подтверждён полевым тестом |
 | ENTRY → EXIT | отдельный AWG 3+ | основной и принудительный `se-domain` egress | без изменений |
@@ -107,7 +107,7 @@ CDN edge и попадает на ENTRY через FRONT.
 |---|---|
 | запуск новой сессии во время ограничения | соединение установлено через CDN, без прямого обращения клиента к IP ENTRY |
 | доставка до FRONT | реальный TLS на клиентском домене и XHTTP прошли CDN |
-| внутренний хоп | FRONT подключился к `reality-in` на ENTRY |
+| внутренний хоп | FRONT подключился к отдельной службе `kalimera-front-backend` на ENTRY |
 | политика после входа | RU-трафик сохранил SOCKS5/fail-open, остальной трафик - EXIT через AWG 3+ |
 | существующие профили | AWG/mobile/old не заменены и продолжают использовать прежние интерфейсы |
 
@@ -167,7 +167,7 @@ ENTRY. Клиентский и межсерверный каналы испол�
 | Российский residential/mobile IP | SOAX или другой SOCKS5 |
 | Максимальная скорость клиента | профиль `performance` |
 | Уведомления об отказах | Telegram-мониторинг |
-| AmneziaWG заблокирован по фингерпринту UDP | VLESS+REALITY (`reality_fallback_enabled`) |
+| AmneziaWG заблокирован по фингерпринту UDP | VLESS/XHTTP через FRONT без CDN |
 | Режим белых списков на проверенной мобильной сети | подтверждённый резерв FRONT через совместимый облачный CDN, [docs/front-relay.md](docs/front-relay.md) |
 
 ## Маршрутизация и DNS
@@ -269,13 +269,13 @@ vpn-user delete phone
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Домены | `ru-domain`, `se-domain`, `entry-domain` |
 | RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
-| REALITY | `reality-dest-switch status\|list\|set\|reset` |
-| FRONT-релей | `./deploy --resume --enable-front`, [docs/front-relay.md](docs/front-relay.md) |
+| REALITY | `reality-dest-switch status\|list`; смена dest управляемого FRONT выполняется через inventory и deploy |
+| FRONT-релей | `./deploy --resume --enable-front`, затем `kalimera-test`; [docs/front-relay.md](docs/front-relay.md) |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 
-При новом SSH-входе ENTRY и EXIT показывают адаптивную таблицу с фактическими
-endpoint, DNS, MTU, маршрутами и состоянием защиты. Полная справка:
+При новом SSH-входе ENTRY, EXIT и FRONT показывают адаптивную таблицу с
+фактическими endpoint, режимами, маршрутами и состоянием защиты. Полная справка:
 `kalimera-help`.
 
 После завершения установки обычная работа выполняется под `kalimera`. Команды

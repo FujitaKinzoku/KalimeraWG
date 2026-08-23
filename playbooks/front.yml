@@ -7,6 +7,19 @@
     - name: Сбор сведений о FRONT сервере
       ansible.builtin.setup:
 
+    - name: Определение внешнего интерфейса FRONT
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        ip -4 route show default | awk 'NR == 1 {print $5}'
+      args:
+        executable: /bin/bash
+      register: front_wan_interface_probe
+      changed_when: false
+
+    - name: Выбор внешнего интерфейса FRONT
+      ansible.builtin.set_fact:
+        exit_wan_interface: "{{ front_wan_interface_probe.stdout | trim }}"
+
     - name: Проверка служб перед защищённой установкой
       ansible.builtin.service_facts:
       when: not (awg_enable_fail2ban | default(true) | bool)
@@ -22,7 +35,11 @@
       when: awg_adoption_mode == 'apply'
     - role: terminal
       when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
     - role: front
+      when: awg_adoption_mode == 'apply'
+    - role: operations
       when: awg_adoption_mode == 'apply'
     - role: fail2ban
       when: awg_adoption_mode == 'apply'

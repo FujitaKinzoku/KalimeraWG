@@ -563,7 +563,9 @@
           (entry_exit_interface | default('') | string),
           (entry_ru_proxy_interface | default('') | string),
           (exit_awg_interface | default('') | string),
-          (exit_awg_subnet | default('') | string)
+          (exit_awg_subnet | default('') | string),
+          (front_enabled | default(false) | bool | string),
+          (front_origin_domain | default('') | string)
         ] | join('|')) | hash('sha256') }}
 
 - name: "Проверка отпечатка действующей политики UFW"
@@ -751,15 +753,10 @@
     - awg_node_role == 'exit'
     - not (entry_dns_default_via_exit | default(false) | bool)
 
-# Открыт всем намеренно - REALITY должен отвечать любому, кто постучится,
-# в том числе активным зондам DPI, точно как настоящий HTTPS-сервер.
-# Запасной транспорт REALITY изолируется так же, как межсерверный AWG между
-# ENTRY и EXIT (front_public_ipv4 - постоянный публичный IPv4 FRONT,
-# записывается при ./deploy --enable-front тем же приёмом, что
-# security_interserver_peer_ipv4 для пары ENTRY/EXIT). Прямые подключения к
-# ENTRY принимаются только пока FRONT не подключён - как только он есть,
-# единственный поддерживаемый путь клиента к REALITY идёт через него, а
-# порт на ENTRY открыт исключительно для этого одного адреса.
+# В прежнем режиме без FRONT REALITY доступен напрямую. После подключения
+# FRONT прямой пользовательский путь отключается, а TCP-порт ENTRY принимает
+# только адрес FRONT. Значение front_public_ipv4 фиксирует установщик тем же
+# способом, что адрес межсерверного пира ENTRY/EXIT.
 - name: "Разрешение запасного транспорта VLESS+REALITY (без FRONT)"
   community.general.ufw:
     rule: allow
@@ -1483,6 +1480,21 @@
   ansible.builtin.debug:
     msg: "SSH не изменяется, поскольку security_manage_ssh=false."
   when: not security_manage_ssh | bool
+
+- name: Разрешение веб-доступа к FRONT в управляемой политике UFW
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    interface: "{{ exit_wan_interface }}"
+    direction: in
+    comment: "{{ 'FRONT ACME' if item == '80' else 'FRONT VLESS TLS' }}"
+  loop:
+    - "80"
+    - "443"
+  when:
+    - awg_node_role == 'front'
+    - front_enabled | default(front_relay_enabled | default(false)) | bool
 
 # При первоначальном переносе SSH на управляемый порт переходное правило
 # прежнего порта удаляется только в конце SSH-блока. Снимок, сделанный до
