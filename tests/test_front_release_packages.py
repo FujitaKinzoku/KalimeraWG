@@ -98,6 +98,9 @@ class FrontReleasePackagesTest(unittest.TestCase):
         )
 
     def test_front_backend_gets_minimal_rule_set_access(self) -> None:
+        backend_tasks = (
+            ROOT / "roles/front_backend/tasks/main.yml"
+        ).read_text(encoding="utf-8")
         runtime_config = (
             ROOT / "roles/runtime_secrets/templates/config.json.j2"
         ).read_text(encoding="utf-8")
@@ -108,6 +111,11 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("'read_paths': ['reality/rules']", runtime_config)
         self.assertIn("def apply_runtime_access(config: dict)", secretctl)
         self.assertIn("apply_runtime_access(config)", secretctl)
+        recovery = backend_tasks.index(
+            "Восстановление минимального доступа backend FRONT к публичным rule-set"
+        )
+        handlers = backend_tasks.index("Применение обработчиков backend FRONT")
+        self.assertLess(recovery, handlers)
 
     def test_standalone_front_playbook_seals_runtime_and_integrity(self) -> None:
         playbook = (ROOT / "playbooks/front.yml").read_text(encoding="utf-8")
