@@ -34,6 +34,18 @@ record_warn() {
     fi
 }
 
+record_warn_result() {
+    local success_label="$1"
+    local failure_label="$2"
+    shift 2
+    if "$@" >/dev/null 2>&1; then
+        [[ "$quiet" == true ]] || printf 'OK   %s\n' "$success_label"
+    else
+        [[ "$quiet" == true ]] || printf 'WARN %s\n' "$failure_label"
+        warnings=$((warnings + 1))
+    fi
+}
+
 disk_ok() {
     local used
     used="$(df --output=pcent / | tail -n 1 | tr -dc '0-9')"
@@ -90,13 +102,14 @@ xray_read_only_config_ok() {
         {{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') | quote }} \
         {{ front_xray_config_path | default('/usr/local/etc/xray/config.json') | quote }}; do
         [[ -e "$file" ]] || return 1
-        if [[ -L "$file" ]]; then
-            target="$(readlink -f "$file")"
-            [[ "$target" == /run/kalimera-secrets/* ]] || return 1
+        target="$(readlink -f -- "$file")"
+        [[ -n "$target" && -f "$target" ]] || return 1
+        if [[ "$target" == /run/kalimera-secrets/* ]]; then
             metadata="$(stat -c '%U:%G:%a' "$target")"
             [[ "$metadata" == 'root:root:640' ]] || return 1
         else
-            metadata="$(stat -c '%U:%G:%a' "$file")"
+            [[ "$target" == "$file" ]] || return 1
+            metadata="$(stat -c '%U:%G:%a' "$target")"
             [[ "$metadata" == 'root:xray:640' ]] || return 1
         fi
     done
@@ -196,6 +209,9 @@ known_public_listeners_only() {
     local proto endpoint address port
     local known_tcp='{{ ssh_listen_port | int }} {{ ansible_port | default(22) | int }}'
 {% if awg_node_role == 'entry' %}
+{% if front_backend_enabled | default(false) | bool %}
+    known_tcp="$known_tcp {{ reality_fallback_port | default(8444) | int }}"
+{% endif %}
     local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}'
 {% elif awg_node_role == 'front' %}
     known_tcp="$known_tcp 80 443"
@@ -319,15 +335,27 @@ record 'усиленная конфигурация SSH применяется' 
 {% if security_manage_admin_account | default(false) | bool %}
 record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
 record 'root SSH полностью отключён' root_ssh_policy_ok
-record_warn 'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' root_authorized_keys_clean
+record_warn_result \
+    'root authorized_keys не содержит посторонних ключей' \
+    'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' \
+    root_authorized_keys_clean
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 {% endif %}
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
-record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled
-record_warn 'контейнерный runtime не расширяет поверхность атаки' no_container_runtime
-record_warn 'не обнаружены неожиданные внешние слушатели' known_public_listeners_only
+record_warn_result \
+    'AppArmor доступен и включён ядром хостинга' \
+    'AppArmor недоступен или выключен ядром хостинга' \
+    apparmor_enabled
+record_warn_result \
+    'контейнерный runtime не расширяет поверхность атаки' \
+    'обнаружен активный контейнерный runtime' \
+    no_container_runtime
+record_warn_result \
+    'неожиданные внешние слушатели не обнаружены' \
+    'обнаружены неожиданные внешние слушатели' \
+    known_public_listeners_only
 
 [[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then

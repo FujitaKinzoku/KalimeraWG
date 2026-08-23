@@ -77,6 +77,8 @@ class FrontReleasePackagesTest(unittest.TestCase):
         )
         self.assertIn("xray_read_only_config_ok", audit)
         self.assertIn("root:xray:640", audit)
+        self.assertIn('target="$(readlink -f -- "$file")"', audit)
+        self.assertIn('"$target" == /run/kalimera-secrets/*', audit)
 
         health = (ROOT / "roles/health/templates/awg-health.sh.j2").read_text(
             encoding="utf-8"
@@ -100,6 +102,35 @@ class FrontReleasePackagesTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("['entry', 'exit', 'front']", health)
+
+    def test_role_audit_and_admin_commands_match_front_backend(self) -> None:
+        audit = (ROOT / "roles/operations/templates/server-audit.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        shell_tools = (
+            ROOT / "roles/terminal/templates/kalimera-shell-tools.sh.j2"
+        ).read_text(encoding="utf-8")
+        admin = (
+            ROOT / "roles/security/templates/kalimera-admin-command.sh.j2"
+        ).read_text(encoding="utf-8")
+        proxy = (
+            ROOT / "roles/operations/templates/ru-proxy.sh.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'known_tcp="$known_tcp {{ reality_fallback_port | default(8444) | int }}"',
+            audit,
+        )
+        self.assertIn(
+            "root authorized_keys не содержит посторонних ключей", audit
+        )
+        self.assertIn("обнаружены неожиданные внешние слушатели", audit)
+        self.assertIn(
+            "function reality-dest-switch { _kalimera_admin reality-dest-switch",
+            shell_tools,
+        )
+        self.assertIn("|reality-dest-switch|", admin)
+        self.assertIn("Маршрутизация через RU-прокси: НЕ НАСТРОЕНА", proxy)
 
     def test_front_backend_gets_minimal_rule_set_access(self) -> None:
         backend_tasks = (

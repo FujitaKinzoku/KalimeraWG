@@ -55,6 +55,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function dns-status { _kalimera_admin dns-status "$@"; }
     function dot-switch { _kalimera_admin dot-switch "$@"; }
     function doh-switch { _kalimera_admin doh-switch "$@"; }
+    function reality-dest-switch { _kalimera_admin reality-dest-switch "$@"; }
     function ru-domain { _kalimera_admin ru-domain "$@"; }
     function se-domain { _kalimera_admin se-domain "$@"; }
     function entry-domain { _kalimera_admin entry-domain "$@"; }
