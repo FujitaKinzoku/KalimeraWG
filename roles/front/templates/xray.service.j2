@@ -1,0 +1,34 @@
+[Unit]
+Description=Xray-core (FRONT-релей VLESS+XHTTP -> ENTRY REALITY)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ front_xray_binary_path }} run -c {{ front_xray_config_path }}
+# always, а не on-failure: релей должен подниматься и после штатного
+# выхода с кодом 0, иначе туннель молча остаётся выключенным до ручного
+# вмешательства.
+Restart=always
+RestartSec=2
+# Значение systemd по умолчанию - 1024 дескриптора. Релей держит все
+# соединения телефона одновременно (одна вкладка YouTube открывает
+# десятки), и в режиме packet-up каждый пакет аплинка - отдельный
+# HTTP-запрос, поэтому в лимит реально упереться.
+LimitNOFILE=65535
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=-{{ front_xray_state_dir }}
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

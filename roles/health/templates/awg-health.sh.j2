@@ -111,7 +111,7 @@ ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
 
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
 managed_admin_is_ready() {
     id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
         id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
@@ -175,6 +175,7 @@ ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
 
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
@@ -191,6 +192,7 @@ ufw_matches_managed_snapshot() {
     actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     [[ -n "$expected" && "$actual" == "$expected" ]]
 }
+{% endif %}
 
 interface_mtu_is() {
     local interface="$1" expected="$2" actual
@@ -203,19 +205,19 @@ aaaa_filtered() {
 }
 
 ufw_interserver_restricted() {
-    local interface="$1" peer="$2" port="$3"
-    iptables -w 10 -C ufw-user-input -i "$interface" -p udp \
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}"
+    iptables -w 10 -C ufw-user-input -i "$interface" -p "$proto" \
         -s "${peer}/32" --dport "$port" -j ACCEPT
 }
 
 ufw_interserver_has_no_broad_allow() {
-    local interface="$1" peer="$2" port="$3" rule
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}" rule
     while IFS= read -r rule; do
         [[ "$rule" == *"-s ${peer}/32"* ]] || return 1
     done < <(
         iptables -w 10 -S ufw-user-input |
             grep -F -- "-i ${interface}" |
-            grep -F -- '-p udp' |
+            grep -F -- "-p ${proto}" |
             grep -F -- "--dport ${port}" |
             grep -F -- '-j ACCEPT' || true
     )
@@ -264,9 +266,46 @@ udp_ru_bypass_absent() {
         grep -Eq -- '-p udp .*--match-set (force_ru|ru) dst .* -j RETURN'
 }
 
+{% if reality_fallback_enabled | default(false) | bool %}
+tcp_port_listening() {
+    local port="$1"
+    ss -H -ltn "( sport = :${port} )" | grep -q .
+}
+
+reality_dest_tls13() {
+    local host="$1" port="$2"
+    # "Protocol  : TLSv1.3" эхом повторяет запрошенную версию даже при
+    # провале хендшейка - надёжен только "New, TLSv1.3, Cipher is TLS_...".
+    timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
+        grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_'
+}
+
+reality_ru_failover_synced() {
+    local config="$1" disabled_flag="$2" manual_flag="$3" expected current
+    expected=ru-socks
+    # Ручное отключение прокси оператором ставит собственный флаг, отличный от
+    # watchdog-флага; учитывать нужно оба, иначе REALITY продолжит слать
+    # RU-ветку в отключённый SOAX, пока ядро уже ходит напрямую.
+    { [[ -e "$disabled_flag" ]] || [[ -e "$manual_flag" ]]; } && expected=direct-entry
+    # Именно правило по российским подсетям, а не «первое правило с rule_set»:
+    # выше него стоит правило se-domain, ведущее в direct-exit, и по позиции
+    # проверка брала бы его.
+    current="$(jq -r '
+        [.route.rules[] | select((.rule_set? // []) | index("reality-ru-zone"))][0].outbound // empty
+    ' "$config")"
+    [[ "$current" == "$expected" ]]
+}
+{% endif %}
+
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+# Всё в этом блоке - артефакты ролей amneziawg/security/operations, которые
+# к FRONT не применяются (docs/front-relay.md, "Известные ограничения"):
+# модуля AmneziaWG, sysctl-профиля, journald/coredump/wtmp-политики и
+# таймера аудита там нет, поэтому на FRONT эти проверки не имеют смысла и
+# всегда падали бы, а health запускается с --strict прямо во время deploy.
 check 'модуль AmneziaWG' modprobe -n amneziawg
 check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
@@ -278,6 +317,7 @@ check 'systemd journal хранится только в RAM' journald_is_volatil
 check 'постоянный rsyslog отключён' rsyslog_is_disabled
 check 'coredump не сохраняются' coredump_storage_is_disabled
 check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+{% endif %}
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
     ufw_interserver_restricted \
@@ -298,20 +338,22 @@ check 'состояние Fail2Ban хранится только в RAM' fail2ba
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
 check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
 check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
-{% if awg_telegram_monitor_enabled | bool %}
+{% if awg_telegram_monitor_enabled | default(false) | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
     printf 'OK   запуск мониторинга Telegram отложен до финальной проверки\n'
 else
     check 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
 fi
+{% endif %}
 {% endif %}
 
 {% if awg_node_role == 'entry' %}
@@ -475,6 +517,35 @@ check 'watchdog российского прокси намеренно откл�
 check 'правило policy routing для mark 0x2 отсутствует' rule_absent {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
 check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
 {% endif %}
+{% if reality_fallback_enabled | default(false) | bool %}
+check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
+check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
+check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
+check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }} {{ entry_ru_proxy_manual_disabled_flag | quote }}
+{% if entry_ru_proxy_manual_disabled_flag is defined %}
+# REALITY живёт внутри того же процесса sing-box, что и российский прокси,
+# поэтому при ручном отключении прокси служба останавливается целиком и
+# запасной транспорт вместе с ней. Требовать здесь слушающий порт нельзя:
+# health запускается с --strict во время deploy и блокировал бы установку в
+# штатном для оператора режиме. Известное ограничение, см. docs/front-relay.md.
+if [[ ! -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
+    check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+else
+    printf 'OK   запасной транспорт REALITY остановлен вместе с отключённым прокси\n'
+fi
+{% else %}
+check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+{% endif %}
+{% if front_relay_enabled | default(false) | bool %}
+check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
+check 'UFW ограничивает REALITY адресом FRONT-релея' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+check 'UFW не разрешает REALITY для всех адресов' \
+    ufw_interserver_has_no_broad_allow \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% endif %}
+{% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'служба AWG 3+ EXIT сервера' systemctl is-active --quiet {{ awg3_transit_service_name | quote }}
@@ -505,6 +576,27 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 {% if entry_dns_default_via_exit | default(false) | bool %}
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
+{% endif %}
+{% elif awg_node_role == 'front' %}
+# Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво - только
+# когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
+# поэтому проверка established-соединения всегда падала бы, а health
+# запускается с --strict и заблокировал бы установку. Проверяем то, что
+# обязано быть верно всегда: reality-порт ENTRY доступен с FRONT.
+front_entry_reality_reachable() {
+    timeout 5 bash -c \
+        'exec 3<>/dev/tcp/{{ front_entry_address }}/{{ front_entry_reality_port }}'
+}
+
+check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
+check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
+check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
+    openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if front_entry_reality_stopped | default(false) | bool %}
+printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
+{% else %}
+check 'REALITY-порт ENTRY доступен с FRONT' front_entry_reality_reachable
 {% endif %}
 {% endif %}
 

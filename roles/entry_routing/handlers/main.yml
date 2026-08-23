@@ -1,10 +1,10 @@
 ---
-- name: "Перезагрузка: маршрутизация ENTRY сервера — этап 1"
+- name: "Перезагрузка: маршрутизация ENTRY сервера - этап 1"
   ansible.builtin.systemd_service:
     daemon_reload: true
   listen: Перезагрузить systemd
 
-- name: "Перезапуск: маршрутизация ENTRY сервера — этап 2"
+- name: "Перезапуск: маршрутизация ENTRY сервера - этап 2"
   ansible.builtin.systemd_service:
     name: "{{ entry_routing_service_name }}"
     state: restarted

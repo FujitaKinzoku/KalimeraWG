@@ -52,7 +52,7 @@
     group: "{{ security_admin_user }}"
   when: security_manage_admin_account | bool
 
-- name: "Проверка: безопасность — этап 1"
+- name: "Проверка: безопасность - этап 1"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -62,7 +62,7 @@
     - security_manage_ssh | bool
     - security_require_admin_authorized_key | bool
 
-- name: "Установка: безопасность — этап 2"
+- name: "Установка: безопасность - этап 2"
   ansible.posix.authorized_key:
     user: "{{ security_admin_user if security_manage_admin_account | bool else ansible_user }}"
     key: "{{ item }}"
@@ -335,7 +335,7 @@
   failed_when: false
   when: security_default_interface_networkd_unmanaged | default(false) | bool
 
-- name: "Установка: безопасность — этап 3"
+- name: "Установка: безопасность - этап 3"
   ansible.builtin.template:
     src: sysctl.conf.j2
     dest: "{{ security_sysctl_file }}"
@@ -751,6 +751,96 @@
     - awg_node_role == 'exit'
     - not (entry_dns_default_via_exit | default(false) | bool)
 
+# Открыт всем намеренно - REALITY должен отвечать любому, кто постучится,
+# в том числе активным зондам DPI, точно как настоящий HTTPS-сервер.
+# Запасной транспорт REALITY изолируется так же, как межсерверный AWG между
+# ENTRY и EXIT (front_public_ipv4 - постоянный публичный IPv4 FRONT,
+# записывается при ./deploy --enable-front тем же приёмом, что
+# security_interserver_peer_ipv4 для пары ENTRY/EXIT). Прямые подключения к
+# ENTRY принимаются только пока FRONT не подключён - как только он есть,
+# единственный поддерживаемый путь клиента к REALITY идёт через него, а
+# порт на ENTRY открыт исключительно для этого одного адреса.
+- name: "Разрешение запасного транспорта VLESS+REALITY (без FRONT)"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    comment: Запасной транспорт VLESS+REALITY
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - not (front_relay_enabled | default(false) | bool)
+
+- name: "Удаление общего правила REALITY при подключении FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Разрешение запасного транспорта VLESS+REALITY только от FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    comment: REALITY изолирован для FRONT-релея
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Удаление правила REALITY для FRONT при отсутствии FRONT"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - not (front_relay_enabled | default(false) | bool)
+    - front_public_ipv4 is defined
+
+- name: "Удаление общего правила запасного транспорта VLESS+REALITY при отключении"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - not (reality_fallback_enabled | default(false) | bool)
+
+- name: "Удаление правила REALITY для FRONT при отключении REALITY"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_public_ipv4 }}"
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - not (reality_fallback_enabled | default(false) | bool)
+    - front_public_ipv4 is defined
+
 - name: "Разрешение служебного трафика только от второго сервера внутри AWG 3+"
   community.general.ufw:
     rule: allow
@@ -778,7 +868,7 @@
     delete: true
   when: awg_node_role == 'entry'
 
-- name: "Разрешение: безопасность — этап 8"
+- name: "Разрешение: безопасность - этап 8"
   community.general.ufw:
     rule: allow
     port: "53"
@@ -872,7 +962,7 @@
     - awg_node_role == 'entry'
     - entry_mobile_client_available | default(false) | bool
 
-- name: "Разрешение: безопасность — этап 9"
+- name: "Разрешение: безопасность - этап 9"
   community.general.ufw:
     rule: allow
     route: true
@@ -882,7 +972,7 @@
     comment: Маршрутизация AmneziaWG
   when: awg_node_role == 'exit'
 
-- name: "Разрешение: безопасность — этап 10"
+- name: "Разрешение: безопасность - этап 10"
   community.general.ufw:
     rule: allow
     route: true
@@ -1017,7 +1107,7 @@
     - awg_node_role == 'entry'
     - entry_mobile_client_available | default(false) | bool
 
-- name: "Настройка: безопасность — этап 11"
+- name: "Настройка: безопасность - этап 11"
   community.general.ufw:
     policy: deny
     direction: routed
@@ -1027,7 +1117,7 @@
     policy: allow
     direction: outgoing
 
-- name: "Включение: безопасность — этап 12"
+- name: "Включение: безопасность - этап 12"
   community.general.ufw:
     state: enabled
     policy: deny
@@ -1047,7 +1137,7 @@
     - /run/awg-ufw-recovery-user6.rules
   when: security_ufw_rebuild_required | bool
 
-- name: "Согласование: безопасность — этап 13"
+- name: "Согласование: безопасность - этап 13"
   ansible.posix.sysctl:
     name: net.ipv4.ip_forward
     value: "1"
@@ -1065,10 +1155,10 @@
     reload: true
     sysctl_file: "{{ security_sysctl_file }}"
 
-- name: "Управление: безопасность — этап 14"
+- name: "Управление: безопасность - этап 14"
   when: security_manage_ssh | bool
   block:
-    - name: "Проверка: безопасность — этап 15"
+    - name: "Проверка: безопасность - этап 15"
       ansible.builtin.assert:
         quiet: true
         that:
@@ -1084,7 +1174,7 @@
           security_allow_ssh_port_change=true после проверки правила UFW и
           внеполосного способа восстановления доступа.
 
-    - name: "Создание: безопасность — этап 16"
+    - name: "Создание: безопасность - этап 16"
       ansible.builtin.file:
         path: "{{ security_ssh_dropin_path | dirname }}"
         state: directory
@@ -1177,12 +1267,12 @@
           - security_ssh_host_key_paths | length >= 1
           - "'/etc/ssh/ssh_host_ed25519_key' in security_ssh_host_key_paths"
 
-    - name: "Проверка: безопасность — этап 17"
+    - name: "Проверка: безопасность - этап 17"
       ansible.builtin.stat:
         path: "{{ security_ssh_dropin_path }}"
       register: security_ssh_live
 
-    - name: "Настройка: безопасность — этап 18"
+    - name: "Настройка: безопасность - этап 18"
       ansible.builtin.template:
         src: sshd-awg.conf.j2
         dest: "{{ security_ssh_candidate_path }}"
@@ -1191,7 +1281,7 @@
         mode: "0600"
       changed_when: false
 
-    - name: "Проверка: безопасность — этап 19"
+    - name: "Проверка: безопасность - этап 19"
       ansible.builtin.command:
         argv:
           - /usr/sbin/sshd
@@ -1200,7 +1290,7 @@
           - "{{ security_ssh_candidate_path }}"
       changed_when: false
 
-    - name: "Проверка: безопасность — этап 20"
+    - name: "Проверка: безопасность - этап 20"
       ansible.builtin.command:
         argv:
           - /usr/bin/cmp
@@ -1212,13 +1302,13 @@
       failed_when: security_ssh_compare.rc not in [0, 1]
       when: security_ssh_live.stat.exists
 
-    - name: "Определение: безопасность — этап 21"
+    - name: "Определение: безопасность - этап 21"
       ansible.builtin.set_fact:
         security_ssh_changed: >-
           {{ (not security_ssh_live.stat.exists) or
              (security_ssh_compare.rc | default(1) == 1) }}
 
-    - name: "Создание: безопасность — этап 22"
+    - name: "Создание: безопасность - этап 22"
       ansible.builtin.file:
         path: "{{ security_ssh_backup_dir }}"
         state: directory
@@ -1229,7 +1319,7 @@
         - security_ssh_live.stat.exists
         - security_ssh_changed | bool
 
-    - name: "Резервное копирование: безопасность — этап 23"
+    - name: "Резервное копирование: безопасность - этап 23"
       ansible.builtin.copy:
         src: "{{ security_ssh_dropin_path }}"
         dest: >-
@@ -1242,7 +1332,7 @@
         - security_ssh_live.stat.exists
         - security_ssh_changed | bool
 
-    - name: "Установка: безопасность — этап 24"
+    - name: "Установка: безопасность - этап 24"
       ansible.builtin.copy:
         src: "{{ security_ssh_candidate_path }}"
         dest: "{{ security_ssh_dropin_path }}"
@@ -1253,12 +1343,12 @@
       when: security_ssh_changed | bool
       notify: Безопасно перезагрузить SSH
 
-    - name: "Проверка: безопасность — этап 25"
+    - name: "Проверка: безопасность - этап 25"
       ansible.builtin.stat:
         path: "{{ security_ssh_legacy_dropin_path }}"
       register: security_ssh_legacy
 
-    - name: "Создание: безопасность — этап 26"
+    - name: "Создание: безопасность - этап 26"
       ansible.builtin.file:
         path: "{{ security_ssh_backup_dir }}"
         state: directory
@@ -1267,7 +1357,7 @@
         mode: "0700"
       when: security_ssh_legacy.stat.exists
 
-    - name: "Резервное копирование: безопасность — этап 27"
+    - name: "Резервное копирование: безопасность - этап 27"
       ansible.builtin.copy:
         src: "{{ security_ssh_legacy_dropin_path }}"
         dest: >-
@@ -1278,19 +1368,19 @@
         mode: "0600"
       when: security_ssh_legacy.stat.exists
 
-    - name: "Удаление: безопасность — этап 28"
+    - name: "Удаление: безопасность - этап 28"
       ansible.builtin.file:
         path: "{{ security_ssh_legacy_dropin_path }}"
         state: absent
       when: security_ssh_legacy.stat.exists
       notify: Безопасно перезагрузить SSH
 
-    - name: "Проверка: безопасность — этап 29"
+    - name: "Проверка: безопасность - этап 29"
       ansible.builtin.command:
         argv: [/usr/sbin/sshd, -t]
       changed_when: false
 
-    - name: "Определение: безопасность — этап 30"
+    - name: "Определение: безопасность - этап 30"
       ansible.builtin.command:
         argv:
           - /usr/bin/systemctl
@@ -1301,12 +1391,12 @@
       changed_when: false
       failed_when: false
 
-    - name: "Запись: безопасность — этап 31"
+    - name: "Запись: безопасность - этап 31"
       ansible.builtin.set_fact:
         security_ssh_socket_active: "{{ security_ssh_socket_state.rc == 0 }}"
       changed_when: false
 
-    - name: "Проверка: безопасность — этап 32"
+    - name: "Проверка: безопасность - этап 32"
       ansible.builtin.command:
         argv:
           - /usr/bin/ss
@@ -1316,13 +1406,13 @@
       register: security_ssh_desired_listener
       changed_when: false
 
-    - name: "Планирование: безопасность — этап 33"
+    - name: "Планирование: безопасность - этап 33"
       ansible.builtin.command: /usr/bin/true
       changed_when: true
       when: security_ssh_desired_listener.stdout | trim | length == 0
       notify: Безопасно перезагрузить SSH
 
-    - name: "Проверка: безопасность — этап 34"
+    - name: "Проверка: безопасность - этап 34"
       ansible.builtin.command:
         argv:
           - /usr/sbin/sshd
@@ -1332,7 +1422,7 @@
       register: security_sshd_effective
       changed_when: false
 
-    - name: "Проверка: безопасность — этап 35"
+    - name: "Проверка: безопасность - этап 35"
       ansible.builtin.assert:
         quiet: true
         that:
@@ -1360,17 +1450,17 @@
              select('search', '(^| )' ~ security_admin_user ~ '( |$)') |
              list | length == 1)
 
-    - name: "Применение: безопасность — этап 36"
+    - name: "Применение: безопасность - этап 36"
       ansible.builtin.meta: flush_handlers
 
-    - name: "Проверка: безопасность — этап 37"
+    - name: "Проверка: безопасность - этап 37"
       ansible.builtin.wait_for:
         host: 127.0.0.1
         port: "{{ ssh_listen_port }}"
         state: started
         timeout: 15
 
-    - name: "Удаление: безопасность — этап 38"
+    - name: "Удаление: безопасность - этап 38"
       community.general.ufw:
         rule: limit
         port: "{{ security_previous_ssh_port }}"
@@ -1383,13 +1473,13 @@
         - security_previous_ssh_port | default(ssh_listen_port) | int != ssh_listen_port | int
 
   always:
-    - name: "Удаление: безопасность — этап 39"
+    - name: "Удаление: безопасность - этап 39"
       ansible.builtin.file:
         path: "{{ security_ssh_candidate_path }}"
         state: absent
       changed_when: false
 
-- name: "Вывод: безопасность — этап 40"
+- name: "Вывод: безопасность - этап 40"
   ansible.builtin.debug:
     msg: "SSH не изменяется, поскольку security_manage_ssh=false."
   when: not security_manage_ssh | bool

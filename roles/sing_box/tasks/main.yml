@@ -1,10 +1,10 @@
 ---
-- name: "Проверка: прокси sing-box — этап 1"
+- name: "Проверка: прокси sing-box - этап 1"
   ansible.builtin.stat:
     path: "{{ entry_ru_proxy_manual_disabled_flag }}"
   register: sing_box_manual_disabled
 
-- name: "Проверка: прокси sing-box — этап 2"
+- name: "Проверка: прокси sing-box - этап 2"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -103,7 +103,59 @@
     fail_msg: "Локальное переопределение DoH повреждено; применить его безопасно невозможно"
   when: entry_ru_proxy_enabled | bool
 
-- name: "Создание: прокси sing-box — этап 3"
+- name: Проверка постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.stat:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: sing_box_reality_dest_override_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: Загрузка постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.slurp:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: sing_box_reality_dest_override_content
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - sing_box_reality_dest_override_file.stat.exists | default(false)
+
+- name: Разбор постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.set_fact:
+    sing_box_runtime_reality_override: >-
+      {{ (sing_box_reality_dest_override_content.content | b64decode | from_json)
+         if (sing_box_reality_dest_override_file.stat.exists | default(false)) else {} }}
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: Проверка структуры постоянного локального переопределения dest-сайта REALITY
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - sing_box_runtime_reality_override is mapping
+      - >-
+        sing_box_runtime_reality_override | length == 0 or
+        (sing_box_runtime_reality_override.dest | default('')) is match('^[A-Za-z0-9.-]+$')
+      - >-
+        sing_box_runtime_reality_override | length == 0 or
+        (sing_box_runtime_reality_override.dest_port | default(0) | int >= 1 and
+         sing_box_runtime_reality_override.dest_port | default(0) | int <= 65535)
+    fail_msg: "Локальное переопределение dest-сайта REALITY повреждено; применить его безопасно невозможно"
+  when: reality_fallback_enabled | default(false) | bool
+
+# Дальше используется именно "действующее" значение - override, применённый
+# reality-dest-switch после deploy, приоритетнее inventory, иначе очередной
+# deploy тихо откатил бы ручную смену маски (как proxy/DoH override выше).
+- name: "Вычисление действующего dest-сайта REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_effective_dest: >-
+      {{ sing_box_runtime_reality_override.dest | default(reality_fallback_dest) }}
+    reality_fallback_effective_dest_port: >-
+      {{ sing_box_runtime_reality_override.dest_port | default(reality_fallback_dest_port) | int }}
+    # reality_fallback_port сам по себе - дефолт роли (roles/sing_box/defaults),
+    # он не виден через hostvars с другого хоста (roles/front читает его
+    # именно так, см. docs/front-relay.md); переприсваивание через set_fact
+    # публикует текущее значение как факт.
+    reality_fallback_port: "{{ reality_fallback_port }}"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Создание: прокси sing-box - этап 3"
   ansible.builtin.file:
     path: "{{ sing_box_package_cache | dirname }}"
     state: directory
@@ -112,7 +164,7 @@
     mode: "0755"
   when: entry_ru_proxy_enabled | bool
 
-- name: "Загрузка: прокси sing-box — этап 4"
+- name: "Загрузка: прокси sing-box - этап 4"
   ansible.builtin.get_url:
     url: "{{ entry_sing_box_packages[ansible_architecture].url }}"
     dest: "{{ sing_box_package_cache }}"
@@ -122,14 +174,14 @@
     mode: "0644"
   when: entry_ru_proxy_enabled | bool
 
-- name: "Установка: прокси sing-box — этап 5"
+- name: "Установка: прокси sing-box - этап 5"
   ansible.builtin.apt:
     deb: "{{ sing_box_package_cache }}"
     state: present
     lock_timeout: 600
   when: entry_ru_proxy_enabled | bool
 
-- name: "Подготовка: прокси sing-box — этап 6"
+- name: "Подготовка: прокси sing-box - этап 6"
   ansible.builtin.file:
     path: "{{ sing_box_config_path | dirname }}"
     state: directory
@@ -138,17 +190,371 @@
     mode: "0700"
   when: entry_ru_proxy_enabled | bool
 
-- name: "Проверка: прокси sing-box — этап 7"
+- name: "Проверка: запасной транспорт REALITY требует активный RU-прокси"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_ru_proxy_enabled | bool
+    fail_msg: >-
+      reality_fallback_enabled требует entry_ru_proxy_enabled=true -
+      REALITY-путь переиспользует существующий outbound ru-socks (SOAX) для
+      RU-ветки маршрутизации, отдельного механизма для неё нет.
+  when: reality_fallback_enabled | default(false) | bool
+
+# Fail-open REALITY RU-ветки использует те же флаги, что и ядерный каскад
+# (awg-ru-proxy-watch и ручное отключение), чтобы не было независимых
+# источников истины о состоянии SOAX. Если SOAX уже недоступен на момент
+# deploy - сразу рендерим direct-entry, не дожидаясь срабатывания watchdog.
+- name: "Проверка состояния fail-open RU-прокси для REALITY"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_disabled_flag }}"
+  register: sing_box_reality_ru_proxy_disabled
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка ручного отключения RU-прокси для REALITY"
+  ansible.builtin.stat:
+    path: "{{ entry_ru_proxy_manual_disabled_flag }}"
+  register: sing_box_reality_ru_proxy_manual_off
+  when: reality_fallback_enabled | default(false) | bool
+
+# Публикуется как обычный факт, чтобы FRONT-релей мог его прочитать через
+# hostvars: при ручном отключении прокси sing-box останавливается целиком и
+# REALITY-инбаунд вместе с ним, поэтому проверять доступность его порта с
+# FRONT в этом режиме бессмысленно.
+- name: "Публикация состояния запасного транспорта REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_stopped_with_proxy: >-
+      {{ sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool }}
+  when: reality_fallback_enabled | default(false) | bool
+
+# Учитываются ОБА флага. Раньше проверялся только watchdog-флаг
+# (/run/awg-ru-proxy.disabled), а ручное отключение прокси оператором ставит
+# другой (/var/lib/awg-routing/ru-proxy.manual-off). Из-за этого ядро
+# корректно переставало пользоваться SOAX, а REALITY-путь продолжал слать
+# RU-ветку в outbound ru-socks, то есть в заведомо отключённый прокси:
+# ломалось всё, что классифицировано как российское, включая зарубежные
+# сервисы на адресах кеш-узлов внутри РФ, при полностью рабочем AmneziaWG.
+- name: "Выбор действующего RU-outbound для REALITY"
+  ansible.builtin.set_fact:
+    reality_fallback_ru_outbound: >-
+      {{ 'direct-entry'
+         if ((sing_box_reality_ru_proxy_disabled.stat.exists | default(false) | bool) or
+             (sing_box_reality_ru_proxy_manual_off.stat.exists | default(false) | bool))
+         else 'ru-socks' }}
+  when: reality_fallback_enabled | default(false) | bool
+
+# REALITY выдаёт себя за настоящий TLS-хендшейк reality_fallback_dest: sing-box
+# на лету обращается к нему для непрошедших авторизацию соединений. Сайт за
+# CDN/балансировщиком нескольких независимых бэкендов для этого непригоден -
+# разные бэкенды могут отвечать разными сертификатами или вовсе не поддерживать
+# TLS 1.3 одинаково стабильно. Три последовательные пробы с самого ENTRY
+# сервера - быстрая проверка перед применением конфигурации, не гарантия (сайт
+# также должен быть естественным для аудитории - это уже вручную).
+- name: "Проверка REALITY: проба TLS-рукопожатия с dest-сайтом"
+  ansible.builtin.shell:
+    cmd: |
+      host={{ reality_fallback_effective_dest | quote }}
+      port={{ reality_fallback_effective_dest_port }}
+      output="$(timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null)"
+      proto_ok=false
+      # "Protocol  : TLSv1.3" в блоке SSL-Session эхом повторяет ЗАПРОШЕННУЮ
+      # версию и присутствует даже при провале хендшейка (например, сервер
+      # ответил alert 70 "unsupported protocol version") - единственный
+      # надёжный признак успеха именно этот, с реальным именем шифра.
+      grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_' <<<"$output" && proto_ok=true
+      fingerprint="$(openssl x509 -noout -fingerprint -sha256 <<<"$output" 2>/dev/null | cut -d= -f2)"
+      printf '%s|%s\n' "$proto_ok" "$fingerprint"
+    executable: /bin/bash
+  register: reality_fallback_dest_probes
+  changed_when: false
+  loop: "{{ range(0, 3) | list }}"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка REALITY: dest-сайт стабильно отвечает TLS 1.3 одним и тем же сертификатом"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | select('match', '^true\\|.+') | list | length == reality_fallback_dest_probes.results | length
+      - (reality_fallback_dest_probes.results | map(attribute='stdout') | map('trim') | map('regex_replace', '^true\\|', '') | unique | list | length) == 1
+    fail_msg: >-
+      dest-сайт {{ reality_fallback_effective_dest }}:{{ reality_fallback_effective_dest_port }}
+      непригоден в качестве маски REALITY: при прямом подключении с ENTRY
+      сервера он либо не согласовал TLS 1.3, либо в трёх последовательных
+      пробах отдал разные сертификаты (частый признак нескольких независимых
+      бэкендов за DNS round-robin или CDN - REALITY требует единственный
+      настоящий источник с предсказуемым TLS-рукопожатием). Выберите другой
+      reality_fallback_dest (или откатите reality-dest-switch reset) и
+      повторите развёртывание.
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Создание: каталог состояния REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: ключевая пара REALITY уже создана"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_private_key_path }}"
+  register: reality_fallback_keypair_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: ключевая пара REALITY"
+  ansible.builtin.command:
+    argv: [/usr/bin/sing-box, generate, reality-keypair]
+  register: reality_fallback_keypair_output
+  changed_when: true
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+- name: "Сохранение: закрытый ключ REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_private_key_path }}"
+    content: >-
+      {{ (reality_fallback_keypair_output.stdout_lines
+          | select('match', '^PrivateKey:')
+          | first).split(':')[1] | trim }}
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+# Тот же стиль YAML-блока, что и у закрытого ключа выше. Раньше здесь была
+# строка в двойных кавычках с "\n" на конце, и на живом сервере в файл
+# попадали два литеральных символа - обратный слеш и n. Для закрытого ключа
+# этого не происходило, потому что он пишется через >-. Испорченный
+# публичный ключ уезжал в конфигурацию Xray на FRONT, где в JSON "\n"
+# превращается в перевод строки, и хоп FRONT->ENTRY не мог установиться.
+- name: "Сохранение: публичный ключ REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_state_dir }}/public.key"
+    content: >-
+      {{ (reality_fallback_keypair_output.stdout_lines
+          | select('match', '^PublicKey:')
+          | first).split(':')[1] | trim }}
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_keypair_file.stat.exists
+
+- name: "Проверка: short_id REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_short_id_path }}"
+  register: reality_fallback_short_id_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: short_id REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate rand --hex 8 > {{ reality_fallback_short_id_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_short_id_file.stat.exists
+
+- name: "Ограничение прав: short_id REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_short_id_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: UUID клиента REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_client_uuid_path }}"
+  register: reality_fallback_client_uuid_file
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Генерация: UUID клиента REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate uuid > {{ reality_fallback_client_uuid_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - not reality_fallback_client_uuid_file.stat.exists
+
+- name: "Ограничение прав: UUID клиента REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_client_uuid_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: reality_fallback_enabled | default(false) | bool
+
+# Второй REALITY-клиент для FRONT-релея (roles/front, docs/front-relay.md) -
+# тот же идемпотентный паттерн generate-if-missing, что и у обычного
+# client_uuid выше. Отдельный uuid: он используется только для внутреннего
+# хопа FRONT→ENTRY, не раздаётся конечным пользователям.
+- name: "Проверка: UUID FRONT-релея REALITY уже создан"
+  ansible.builtin.stat:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+  register: reality_fallback_front_client_uuid_file
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Генерация: UUID FRONT-релея REALITY"
+  ansible.builtin.shell:
+    cmd: "set -o pipefail; /usr/bin/sing-box generate uuid > {{ reality_fallback_front_client_uuid_path | quote }}"
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+    - not reality_fallback_front_client_uuid_file.stat.exists
+
+- name: "Ограничение прав: UUID FRONT-релея REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Чтение: параметры REALITY для рендеринга конфигурации"
+  ansible.builtin.slurp:
+    path: "{{ item }}"
+  loop:
+    - "{{ reality_fallback_private_key_path }}"
+    - "{{ reality_fallback_short_id_path }}"
+    - "{{ reality_fallback_client_uuid_path }}"
+    - "{{ reality_fallback_state_dir }}/public.key"
+  register: reality_fallback_material_raw
+  no_log: true
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Разбор: параметры REALITY для рендеринга конфигурации"
+  ansible.builtin.set_fact:
+    reality_fallback_private_key: >-
+      {{ (reality_fallback_material_raw.results[0].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+    reality_fallback_short_id: >-
+      {{ (reality_fallback_material_raw.results[1].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+    reality_fallback_client_uuid: >-
+      {{ (reality_fallback_material_raw.results[2].content | b64decode | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+    # Публичный ключ читается из уже сохранённого public.key (а не из вывода
+    # команды генерации), потому что задача генерации выполняется только
+    # один раз - на всех последующих запусках reality_fallback_keypair_output
+    # не заполнен, а public.key на диске присутствует всегда.
+    # split('\\')[0] отрезает мусор, оставшийся от прежней записи файла: там
+    # в конец попадали два литеральных символа - обратный слеш и n, а trim
+    # такое не убирает. Ключ в base64url обратных слешей не содержит, поэтому
+    # обрезка безопасна и на уже развёрнутых серверах чинит файл без
+    # перегенерации ключевой пары.
+    reality_fallback_public_key: >-
+      {{ ((reality_fallback_material_raw.results[3].content | b64decode).split('\\')[0] | trim)
+         if reality_fallback_enabled | default(false) | bool else '' }}
+  no_log: true
+  when: reality_fallback_enabled | default(false) | bool
+
+# Файл переписывается уже очищенным значением: его читают не только роли, но
+# и оператор при сборке клиентских ссылок.
+- name: "Нормализация: файл публичного ключа REALITY"
+  ansible.builtin.copy:
+    dest: "{{ reality_fallback_state_dir }}/public.key"
+    content: >-
+      {{ reality_fallback_public_key }}
+    owner: root
+    group: root
+    mode: "0644"
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Чтение: UUID FRONT-релея REALITY для рендеринга конфигурации"
+  ansible.builtin.slurp:
+    path: "{{ reality_fallback_front_client_uuid_path }}"
+  register: reality_fallback_front_client_uuid_raw
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+- name: "Разбор: UUID FRONT-релея REALITY для рендеринга конфигурации"
+  ansible.builtin.set_fact:
+    reality_fallback_front_client_uuid: >-
+      {{ reality_fallback_front_client_uuid_raw.content | b64decode | trim }}
+  no_log: true
+  when:
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+
+# Реальное содержимое этих rule-set файлов формируют domain-admin.sh.j2
+# (ru-domain/se-domain) и awg-ru-zone-update.sh.j2 (статический список RU
+# подсетей) - тот же источник данных, что питает kernel ipset. Здесь только
+# гарантируем, что файл существует и валиден к первому запуску sing-box, до
+# первого срабатывания этих скриптов. Проверяем валидность содержимого, а не
+# просто "существует ли файл" (force: false) - иначе испорченный файл,
+# оставшийся от прерванного/неудачного deploy (например, старый rule-set без
+# обязательного поля version), навсегда переживает повторные попытки и
+# ломает sing-box check на каждом следующем deploy.
+- name: "Проверка: заготовка rule-set REALITY для ru-domain/se-domain"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_ru_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: заготовка rule-set REALITY для se-domain"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_se_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: заготовка rule-set REALITY для российских подсетей"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ reality_fallback_ru_zone_rule_set_path | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  changed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
+- name: "Проверка: прокси sing-box - этап 7"
   ansible.builtin.stat:
     path: "{{ sing_box_config_path }}"
   register: sing_box_live_config
   no_log: true
   when: entry_ru_proxy_enabled | bool
 
-- name: "Безопасное применение: прокси sing-box — этап 8"
+- name: "Безопасное применение: прокси sing-box - этап 8"
   when: entry_ru_proxy_enabled | bool
   block:
-    - name: "Формирование: прокси sing-box — этап 9"
+    - name: "Формирование: прокси sing-box - этап 9"
       ansible.builtin.template:
         src: config.json.j2
         dest: "{{ sing_box_candidate_path }}"
@@ -158,7 +564,7 @@
       changed_when: false
       no_log: true
 
-    - name: "Проверка: прокси sing-box — этап 10"
+    - name: "Проверка: прокси sing-box - этап 10"
       ansible.builtin.command:
         argv:
           - /usr/bin/sing-box
@@ -168,7 +574,7 @@
       changed_when: false
       no_log: true
 
-    - name: "Проверка: прокси sing-box — этап 11"
+    - name: "Проверка: прокси sing-box - этап 11"
       ansible.builtin.command:
         argv:
           - /usr/bin/cmp
@@ -181,14 +587,14 @@
       when: sing_box_live_config.stat.exists
       no_log: true
 
-    - name: "Определение: прокси sing-box — этап 12"
+    - name: "Определение: прокси sing-box - этап 12"
       ansible.builtin.set_fact:
         sing_box_requires_install: >-
           {{ (not sing_box_live_config.stat.exists) or
              (sing_box_compare.rc | default(1) == 1) }}
       no_log: true
 
-    - name: "Создание: прокси sing-box — этап 13"
+    - name: "Создание: прокси sing-box - этап 13"
       ansible.builtin.file:
         path: "{{ sing_box_backup_dir }}"
         state: directory
@@ -199,7 +605,7 @@
         - sing_box_live_config.stat.exists
         - sing_box_requires_install | bool
 
-    - name: "Резервное копирование: прокси sing-box — этап 14"
+    - name: "Резервное копирование: прокси sing-box - этап 14"
       ansible.builtin.copy:
         src: "{{ sing_box_config_path }}"
         dest: >-
@@ -213,7 +619,7 @@
         - sing_box_requires_install | bool
       no_log: true
 
-    - name: "Установка: прокси sing-box — этап 15"
+    - name: "Установка: прокси sing-box - этап 15"
       ansible.builtin.copy:
         src: "{{ sing_box_candidate_path }}"
         dest: "{{ sing_box_config_path }}"
@@ -226,7 +632,7 @@
       no_log: true
 
   always:
-    - name: "Удаление: прокси sing-box — этап 16"
+    - name: "Удаление: прокси sing-box - этап 16"
       ansible.builtin.file:
         path: "{{ sing_box_candidate_path }}"
         state: absent
@@ -259,10 +665,10 @@
     - entry_ru_proxy_enabled | bool
     - sing_box_routing_dropin.changed
 
-- name: "Применение: прокси sing-box — этап 17"
+- name: "Применение: прокси sing-box - этап 17"
   ansible.builtin.meta: flush_handlers
 
-- name: "Настройка: прокси sing-box — этап 18"
+- name: "Настройка: прокси sing-box - этап 18"
   ansible.builtin.systemd_service:
     name: "{{ sing_box_service_name }}"
     enabled: "{{ not sing_box_manual_disabled.stat.exists }}"
@@ -271,7 +677,7 @@
   no_log: true
   when: entry_ru_proxy_enabled | bool
 
-- name: "Отключение: прокси sing-box — этап 19"
+- name: "Отключение: прокси sing-box - этап 19"
   ansible.builtin.command:
     argv: [/usr/bin/systemctl, disable, --now, "{{ sing_box_service_name }}"]
   register: sing_box_disable_result
@@ -279,7 +685,7 @@
   failed_when: false
   when: not entry_ru_proxy_enabled | bool
 
-- name: "Удаление: прокси sing-box — этап 20"
+- name: "Удаление: прокси sing-box - этап 20"
   ansible.builtin.file:
     path: "{{ sing_box_config_path }}"
     state: absent

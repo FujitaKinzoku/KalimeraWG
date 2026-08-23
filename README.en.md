@@ -10,7 +10,7 @@
 <h1 align="center">KalimeraWG</h1>
 
 <p align="center"><em><b>A managed AWG cascade: client → ENTRY → EXIT</b><br>
-AmneziaWG 3+ · automatic PMTU/MTU · route-aware DNS · optional SOAX/SOCKS5</em></p>
+AmneziaWG 3+ · VLESS+REALITY · CDN/XHTTP · route-aware DNS · optional SOAX/SOCKS5</em></p>
 
 <p align="center">
   <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-7B2CBF" alt="KalimeraWG v2.1.0"></a>
@@ -50,6 +50,35 @@ curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.1.0/ins
 The command installs the immutable `v2.1.0` tag rather than the moving `main`
 branch. Confirm the local version with `./deploy --version`.
 
+## Field-validated allowlist stage
+
+> **Status on August 23, 2026.** The `feature/vless-reality-fallback` branch
+> established a new client session while mobile allowlist restrictions were
+> active. The validated path was **compatible cloud CDN → FRONT → ENTRY**, and the
+> existing RU/EXIT routing policy remained intact after ingress. This records
+> one field-tested milestone; it is not a stable release or a universal carrier
+> availability guarantee.
+
+<p align="center">
+  <img src="assets/whitelist-cascade-en.svg" alt="Three KalimeraWG ingress paths including the field-validated CDN and FRONT fallback" width="100%">
+</p>
+
+The ingress paths are alternatives rather than stacked transports. AWG remains
+the fast primary path, direct REALITY is the TCP fallback, and CDN/XHTTP is the
+allowlist-oriented emergency path when that CDN edge is reachable.
+
+| Client path | Transport | Purpose | Validation status |
+|---|---|---|---|
+| client → ENTRY | AmneziaWG 3+, UDP/443 or mobile UDP/8443 | lowest-overhead primary path | previously validated |
+| client → ENTRY | VLESS+REALITY, TCP/443 | direct fallback when UDP/AWG is filtered | implemented on the feature branch |
+| client → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | ingress through a reachable CDN edge | field-validated |
+| FRONT → ENTRY | VLESS+REALITY | hides the ENTRY origin from the CDN-path client | field-validated |
+| ENTRY → EXIT / RU | AWG 3+ or SOCKS5/fail-open | unchanged destination policy | retained |
+
+Carrier, region, DNS, CDN edge, and filtering policy can change independently.
+See [docs/front-relay.md](docs/front-relay.md) for the detailed architecture,
+failure matrix, deployment notes, and current limitations.
+
 ## What's new in v2.0.0
 
 `v2.0.0` is a security-hardening package on top of `v1.0.0`: ports, MTU, DNS
@@ -64,7 +93,7 @@ policy, and cascade routing are unchanged. Highlights:
 | SSH | key-only access, Fail2Ban | additionally: hidden banner, no user startup files, automation key restricted to its source address, separate recovery admin key |
 | Log retention | standard journald and Fail2Ban | no-logs policy: journald/Fail2Ban/login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
 | Auditing | `server-audit` | added `ssh-key-audit` (foreign root keys) and an expanded `server-audit` (public listeners, no-logs policy compliance) |
-| Cascade reliability | — | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
+| Cascade reliability | - | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
 | Kernel/DKMS | checks `/vmlinuz` | guard now recognizes every installed kernel, including signed/unsigned kernel packages |
 
 See the full changelog in [CHANGELOG.md](CHANGELOG.md) (the `[2.0.0]` section) and the
@@ -108,6 +137,7 @@ and transit segments use separate interfaces, keys, and parameters.
 | iOS | `mobile` profile on the dedicated UDP/8443 interface in the official AmneziaWG client |
 | KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
 | RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
+| Mobile allowlist | feature branch established a new session via compatible cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
 
 This matrix records scenarios that were actually exercised. It cannot guarantee
 identical behavior across every carrier, hosting provider, and client version.
@@ -198,6 +228,7 @@ systemctl --failed --no-pager
 | [docs/awg3.md](docs/awg3.md) | AWG 3+ transit |
 | [docs/security-boundary.md](docs/security-boundary.md) | secrets, UFW and trust boundaries |
 | [docs/acceptance.md](docs/acceptance.md) | acceptance checks |
+| [docs/front-relay.md](docs/front-relay.md) | field-validated CDN/FRONT allowlist path and its limitations (Russian) |
 | [docs/upstream.md](docs/upstream.md) | pinned upstream components |
 | [CHANGELOG.md](CHANGELOG.md) | release history |
 

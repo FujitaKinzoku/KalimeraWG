@@ -1,5 +1,5 @@
 ---
-- name: "Перезагрузка: администрирование — этап 1"
+- name: "Перезагрузка: администрирование - этап 1"
   ansible.builtin.systemd_service:
     daemon_reload: true
   listen: Перезагрузить модули systemd для администрирования

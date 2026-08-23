@@ -26,7 +26,7 @@ jobs:
       - name: Установка инструментов проверки
         run: |
           sudo apt-get update
-          sudo apt-get install --yes openssh-server shellcheck ssss unbound
+          sudo apt-get install --yes openssh-server shellcheck ssss unbound nginx unzip
           pip install --require-hashes -r requirements.lock
 
       - name: Установка коллекций Ansible
@@ -52,6 +52,7 @@ jobs:
           ansible-playbook --syntax-check playbooks/site.yml
           ansible-playbook --syntax-check playbooks/entry.yml
           ansible-playbook --syntax-check playbooks/exit.yml
+          ansible-playbook --syntax-check playbooks/front.yml
           ansible-playbook --syntax-check playbooks/verify.yml
           ansible-playbook --syntax-check playbooks/rollback-entry.yml
           ansible-playbook --syntax-check playbooks/rollback-exit.yml
@@ -97,3 +98,6 @@ jobs:
 
       - name: Проверка конфигурации закреплённой версией sing-box
         run: ansible-playbook tests/check-sing-box.yml
+
+      - name: Проверка конфигурации FRONT-релея закреплённой версией Xray-core
+        run: ansible-playbook tests/check-front.yml

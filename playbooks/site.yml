@@ -356,7 +356,7 @@
         entry_legacy_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1280] | min }}"
         entry_mobile_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
       when:
-        - awg_node_role == 'entry'
+        - awg_node_role | default('') == 'entry'
         - awg_adoption_mode == 'apply'
         - awg3_transit_enabled | default(false) | bool
 
@@ -489,6 +489,41 @@
     - role: health
       when: awg_adoption_mode == 'apply'
 
+# Опциональный третий узел (docs/front-relay.md) - группа `front` в inventory
+# по умолчанию пуста, play выполняется 0 раз и ничего не меняет, если фича
+# не подключена через ./deploy --enable-front. Требует, чтобы play "Настройка
+# ENTRY сервера" выше уже отработал в этом же прогоне - факты reality_fallback_*
+# читаются из hostvars ENTRY (fact_caching = jsonfile, ansible.cfg).
+- name: Настройка FRONT сервера
+  hosts: front
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений о FRONT сервере
+      ansible.builtin.setup:
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: front
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: health
+      when: awg_adoption_mode == 'apply'
+
 - name: Проверка DNS зарубежной ветки через рекурсивный резолвер EXIT
   hosts: entry
   gather_facts: false
@@ -508,6 +543,11 @@
         - awg_adoption_mode == 'apply'
         - entry_dns_default_via_exit | default(false) | bool
 
+# Пороговое (Shamir 2-of-N) хранилище - свойство пары ENTRY/EXIT: доли,
+# индексы и peer-списки задаются только в group_vars entry/exit, а на FRONT
+# нет ни ключей AmneziaWG, ни доли (docs/front-relay.md). Флаг
+# runtime_secrets_enabled лежит в group_vars/all, поэтому FRONT наследует
+# его как true - отсюда явная привязка к роли узла, а не к одному флагу.
 - name: Подготовка взаимной аутентификации держателей Shamir-долей
   hosts: all
   gather_facts: false
@@ -519,6 +559,7 @@
       register: runtime_secrets_host_public_key_file
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
     - name: Сохранение проверенного host key только в памяти Ansible
@@ -529,6 +570,7 @@
       no_log: true
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Шифрование постоянных секретов и перенос открытых данных в tmpfs
@@ -539,6 +581,7 @@
     - role: runtime_secrets
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Фиксация контрольных сумм управляемой конфигурации
@@ -546,11 +589,15 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    # Манифест ставит roles/operations, которая на FRONT не применяется
+    # (см. "Настройка FRONT сервера" выше) - бинарника там нет.
     - name: Создание манифеста после полного применения ролей
       ansible.builtin.command:
         argv: [/usr/local/sbin/awg-managed-integrity, seal]
       changed_when: true
-      when: awg_adoption_mode == 'apply'
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit']
 
 - name: Восстановление автоматических обновлений
   hosts: all

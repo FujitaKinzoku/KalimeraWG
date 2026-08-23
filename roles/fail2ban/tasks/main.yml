@@ -1,12 +1,12 @@
 ---
-- name: "Установка: защита Fail2Ban — этап 1"
+- name: "Установка: защита Fail2Ban - этап 1"
   ansible.builtin.apt:
     name: fail2ban
     state: present
     lock_timeout: 600
   when: awg_enable_fail2ban | bool
 
-- name: "Установка: защита Fail2Ban — этап 2"
+- name: "Установка: защита Fail2Ban - этап 2"
   ansible.builtin.template:
     src: fail2ban.local.j2
     dest: "{{ security_fail2ban_runtime_file }}"
@@ -16,7 +16,7 @@
   when: awg_enable_fail2ban | bool
   notify: Перезапустить итоговый Fail2Ban
 
-- name: "Установка: защита Fail2Ban — этап 3"
+- name: "Установка: защита Fail2Ban - этап 3"
   ansible.builtin.template:
     src: fail2ban-sshd.local.j2
     dest: "{{ security_fail2ban_file }}"
@@ -34,14 +34,14 @@
   changed_when: false
   when: awg_enable_fail2ban | bool
 
-- name: "Включение: защита Fail2Ban — этап 4"
+- name: "Включение: защита Fail2Ban - этап 4"
   ansible.builtin.systemd_service:
     name: fail2ban.service
     enabled: true
     state: started
   when: awg_enable_fail2ban | bool
 
-- name: "Применение: защита Fail2Ban — этап 5"
+- name: "Применение: защита Fail2Ban - этап 5"
   ansible.builtin.meta: flush_handlers
   when: awg_enable_fail2ban | bool
 

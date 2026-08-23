@@ -1,0 +1,132 @@
+---
+# FRONT: CDN-фронтированный VLESS+XHTTP релей на Xray-core, авторизуется на
+# ENTRY как обычный REALITY-клиент (см. docs/front-relay.md). Выключено по
+# умолчанию - роль не создаёт файлов/сервисов, пока не включено явно через
+# ./deploy --enable-front.
+front_relay_enabled: false
+
+front_xray_service_name: xray.service
+front_xray_binary_path: /usr/local/bin/xray
+front_xray_package_cache: /var/cache/ansible/xray.zip
+front_xray_config_path: /usr/local/etc/xray/config.json
+front_xray_state_dir: /usr/local/etc/xray
+
+# Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по
+# архитектуре - тот же паттерн, что entry_sing_box_packages в roles/sing_box.
+# Xray-core не публикует .deb - только сырой архив с бинарником, поэтому
+# устанавливается вручную (unzip + install), не через apt.
+#
+# v26.3.27 -> v26.7.28: клиенты (Happ v5.6.0 подтверждённо бандлит именно
+# v26.7.28 - видно в его собственном логе "Xray <версия> started" при
+# JSON-профиле) успели уйти вперёд закреплённой здесь версии, и это не
+# косметика - между этими версиями реально разошлось поведение XHTTP:
+# v26.3.27 строго валидирует путь с завершающим слэшем, которого новые
+# клиенты не шлют ("failed to validate path"), и по-другому договаривается
+# о packet-up/stream-one режиме ("stream-one mode is not allowed" даже при
+# явном mode: packet-up). Оба факта воспроизведены локально парой
+# client+server на реальных бинарниках, не выведены из документации.
+# Обновление версии клиентов ПЕРИОДИЧЕСКОЕ и происходит вне контроля этого
+# проекта - см. "Актуальность версии Xray-core" в docs/front-relay.md за
+# тем, как и когда проверять, не отстала ли эта версия снова.
+front_xray_version: v26.7.28
+front_xray_packages:
+  x86_64:
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-64.zip"
+    checksum: "sha256:8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
+  aarch64:
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-arm64-v8a.zip"
+    checksum: "sha256:f5698bb218ada3b4022db26fafc39601c5f53b46b19eb76c9616325985807501"
+
+# Origin-домен, на который указывает A-запись FRONT и CNAME CDN-ресурса
+# (настраивается вручную вне Ansible - см. docs/front-relay.md). Обязателен,
+# если front_relay_enabled: true.
+front_origin_domain: ""
+front_certbot_email: ""
+
+front_xhttp_listen_port: 8080
+# Режим загрузки XHTTP: packet-up | stream-up | stream-one | auto.
+# packet-up - самый совместимый с CDN (аплинк идёт обычными GET-запросами,
+# которые CDN гарантированно пропускает), но и самый накладный. Остальные
+# режимы быстрее, однако требуют, чтобы CDN пропускал POST и не буферизовал
+# тело запроса. Сам Xray запрещает "uplinkHTTPMethod": "GET" вне packet-up
+# ("uplinkHTTPMethod can be GET only in packet-up mode"), поэтому GET
+# подставляется в конфигурацию только для packet-up.
+front_xhttp_mode: packet-up
+
+# Flow VLESS на хопе FRONT -> ENTRY.
+#
+# В Xray "xtls-rprx-vision" ПЕРЕХВАТЫВАЕТ UDP/443 (QUIC), чтобы браузер на
+# самом клиенте откатился на обычный HTTPS. Для клиента, стоящего прямо на
+# устройстве, это безвредно - приложение сразу видит отказ и переключается
+# на TCP. Но FRONT стоит посередине: телефон отправляет QUIC, перехват
+# происходит на FRONT, и до приложения отказ не доходит - оно ждёт
+# таймаута. Именно так ломается воспроизведение YouTube при работающих
+# Telegram и обычных сайтах.
+#
+# "xtls-rprx-vision-udp443" - то же самое, но без перехвата UDP/443, и
+# именно ему соответствует "xtls-rprx-vision" в sing-box (ENTRY): там
+# UDP/443 не блокируется. То есть это значение приводит поведение Xray в
+# соответствие с тем, что уже настроено на стороне ENTRY.
+front_reality_flow: xtls-rprx-vision-udp443
+# Путь VLESS+XHTTP на CDN - намеренно не дефолтный "/api/stream" при
+# развёртывании, чтобы не давать лёгкий fingerprint по общеизвестному пути
+# (переопределяется в group_vars/front.yml).
+front_xhttp_path: /api/stream
+
+front_origin_cert_path: "/etc/letsencrypt/live/{{ front_origin_domain }}/fullchain.pem"
+front_origin_key_path: "/etc/letsencrypt/live/{{ front_origin_domain }}/privkey.pem"
+
+front_nginx_site_path: /etc/nginx/sites-available/front-relay.conf
+front_nginx_site_link_path: /etc/nginx/sites-enabled/front-relay.conf
+front_nginx_default_site_link_path: /etc/nginx/sites-enabled/default
+
+# VLESS Encryption - независимый от TLS слой шифрования самого VLESS
+# (ML-KEM-768 + X25519, PFS + anti-replay 0-RTT; XTLS/Xray-core PR #5067,
+# слито 2025-08-28). Проверено на закреплённом бинарнике Xray v26.3.27:
+# `xray vlessenc` реально существует и генерирует пару decryption/
+# encryption. Выключено по умолчанию - фича новая, и, в отличие от REALITY
+# (pbk/sid - стандартные поля vless:// ссылки), значение "encryption"
+# тоже помещается в обычную ссылку без проблем, но само шифрование
+# добавляет заметные накладные расходы на ML-KEM-768 handshake и пока не
+# везде обкатано - включать сознательно, а не по умолчанию.
+front_vless_encryption_enabled: false
+front_vless_decryption_path: "{{ front_xray_state_dir }}/vless-decryption"
+front_vless_encryption_path: "{{ front_xray_state_dir }}/vless-encryption"
+
+# Маскировка XHTTP под конкретное веб-приложение, а не просто "случайный
+# HTTP-путь": id сессии в cookie, аплинк спрятан в тело запроса под именем
+# рекламного cache-buster'а, паддинг под токен. Легенда (PHPESSID/_dc/
+# mc_token) взята из реально работающего конфига стороннего VPN-провайдера
+# и эмпирически проверена на закреплённом бинарнике Xray v26.3.27
+# (`xray run -test` принимает такую конфигурацию). Выключено по
+# умолчанию: ссылка вида vless:// не может выразить вложенный объект
+# "extra" - клиенту нужен полный JSON-конфиг, а не короткая ссылка,
+# это меняет процесс выдачи конфигурации пользователям.
+front_xhttp_disguise_enabled: false
+front_xhttp_disguise_session_cookie: PHPESSID
+front_xhttp_disguise_uplink_param: _dc
+front_xhttp_disguise_padding_key: mc_token
+
+# Домен, на который в итоге смотрит клиент - сегодня совпадает с
+# origin-доменом (CDN ещё не настроен), после подключения внешнего CDN
+# достаточно переопределить только эту переменную в group_vars/front.yml.
+front_client_domain: "{{ front_origin_domain }}"
+
+# Подписка (Happ и совместимые клиенты периодически перезапрашивают эту
+# ссылку и сами подтягивают изменения - без переустановки профиля вручную
+# при каждой смене пути/режима/ключа). Подтверждено официальной
+# документацией Happ (happ.su/main/dev-docs/app-management): тело подписки
+# - обычный список ссылок vless:// (в base64), метаданные - через
+# HTTP-заголовки profile-title/profile-update-interval. JSON - отдельный,
+# одноразовый способ импорта ОДНОГО сервера, а не формат подписки, поэтому
+# маскировка XHTTP (front_xhttp_disguise_enabled, объект "extra") через
+# подписку недоступна принципиально - только обычная ссылка без неё.
+# Выключено по умолчанию: путь публичный и никем, кроме самой ссылки, не
+# защищён - при включении переопределите front_subscription_path на
+# непубличный.
+front_subscription_enabled: false
+front_subscription_path: /api/v1/sub
+front_subscription_title: Kalimera-FRONT
+front_subscription_update_interval_hours: 24
+front_subscription_dir: /var/www/front-subscription
+front_subscription_file_path: "{{ front_subscription_dir }}/subscription.b64"

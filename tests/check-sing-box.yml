@@ -40,20 +40,82 @@
               - "{{ sing_box_test_root }}/package"
           changed_when: false
 
-        - name: Формирование тестовых SOCKS5-конфигураций с аутентификацией и без неё
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../roles/sing_box/templates/config.json.j2"
-            dest: "{{ sing_box_test_root }}/config-{{ item.name }}.json"
+        # Непустой rule-set, а не заготовка "rules":[] - именно непустой
+        # набор правил ловит несовместимость версии rule-set с закреплённым
+        # sing-box (sing-box отвергает файл без "version" только при разборе
+        # реального содержимого правил, пустой массив проходит и без него).
+        - name: Создание тестовых rule-set REALITY с реальным содержимым
+          ansible.builtin.copy:
+            dest: "{{ sing_box_test_root }}/reality-{{ item.name }}.json"
+            content: "{{ item.content }}\n"
             mode: "0600"
+          loop:
+            - name: ru-domains
+              content: '{"version": 1, "rules": [{"domain_suffix": ["example.ru"]}]}'
+            - name: ru-zone
+              content: '{"version": 1, "rules": [{"ip_cidr": ["203.0.113.0/24"]}]}'
+            - name: se-domains
+              content: '{"version": 1, "rules": [{"domain_suffix": ["example.invalid"]}]}'
+
+        # Генерируется закреплённым бинарником на каждом запуске, а не хранится в
+        # репозитории как литерал - так же, как это делает роль sing_box в
+        # продакшене (roles/sing_box/tasks/main.yml), и без ложных срабатываний
+        # scripts/check-secrets.sh на структуру base64-ключа WireGuard-формата.
+        - name: "Проверка REALITY: генерация тестовой ключевой пары"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - reality-keypair
+          register: sing_box_test_reality_keypair
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: генерация тестового short_id"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - rand
+              - --hex
+              - "8"
+          register: sing_box_test_reality_short_id
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: генерация тестового UUID клиента"
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - generate
+              - uuid
+          register: sing_box_test_reality_uuid
+          changed_when: false
+          no_log: true
+
+        - name: "Проверка REALITY: разбор сгенерированного тестового материала"
+          ansible.builtin.set_fact:
+            sing_box_test_reality_private_key: >-
+              {{ (sing_box_test_reality_keypair.stdout_lines
+                  | select('match', '^PrivateKey:')
+                  | first).split(':')[1] | trim }}
+            sing_box_test_reality_short_id: "{{ sing_box_test_reality_short_id.stdout | trim }}"
+            sing_box_test_reality_uuid: "{{ sing_box_test_reality_uuid.stdout | trim }}"
+          no_log: true
+
+        - name: Формирование тестовых SOCKS5/REALITY-конфигураций
+          ansible.builtin.include_tasks: tasks/render-sing-box-fixture.yml
           loop:
             - name: authenticated
               username: example-user
               password: example-value
               override: {}
+              reality_enabled: false
             - name: anonymous
               username: ""
               password: ""
               override: {}
+              reality_enabled: false
             - name: runtime-override
               username: ignored-user
               password: ignored-value
@@ -62,10 +124,19 @@
                 server_port: 1081
                 username: runtime-user
                 password: runtime-value
-          vars:
-            vault_proxy_username: "{{ item.username }}"
-            vault_proxy_password: "{{ item.password }}"
-            sing_box_runtime_proxy_override: "{{ item.override }}"
+              reality_enabled: false
+            - name: reality-enabled
+              username: ""
+              password: ""
+              override: {}
+              reality_enabled: true
+              ru_outbound: ru-socks
+            - name: reality-ru-failover
+              username: ""
+              password: ""
+              override: {}
+              reality_enabled: true
+              ru_outbound: direct-entry
           no_log: true
 
         - name: Семантическая проверка конфигураций закреплённой версией sing-box
@@ -79,8 +150,58 @@
             - authenticated
             - anonymous
             - runtime-override
+            - reality-enabled
+            - reality-ru-failover
           changed_when: false
           no_log: true
+
+        # Регрессия на баг из живого теста: клиент REALITY присылает адрес
+        # назначения уже разрешённым в IP, а не именем, поэтому доменные
+        # RU-правила (domain_suffix/rule_set) не срабатывают без
+        # предварительного sniff - правило sniff обязано идти раньше их.
+        - name: Чтение сгенерированного REALITY-конфига для проверки порядка правил
+          ansible.builtin.slurp:
+            src: "{{ sing_box_test_root }}/config-reality-enabled.json"
+          register: sing_box_test_reality_config_raw
+
+        - name: "Проверка: правило sniff предшествует доменной RU-маршрутизации REALITY"
+          vars:
+            sing_box_test_reality_config: "{{ sing_box_test_reality_config_raw.content | b64decode | from_json }}"
+            sing_box_test_reality_rules: "{{ sing_box_test_reality_config.route.rules }}"
+          ansible.builtin.assert:
+            that:
+              - sing_box_test_reality_rules[1].inbound == ["reality-in"]
+              - sing_box_test_reality_rules[1].action == "sniff"
+              - sing_box_test_reality_rules[3].domain_suffix == [".ru", ".xn--p1ai"]
+            fail_msg: >-
+              Правило sniff должно стоять сразу после hijack-dns и раньше
+              доменных RU-правил REALITY, иначе клиент, присылающий уже
+              разрешённый IP вместо домена, никогда не попадёт в RU-ветку.
+
+        # Регрессия на баг из живого теста: классификация по российским
+        # подсетям - эвристика, и зарубежные сервисы, отдающиеся с кеш-узлов
+        # внутри РФ (googlevideo.com через Google Global Cache российского
+        # оператора), ложно попадали в неё и уходили в российский прокси.
+        # se-domain - операторское исключение из этой эвристики; у клиентов
+        # AmneziaWG оно работает через ipset force_exit, который в цепочке
+        # mangle проверяется раньше набора ru. Здесь тот же приоритет должен
+        # соблюдаться, иначе исключение не имеет силы.
+        - name: "Проверка: se-domain перекрывает RU-правила REALITY"
+          vars:
+            sing_box_test_reality_config: "{{ sing_box_test_reality_config_raw.content | b64decode | from_json }}"
+            sing_box_test_reality_rules: "{{ sing_box_test_reality_config.route.rules }}"
+          ansible.builtin.assert:
+            that:
+              - sing_box_test_reality_rules[2].rule_set == ["reality-se-domains"]
+              - sing_box_test_reality_rules[2].outbound == "direct-exit"
+              - sing_box_test_reality_rules[4].rule_set == ["reality-ru-domains"]
+              - sing_box_test_reality_rules[5].rule_set == ["reality-ru-zone"]
+            fail_msg: >-
+              Правило se-domain должно стоять раньше всех RU-правил REALITY и
+              вести в direct-exit, иначе операторское исключение «всегда через
+              EXIT» не сработает: адрес зарубежного сервиса, отданный с
+              кеш-узла внутри РФ, попадёт в reality-ru-zone и уйдёт в
+              российский прокси.
 
       always:
         - name: Удаление изолированного каталога проверки sing-box

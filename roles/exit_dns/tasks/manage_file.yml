@@ -1,10 +1,10 @@
 ---
-- name: "Проверка: применение конфигурации DNS EXIT сервера — этап 1"
+- name: "Проверка: применение конфигурации DNS EXIT сервера - этап 1"
   ansible.builtin.stat:
     path: "{{ exit_dns_config_path }}"
   register: exit_dns_live_file
 
-- name: "Проверка: применение конфигурации DNS EXIT сервера — этап 2"
+- name: "Проверка: применение конфигурации DNS EXIT сервера - этап 2"
   ansible.builtin.command:
     argv:
       - /usr/bin/cmp
@@ -16,13 +16,13 @@
   failed_when: exit_dns_file_compare.rc not in [0, 1]
   when: exit_dns_live_file.stat.exists
 
-- name: "Определение: применение конфигурации DNS EXIT сервера — этап 3"
+- name: "Определение: применение конфигурации DNS EXIT сервера - этап 3"
   ansible.builtin.set_fact:
     exit_dns_file_changed: >-
       {{ (not exit_dns_live_file.stat.exists) or
          (exit_dns_file_compare.rc | default(1) == 1) }}
 
-- name: "Создание: применение конфигурации DNS EXIT сервера — этап 4"
+- name: "Создание: применение конфигурации DNS EXIT сервера - этап 4"
   ansible.builtin.file:
     path: "{{ exit_dns_backup_root }}"
     state: directory
@@ -33,7 +33,7 @@
     - exit_dns_live_file.stat.exists
     - exit_dns_file_changed | bool
 
-- name: "Резервное копирование: применение конфигурации DNS EXIT сервера — этап 5"
+- name: "Резервное копирование: применение конфигурации DNS EXIT сервера - этап 5"
   ansible.builtin.copy:
     src: "{{ exit_dns_config_path }}"
     dest: >-
@@ -46,7 +46,7 @@
     - exit_dns_live_file.stat.exists
     - exit_dns_file_changed | bool
 
-- name: "Установка: применение конфигурации DNS EXIT сервера — этап 6"
+- name: "Установка: применение конфигурации DNS EXIT сервера - этап 6"
   ansible.builtin.copy:
     src: "{{ exit_dns_candidate_root }}/90-awg-recursive.conf"
     dest: "{{ exit_dns_config_path }}"
