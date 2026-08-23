@@ -118,6 +118,9 @@ class FrontReleasePackagesTest(unittest.TestCase):
         proxy = (
             ROOT / "roles/operations/templates/ru-proxy.sh.j2"
         ).read_text(encoding="utf-8")
+        prompt = (
+            ROOT / "roles/terminal/templates/kalimera-prompt.sh.j2"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
             'known_tcp="$known_tcp {{ reality_fallback_port | default(8444) | int }}"',
@@ -133,6 +136,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
         )
         self.assertIn("|reality-dest-switch|", admin)
         self.assertIn("Маршрутизация через RU-прокси: НЕ НАСТРОЕНА", proxy)
+        self.assertIn("'FRONT' if 'front' in group_names", prompt)
 
     def test_front_backend_gets_minimal_rule_set_access(self) -> None:
         backend_tasks = (
