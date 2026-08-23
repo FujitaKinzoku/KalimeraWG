@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
 import os
 import pty
 import re
@@ -25,6 +26,79 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_front_replacement_commit_and_finish_are_two_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = Path(temporary) / "production"
+            (production / "group_vars").mkdir(parents=True)
+            entry_path = production / "group_vars" / "entry.yml"
+            front_path = production / "group_vars" / "front.yml"
+            MODULE.yaml_write(
+                entry_path,
+                {
+                    "front_replacement_state": "prepared",
+                    "front_previous_public_ipv4": "198.51.100.20",
+                },
+            )
+            MODULE.yaml_write(
+                front_path,
+                {
+                    "front_replacement_state": "prepared",
+                    "front_previous_public_ipv4": "198.51.100.20",
+                    "front_previous_origin_domain": "old.example.invalid",
+                    "front_access_modes": ["direct"],
+                },
+            )
+            with mock.patch.object(MODULE, "prompt_bool", return_value=True):
+                MODULE.commit_front_replacement(production)
+            self.assertEqual(
+                MODULE.load_yaml(entry_path)["front_replacement_state"], "active"
+            )
+            self.assertIn(
+                "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
+            )
+            with mock.patch.object(
+                MODULE, "_front_replacement_state_root", return_value=Path(temporary)
+            ):
+                (Path(temporary) / "current.json").write_text("{}", encoding="utf-8")
+                MODULE.finish_front_replacement(production)
+            self.assertNotIn(
+                "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
+            )
+            self.assertNotIn(
+                "front_previous_origin_domain", MODULE.load_yaml(front_path)
+            )
+
+    def test_front_replacement_rollback_restores_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            group_vars = production / "group_vars"
+            (group_vars / "all").mkdir(parents=True)
+            backup = root / "backup"
+            backup.mkdir()
+            expected = {
+                "hosts.yml": b"all: {children: {front: {hosts: {old: {}}}}}\n",
+                "entry.yml": b"front_public_ipv4: 198.51.100.20\n",
+                "front.yml": b"front_replacement_state: active\n",
+                "vault.yml": b"encrypted-vault-placeholder\n",
+            }
+            for name, content in expected.items():
+                (backup / name).write_bytes(content)
+            marker_root = root / "state"
+            marker_root.mkdir()
+            (marker_root / "current.json").write_text(
+                json.dumps({"backup": str(backup)}), encoding="utf-8"
+            )
+            with mock.patch.object(
+                MODULE, "_front_replacement_state_root", return_value=marker_root
+            ):
+                MODULE.rollback_front_replacement(production)
+            self.assertEqual((production / "hosts.yml").read_bytes(), expected["hosts.yml"])
+            self.assertEqual((group_vars / "entry.yml").read_bytes(), expected["entry.yml"])
+            self.assertEqual((group_vars / "front.yml").read_bytes(), expected["front.yml"])
+            self.assertEqual((group_vars / "all" / "vault.yml").read_bytes(), expected["vault.yml"])
+            self.assertTrue((marker_root / "current.json").is_file())
+
     def test_remote_observed_source_uses_ssh_connection_ipv4(self) -> None:
         with (
             mock.patch.object(MODULE, "require_command", return_value="ssh"),

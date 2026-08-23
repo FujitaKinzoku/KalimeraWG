@@ -271,6 +271,8 @@ vpn-user delete phone
 | RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
 | REALITY | `reality-dest-switch status\|list`; смена dest управляемого FRONT выполняется через inventory и deploy |
 | FRONT-релей | `./deploy --resume --enable-front`, затем `kalimera-test`; [docs/front-relay.md](docs/front-relay.md) |
+| VLESS-пользователи | на FRONT: `vless-user create ИМЯ cdn`, `list`, `export`, `delete` |
+| Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 

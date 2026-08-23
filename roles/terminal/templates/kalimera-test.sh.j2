@@ -33,12 +33,28 @@ fi
 
 case "$role" in
     entry)
+        if systemctl is-enabled --quiet kalimera-front-backend.service 2>/dev/null; then
+            if systemctl is-active --quiet kalimera-front-backend.service &&
+                ! systemctl cat sing-box.service 2>/dev/null | grep -Fq 'front-backend.json'; then
+                printf 'OK   FRONT backend изолирован от RU-прокси\n'
+            else
+                printf 'FAIL FRONT backend не изолирован от RU-прокси\n'
+                failures=$((failures + 1))
+            fi
+        fi
         printf 'INFO проверены клиенты, AWG 3+, DNS, RU-маршрутизация и FRONT backend\n'
         ;;
     exit)
         printf 'INFO проверены AWG 3+, NAT, изоляция и внешний маршрут\n'
         ;;
     front)
+        user_count="$(/usr/local/sbin/vless-user list 2>/dev/null | awk 'NF {count++} END {print count+0}')"
+        if [[ "$user_count" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'OK   VLESS-пользователей: %s\n' "$user_count"
+        else
+            printf 'FAIL реестр VLESS-пользователей пуст или недоступен\n'
+            failures=$((failures + 1))
+        fi
         printf 'INFO проверены Nginx, Xray-core, TLS, доступ к ENTRY и внешняя защита\n'
         ;;
 esac

@@ -9,6 +9,8 @@ front_access_modes:
   - direct
 front_cdn_state: not_configured
 front_active_id: front-1
+front_replacement_state: active
+front_previous_public_ipv4: ""
 front_direct_domain: "{{ front_origin_domain }}"
 front_cdn_domain: ""
 
@@ -16,9 +18,19 @@ front_xray_service_name: xray.service
 front_xray_binary_path: /usr/local/bin/xray
 front_xray_package_cache: /var/cache/ansible/xray.zip
 front_xray_config_path: /usr/local/etc/xray/config.json
+front_xray_base_config_path: /usr/local/etc/xray/config.base.json
+front_systemctl_path: /usr/bin/systemctl
 front_xray_state_dir: /usr/local/etc/xray
 front_xray_user: xray
 front_xray_group: xray
+
+# Реестр пользователей и параметры экспорта находятся в том же зашифрованном
+# runtime-каталоге, что конфигурация Xray. На постоянном диске остаётся только
+# аутентифицированный пакет runtime-secrets.
+front_vless_users_path: "{{ front_xray_state_dir }}/users.json"
+front_vless_client_settings_path: "{{ front_xray_state_dir }}/client-settings.json"
+front_vless_user_command_path: /usr/local/sbin/vless-user
+front_vless_initial_user_name: initial
 
 # Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по
 # архитектуре - тот же паттерн, что entry_sing_box_packages в roles/sing_box.

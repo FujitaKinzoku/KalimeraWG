@@ -567,6 +567,11 @@ check 'UFW ограничивает REALITY адресом FRONT-релея' \
 check 'UFW не разрешает REALITY для всех адресов' \
     ufw_interserver_has_no_broad_allow \
     {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% if front_replacement_state | default('active') == 'prepared' %}
+check 'прежний FRONT сохранён до подтверждения замены' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_previous_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% endif %}
 {% endif %}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
@@ -626,12 +631,35 @@ front_entry_reality_reachable() {
         'exec 3<>/dev/tcp/{{ front_entry_address }}/{{ front_entry_reality_port }}'
 }
 
+front_vless_users_are_consistent() {
+    local state_ids active_ids
+    state_ids="$(jq -r '.users[].id' {{ front_vless_users_path | quote }} | sort)" || return 1
+    active_ids="$(jq -r '.inbounds[0].settings.clients[].id' {{ front_xray_config_path | quote }} | sort)" || return 1
+    [[ -n "$state_ids" && "$state_ids" == "$active_ids" ]] &&
+        {{ front_vless_user_command_path | quote }} list >/dev/null
+}
+
+front_tls_endpoint_ready() {
+    local domain="$1"
+    getent ahostsv4 "$domain" >/dev/null 2>&1 &&
+        printf '' | timeout 10 openssl s_client \
+            -connect "${domain}:443" -servername "$domain" \
+            -verify_return_error >/dev/null 2>&1
+}
+
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
 check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'реестр VLESS-пользователей согласован с Xray' front_vless_users_are_consistent
 check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if 'direct' in front_access_modes %}
+check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_ready {{ front_direct_domain | quote }}
+{% endif %}
+{% if 'cdn' in front_access_modes %}
+check 'TLS endpoint CDN доступен' front_tls_endpoint_ready {{ front_cdn_domain | quote }}
+{% endif %}
 {% if front_entry_reality_stopped | default(false) | bool %}
 printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
 {% else %}

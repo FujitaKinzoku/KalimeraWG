@@ -22,6 +22,8 @@
       - ('cdn' not in front_access_modes) or front_cdn_state == 'ready'
       - ('cdn' not in front_access_modes) or front_cdn_domain | length > 0
       - ('direct' not in front_access_modes) or front_direct_domain == front_origin_domain
+      - front_replacement_state in ['active', 'prepared']
+      - front_replacement_state != 'prepared' or front_previous_public_ipv4 | length > 0
     fail_msg: >-
       Нужны настоящий origin-домен (A-запись уже указывает на этот сервер),
       e-mail для Certbot, закреплённый пакет Xray-core и ровно один хост в
@@ -373,14 +375,55 @@
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
 
-- name: "Установка: конфигурация Xray-core FRONT"
+- name: "Установка: базовая конфигурация Xray-core FRONT"
   ansible.builtin.template:
     src: xray-config.json.j2
-    dest: "{{ front_xray_config_path }}"
+    dest: "{{ front_xray_base_config_path }}"
     owner: "{{ front_xray_user }}"
     group: "{{ front_xray_group }}"
     mode: "0600"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Установка: параметры защищённого экспорта VLESS JSON"
+  ansible.builtin.template:
+    src: vless-client-settings.json.j2
+    dest: "{{ front_vless_client_settings_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Инициализация: реестр VLESS-пользователей"
+  ansible.builtin.template:
+    src: vless-users.json.j2
+    dest: "{{ front_vless_users_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  no_log: true
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Установка: управление VLESS-пользователями"
+  ansible.builtin.template:
+    src: vless-user.py.j2
+    dest: "{{ front_vless_user_command_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Синхронизация: пользователей с конфигурацией Xray-core"
+  ansible.builtin.command:
+    argv:
+      - "{{ front_vless_user_command_path }}"
+      - sync
+      - --no-restart
+  register: front_vless_user_sync
+  changed_when: "'changed' in front_vless_user_sync.stdout_lines"
   notify: Перезапустить Xray-core FRONT
+  no_log: true
   when: front_relay_enabled | default(false) | bool
 
 - name: "Проверка конфигурации Xray-core перед применением"

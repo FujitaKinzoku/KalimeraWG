@@ -64,6 +64,10 @@ managed_files() {
 {% if awg_node_role == 'front' %}
 /etc/systemd/system/{{ front_xray_service_name | default('xray.service') }}
 {{ front_xray_config_path | default('/usr/local/etc/xray/config.json') }}
+{{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') }}
+{{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
+{{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
+{{ front_vless_user_command_path | default('/usr/local/sbin/vless-user') }}
 {{ front_nginx_site_path | default('/etc/nginx/sites-available/front-relay.conf') }}
 /etc/letsencrypt/renewal-hooks/deploy/90-kalimerawg-front
 {% endif %}

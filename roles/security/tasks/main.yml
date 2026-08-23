@@ -797,6 +797,36 @@
     - reality_fallback_enabled | default(false) | bool
     - front_relay_enabled | default(false) | bool
 
+- name: "Сохранение доступа прежнего FRONT на этапе безопасной замены"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_previous_public_ipv4 }}"
+    comment: Временный FRONT до подтверждения замены
+  when:
+    - awg_node_role == 'entry'
+    - reality_fallback_enabled | default(false) | bool
+    - front_relay_enabled | default(false) | bool
+    - front_replacement_state | default('active') == 'prepared'
+    - front_previous_public_ipv4 | default('') | length > 0
+
+- name: "Удаление доступа прежнего FRONT после подтверждённой замены"
+  community.general.ufw:
+    rule: allow
+    port: "{{ reality_fallback_port | default(443) | int | string }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface }}"
+    direction: in
+    from_ip: "{{ front_previous_public_ipv4 }}"
+    delete: true
+  when:
+    - awg_node_role == 'entry'
+    - front_replacement_state | default('active') != 'prepared'
+    - front_previous_public_ipv4 | default('') | length > 0
+
 - name: "Удаление правила REALITY для FRONT при отсутствии FRONT"
   community.general.ufw:
     rule: allow

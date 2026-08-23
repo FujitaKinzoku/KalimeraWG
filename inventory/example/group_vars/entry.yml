@@ -155,5 +155,7 @@ entry_ru_zone_update_calendar: "*-*-* 03:17:00"
 front_enabled: false
 front_relay_enabled: false
 front_backend_enabled: false
+front_replacement_state: active
+front_previous_public_ipv4: ""
 reality_fallback_direct_client_enabled: false
 reality_fallback_enabled: false

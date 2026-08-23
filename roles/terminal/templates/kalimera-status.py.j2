@@ -248,6 +248,16 @@ def no_logs_baseline() -> bool:
         return False
 
 
+def vless_user_count() -> int:
+    path = Path({{ front_vless_users_path | default('/usr/local/etc/xray/users.json') | to_json }})
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        users = document.get("users", [])
+        return len(users) if isinstance(users, list) else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
 def state_word(active: bool, available: bool = True) -> str:
     if not available:
         return "не предусмотрен текущей конфигурацией"
@@ -355,6 +365,25 @@ def command_panels() -> None:
                 ("ru-direct-ports list", "TCP-порты RU, обходящие SOCKS5", "INFO"),
             ],
         )
+        if CONFIG["front_present"]:
+            panel(
+                "УПРАВЛЕНИЕ FRONT",
+                [
+                    ("kalimera-deploy --resume --replace-front", "подготовить новый FRONT с сохранением прежнего", "INFO"),
+                    ("kalimera-deploy --resume --commit-front-replacement", "подтвердить проверенную замену", "INFO"),
+                    ("kalimera-deploy --resume --rollback-front-replacement", "вернуть прежний FRONT до commit", "INFO"),
+                ],
+            )
+    elif CONFIG["role"] == "front":
+        panel(
+            "VLESS-ПОЛЬЗОВАТЕЛИ",
+            [
+                ("vless-user list", "пользователи и режим direct или CDN", "INFO"),
+                ("vless-user create ИМЯ [direct|cdn]", "создать пользователя и показать JSON", "INFO"),
+                ("vless-user export ИМЯ", "повторно показать JSON для импорта", "INFO"),
+                ("vless-user delete ИМЯ --yes", "отозвать пользователя с безопасным откатом", "INFO"),
+            ],
+        )
     panel(
         "БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ",
         [
@@ -407,6 +436,7 @@ def main() -> int:
                 ("Прямой вход", direct_text, "OK" if CONFIG["front_direct_enabled"] else "INFO"),
                 ("Вход через CDN", cdn_text, "OK" if CONFIG["front_cdn_enabled"] else "INFO"),
                 ("Backend ENTRY", f"{CONFIG['entry_host']}:{CONFIG['front_backend_port']}/TCP · VLESS REALITY", "INFO"),
+                ("VLESS-пользователи", str(vless_user_count()), "OK" if vless_user_count() > 0 else "FAIL"),
             ],
         )
         panel(

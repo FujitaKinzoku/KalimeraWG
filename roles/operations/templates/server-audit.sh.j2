@@ -64,6 +64,9 @@ sensitive_modes_ok() {
 /etc/sing-box/front-backend.json
 /usr/local/etc/xray/config.json
 {% if awg_node_role == 'front' %}
+{{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') }}
+{{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
+{{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
 {{ front_origin_key_path | default('/etc/letsencrypt/live/invalid/privkey.pem') }}
 {% endif %}
 EOF

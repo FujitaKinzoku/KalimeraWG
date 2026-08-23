@@ -5,6 +5,7 @@ awg_node_role: front
 front_enabled: true
 front_relay_enabled: true
 front_active_id: front-1
+front_replacement_state: active
 
 # direct означает TLS+XHTTP через FRONT без CDN. cdn разрешается только после
 # подготовки и проверки внешнего CDN-ресурса.

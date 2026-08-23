@@ -7,7 +7,7 @@ command_name="${1:-}"
 shift
 
 case "$command_name" in
-    kalimera-status|kalimera-test|awg-health|server-audit|maintenance|update-all|vpn-user|awg-mobile|awg-old|dns-status|dot-switch|doh-switch|ru-domain|se-domain|entry-domain|ru-proxy|ru-proxy-set|ru-direct-ports|f2b-reset|ssh-key-audit|telegram-test|kalimera-secretctl)
+    kalimera-status|kalimera-test|awg-health|server-audit|maintenance|update-all|vpn-user|vless-user|awg-mobile|awg-old|dns-status|dot-switch|doh-switch|ru-domain|se-domain|entry-domain|ru-proxy|ru-proxy-set|ru-direct-ports|f2b-reset|ssh-key-audit|telegram-test|kalimera-secretctl)
         executable="/usr/local/sbin/$command_name"
         [[ -x "$executable" ]] || { echo "Команда $command_name не установлена на этом сервере." >&2; exit 127; }
         exec "$executable" "$@"
@@ -22,8 +22,8 @@ case "$command_name" in
     kalimera-deploy)
 {% if awg_node_role == 'entry' %}
         case "${*:-}" in
-            '--resume'|'--resume --update-components'|'--summary'|'--terminal-only') ;;
-            *) echo 'Разрешено: kalimera-deploy --resume [--update-components], --summary или --terminal-only' >&2; exit 2 ;;
+            '--resume'|'--resume --update-components'|'--resume --replace-front'|'--resume --commit-front-replacement'|'--resume --rollback-front-replacement'|'--summary'|'--terminal-only') ;;
+            *) echo 'Разрешено: kalimera-deploy --resume, операции FRONT, --summary или --terminal-only' >&2; exit 2 ;;
         esac
         [[ -x {{ (security_controller_repo_path ~ '/deploy') | quote }} ]] || {
             echo 'Управляющий репозиторий не найден.' >&2
