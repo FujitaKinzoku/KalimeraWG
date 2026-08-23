@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
   <title id="title">Три пути подключения к каскаду KalimeraWG</title>
-  <desc id="desc">Клиент выбирает прямой AmneziaWG, прямой VLESS Reality или подтверждённый резерв через совместимый облачный CDN и FRONT. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной — через AWG3 на EXIT.</desc>
+  <desc id="desc">Клиент выбирает прямой AmneziaWG, прямой VLESS Reality или подтверждённый резерв через совместимый облачный CDN и FRONT. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной - через AWG3 на EXIT.</desc>
 
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">

@@ -5,7 +5,7 @@
   any_errors_fatal: true
   tasks:
     # awg-kernel-guard ставит roles/operations и он обслуживает DKMS-модуль
-    # AmneziaWG — на FRONT нет ни этой роли, ни самого модуля
+    # AmneziaWG - на FRONT нет ни этой роли, ни самого модуля
     # (docs/front-relay.md). Проверка состояния ниже, наоборот, на FRONT
     # нужна: roles/health там применяется и имеет собственную ветку.
     - name: Подготовка DKMS для текущего и следующего загрузочного ядра

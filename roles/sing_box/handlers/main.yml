@@ -1,5 +1,5 @@
 ---
-- name: "Перезапуск: прокси sing-box — этап 1"
+- name: "Перезапуск: прокси sing-box - этап 1"
   ansible.builtin.systemd_service:
     name: "{{ sing_box_service_name }}"
     state: restarted

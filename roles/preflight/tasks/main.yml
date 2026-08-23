@@ -1,12 +1,12 @@
 ---
-- name: "Проверка: предварительная проверка — этап 1"
+- name: "Проверка: предварительная проверка - этап 1"
   ansible.builtin.assert:
     quiet: true
     that:
       - awg_adoption_mode in ['audit', 'apply']
     fail_msg: "awg_adoption_mode должен иметь значение audit или apply"
 
-- name: "Проверка: предварительная проверка — этап 2"
+- name: "Проверка: предварительная проверка - этап 2"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -15,33 +15,33 @@
       - ansible_distribution_version is version('25.00', '<')
     fail_msg: "Репозиторий поддерживает только Ubuntu 24.04.x"
 
-- name: "Проверка: предварительная проверка — этап 3"
+- name: "Проверка: предварительная проверка - этап 3"
   ansible.builtin.assert:
     quiet: true
     that:
       - awg_backup_root == '/root/config-backups'
     fail_msg: "Резервные копии конфигураций разрешены только в /root/config-backups"
 
-- name: "Определение: предварительная проверка — этап 4"
+- name: "Определение: предварительная проверка - этап 4"
   ansible.builtin.set_fact:
     entry_wan_interface: "{{ ansible_default_ipv4.interface | default('') }}"
   when:
     - awg_node_role | default('') == 'entry'
     - entry_wan_interface | default('auto') in ['auto', '']
 
-- name: "Определение: предварительная проверка — этап 5"
+- name: "Определение: предварительная проверка - этап 5"
   ansible.builtin.set_fact:
     exit_wan_interface: "{{ ansible_default_ipv4.interface | default('') }}"
   when:
     - awg_node_role | default('') == 'exit'
     - exit_wan_interface | default('auto') in ['auto', '']
 
-# FRONT (и любая будущая третья роль) намеренно не проверяется здесь —
+# FRONT (и любая будущая третья роль) намеренно не проверяется здесь -
 # preflight жёстко завязан на пару ENTRY/EXIT (см. docs/front-relay.md,
 # "Известные ограничения"), но audit.yml/cleanup.yml идут по hosts: all,
 # поэтому такие хосты должны молча пропускать этап 6, а не падать на
 # неопределённой awg_node_role.
-- name: "Проверка: предварительная проверка — этап 6"
+- name: "Проверка: предварительная проверка - этап 6"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -71,7 +71,7 @@
       режим AWG 3+ и взаимные endpoint/listen UDP-порты обязаны быть согласованы.
   run_once: true
 
-- name: "Вывод: предварительная проверка — этап 7"
+- name: "Вывод: предварительная проверка - этап 7"
   ansible.builtin.debug:
     msg: "Предварительная проверка пройдена; при awg_adoption_mode=audit роли конфигурации не запускаются"
   when: awg_adoption_mode == 'audit'

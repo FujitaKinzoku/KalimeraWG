@@ -1,10 +1,10 @@
 ---
-# include_tasks (не просто template с loop:) — потому что этот плейбук
+# include_tasks (не просто template с loop:) - потому что этот плейбук
 # заранее include_vars-ит inventory/example/group_vars/entry.yml, где
 # reality_fallback_enabled: false задан как реальный inventory-переключатель
 # по умолчанию. include_vars по приоритету Ansible перебивает обычный vars:
 # на уровне задачи, поэтому reality_fallback_enabled из vars: ниже молча
-# игнорировался для всех фикстур — set_fact стоит выше include_vars и
+# игнорировался для всех фикстур - set_fact стоит выше include_vars и
 # действительно переопределяет значение для каждой итерации цикла.
 - name: "Установка reality_fallback_enabled для фикстуры {{ item.name }}"
   ansible.builtin.set_fact:

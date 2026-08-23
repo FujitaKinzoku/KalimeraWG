@@ -275,7 +275,7 @@ tcp_port_listening() {
 reality_dest_tls13() {
     local host="$1" port="$2"
     # "Protocol  : TLSv1.3" эхом повторяет запрошенную версию даже при
-    # провале хендшейка — надёжен только "New, TLSv1.3, Cipher is TLS_...".
+    # провале хендшейка - надёжен только "New, TLSv1.3, Cipher is TLS_...".
     timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
         grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_'
 }
@@ -301,7 +301,7 @@ printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
-# Всё в этом блоке — артефакты ролей amneziawg/security/operations, которые
+# Всё в этом блоке - артефакты ролей amneziawg/security/operations, которые
 # к FRONT не применяются (docs/front-relay.md, "Известные ограничения"):
 # модуля AmneziaWG, sysctl-профиля, journald/coredump/wtmp-политики и
 # таймера аудита там нет, поэтому на FRONT эти проверки не имеют смысла и
@@ -578,7 +578,7 @@ check 'рекурсивный DNS EXIT сервера активен' systemctl 
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
 {% endif %}
 {% elif awg_node_role == 'front' %}
-# Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво — только
+# Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво - только
 # когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
 # поэтому проверка established-соединения всегда падала бы, а health
 # запускается с --strict и заблокировал бы установку. Проверяем то, что

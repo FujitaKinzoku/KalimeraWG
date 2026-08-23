@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="620" viewBox="0 0 1440 620" role="img" aria-labelledby="title desc">
   <title id="title">Схема маршрутизации KalimeraWG</title>
-  <desc id="desc">VPN-клиент подключается к ENTRY. Основной трафик идёт через отдельный канал AWG 3+ на EXIT, а российский трафик — напрямую через ENTRY или через SOAX/SOCKS5.</desc>
+  <desc id="desc">VPN-клиент подключается к ENTRY. Основной трафик идёт через отдельный канал AWG 3+ на EXIT, а российский трафик - напрямую через ENTRY или через SOAX/SOCKS5.</desc>
 
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">

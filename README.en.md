@@ -93,7 +93,7 @@ policy, and cascade routing are unchanged. Highlights:
 | SSH | key-only access, Fail2Ban | additionally: hidden banner, no user startup files, automation key restricted to its source address, separate recovery admin key |
 | Log retention | standard journald and Fail2Ban | no-logs policy: journald/Fail2Ban/login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
 | Auditing | `server-audit` | added `ssh-key-audit` (foreign root keys) and an expanded `server-audit` (public listeners, no-logs policy compliance) |
-| Cascade reliability | — | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
+| Cascade reliability | - | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
 | Kernel/DKMS | checks `/vmlinuz` | guard now recognizes every installed kernel, including signed/unsigned kernel packages |
 
 See the full changelog in [CHANGELOG.md](CHANGELOG.md) (the `[2.0.0]` section) and the

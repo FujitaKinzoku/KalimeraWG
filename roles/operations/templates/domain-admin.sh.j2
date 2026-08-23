@@ -130,7 +130,7 @@ fi
         [[ -z "$domain" ]] || {
             echo "ipset=/$domain/force_ru"
             if [[ "$proxy_dns" == false ]]; then
-                # SOAX выключен полностью — RU-DoH порт всё равно не работает,
+                # SOAX выключен полностью - RU-DoH порт всё равно не работает,
                 # единственный рабочий резолвер сейчас дефолтная ветка.
                 echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
             else
@@ -138,7 +138,7 @@ fi
                 # дефолтную/зарубежную ветку. Раньше обе строки для одного
                 # домена конкурировали, и dnsmasq мог по своей эвристике
                 # выбора сервера чаще использовать более быструю дефолтную
-                # ветку — резолвинг молча уходил не туда, что администратор
+                # ветку - резолвинг молча уходил не туда, что администратор
                 # явно указал. Недоступность RU-DoH теперь честно даёт
                 # отказ резолвинга вместо тихой утечки геолокации.
                 echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
@@ -169,13 +169,13 @@ if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
 fi
 
 {% if reality_fallback_enabled | default(false) | bool %}
-# Тот же источник (ru-domain), что и dnsmasq выше — производный rule-set для
+# Тот же источник (ru-domain), что и dnsmasq выше - производный rule-set для
 # запасного транспорта VLESS+REALITY. sing-box сам перечитывает локальные
 # rule-set файлы при изменении на диске (с версии 1.10.0), перезапуск не
 # нужен.
 readonly REALITY_RU_RULE_SET={{ reality_fallback_ru_rule_set_path | quote }}
 reality_tmp="$(mktemp /run/awg-domain-policy-reality.XXXXXX)"
-# Через stdin одним jq-вызовом, а не --argjson с большой shell-переменной —
+# Через stdin одним jq-вызовом, а не --argjson с большой shell-переменной -
 # см. аналогичный фикс "Argument list too long" в awg-ru-zone-update.sh.j2.
 sed -E '/^[[:space:]]*(#|$)/d' "$DIR/ru-domain" |
     jq -R -s '

@@ -20,9 +20,9 @@
       группе entry.
   when: front_relay_enabled | default(false) | bool
 
-# FRONT — второй REALITY-клиент ENTRY (roles/sing_box); без включённого там
+# FRONT - второй REALITY-клиент ENTRY (roles/sing_box); без включённого там
 # front_relay_enabled эти факты не вычисляются (пустые строки), и конфиг
-# Xray будет нерабочим без явной причины в логах — лучше упасть здесь сразу.
+# Xray будет нерабочим без явной причины в логах - лучше упасть здесь сразу.
 - name: "Проверка: ENTRY подготовлен для FRONT-релея"
   ansible.builtin.assert:
     quiet: true
@@ -34,19 +34,19 @@
     fail_msg: >-
       ENTRY должен иметь reality_fallback_enabled и front_relay_enabled,
       примените deploy на entry перед front (или запустите оба в одном
-      прогоне — front-плей идёт после entry-плея).
+      прогоне - front-плей идёт после entry-плея).
   when: front_relay_enabled | default(false) | bool
 
 # hostvars/groups читаются один раз здесь (тот же приём, что и при
-# согласовании MTU ENTRY-EXIT в playbooks/site.yml) — шаблоны и health-чек
+# согласовании MTU ENTRY-EXIT в playbooks/site.yml) - шаблоны и health-чек
 # используют простые факты front_entry_*, а не индексацию по groups/hostvars
-# напрямую: это и проще тестировать (groups/hostvars — служебные переменные
+# напрямую: это и проще тестировать (groups/hostvars - служебные переменные
 # Ansible, их нельзя подменить через vars: в отдельной задаче), и меньше
 # дублирования одного и того же выражения по всем шаблонам.
 - name: "Чтение параметров ENTRY, нужных FRONT-релею"
   ansible.builtin.set_fact:
     # ansible_host у ENTRY равен 127.0.0.1, когда каскад ставился локально
-    # на самом ENTRY (./deploy, "Установить ENTRY сервер на этой машине") —
+    # на самом ENTRY (./deploy, "Установить ENTRY сервер на этой машине") -
     # для FRONT это был бы адрес его самого. Публичный endpoint ENTRY лежит
     # в group_vars/entry.yml и виден через hostvars (это group_var, а не
     # default роли); тот же приём уже используется при выпуске клиентских
@@ -227,7 +227,7 @@
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
 
-# "xray vlessenc" всегда выводит две пары — X25519 (не постквантовый) и
+# "xray vlessenc" всегда выводит две пары - X25519 (не постквантовый) и
 # ML-KEM-768 (постквантовый), выбора флагом нет. Берём именно ML-KEM-768,
 # тем же способом (awk/sed по якорной строке), что уже используется в
 # tests/check-front.yml для разбора вывода "xray x25519".
@@ -294,13 +294,13 @@
     - front_relay_enabled | default(false) | bool
     - front_subscription_enabled | default(false) | bool
 
-# Подписка отражает те же переменные, что уходят в xray-config.json.j2 —
+# Подписка отражает те же переменные, что уходят в xray-config.json.j2 -
 # при следующем ./deploy --resume после смены front_xhttp_path/mode или
 # ключа VLESS Encryption содержимое подписки обновится само, отдельно
 # ничего пересобирать не нужно.
 #
 # Маскировка XHTTP (front_xhttp_disguise_enabled) в ссылку не попадает
-# принципиально — Happ ожидает от подписки список ссылок vless://, а не
+# принципиально - Happ ожидает от подписки список ссылок vless://, а не
 # JSON, и объект "extra" в такую ссылку не помещается (см. комментарий в
 # defaults/main.yml). Значение шифрования VLESS в ссылку попадает: это
 # обычный query-параметр, а не вложенный объект.
@@ -403,7 +403,7 @@
 - name: "Применение: конфигурация FRONT-релея"
   ansible.builtin.meta: flush_handlers
 
-# Симметричный disable-branch (тот же идиом, что в roles/entry_watchdog) —
+# Симметричный disable-branch (тот же идиом, что в roles/entry_watchdog) -
 # на случай ретрофита, когда FRONT уже был развёрнут, а затем отключён.
 - name: "Отключение: служба Xray-core FRONT"
   ansible.builtin.systemd_service:

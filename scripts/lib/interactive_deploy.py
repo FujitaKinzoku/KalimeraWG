@@ -466,7 +466,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     """Добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) к production inventory.
 
     В отличие от enable_mobile_profile это добавляет НОВЫЙ хост, а не просто
-    флаги существующему — требует интерактивных данных подключения. См.
+    флаги существующему - требует интерактивных данных подключения. См.
     docs/front-relay.md для ручных шагов (DNS/CDN), которые нужны отдельно.
     """
     hosts_path = production / "hosts.yml"
@@ -486,7 +486,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         [
             "Отдельная VPS с Nginx+Xray-core, авторизуется на ENTRY как ещё",
             "один REALITY-клиент. Требует УЖЕ настроенных вручную DNS",
-            "(A-запись на этот сервер) и CDN-ресурса перед сертификатом —",
+            "(A-запись на этот сервер) и CDN-ресурса перед сертификатом -",
             "подробности в docs/front-relay.md.",
         ],
         "cyan",
@@ -496,7 +496,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         fail("Необходимо указать адрес FRONT сервера")
     require_public_endpoint(front_host, "Адрес FRONT сервера")
     # Постоянный публичный IPv4, а не front_host как есть (может быть
-    # DNS-именем) — нужен для изолированного UFW-правила на ENTRY, тем же
+    # DNS-именем) - нужен для изолированного UFW-правила на ENTRY, тем же
     # способом, что security_interserver_peer_ipv4 для пары ENTRY/EXIT.
     front_public_ipv4 = resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
     front_user = prompt("Пользователь SSH FRONT сервера", "root")
@@ -519,11 +519,11 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     front_vars = {
         "awg_node_role": "front",
         # runtime_secrets_enabled лежит в group_vars/all и наследуется всеми
-        # хостами, но пороговое хранилище — свойство пары ENTRY/EXIT: доли и
+        # хостами, но пороговое хранилище - свойство пары ENTRY/EXIT: доли и
         # peer-списки задаются только в их group_vars (docs/front-relay.md).
         "runtime_secrets_enabled": False,
         "front_relay_enabled": True,
-        # Дефолт роли ("/api/stream") — общеизвестный путь и лёгкий
+        # Дефолт роли ("/api/stream") - общеизвестный путь и лёгкий
         # fingerprint; путь генерируется здесь, потому что он должен быть
         # постоянным (входит в клиентские ссылки и правила кэширования CDN),
         # а не пересчитываться при каждом deploy.
@@ -681,7 +681,7 @@ def resolve_single_public_ipv4(value: str, label: str) -> str:
 
 def probe_reality_dest(host: str, port: int = 443, attempts: int = 3) -> bool:
     """Проверить, что dest-сайт REALITY стабильно отвечает TLS 1.3 одним
-    и тем же сертификатом — та же логика (три пробы), что применяется
+    и тем же сертификатом - та же логика (три пробы), что применяется
     сервером при deploy и в reality-dest-switch."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
@@ -1975,7 +1975,7 @@ def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> 
     if changed:
         yaml_write(hosts_path, hosts_document)
         print(
-            "Production inventory обновлён: фактический IPv4 служебного SSH — "
+            "Production inventory обновлён: фактический IPv4 служебного SSH - "
             + ", ".join(sorted(observed_values))
             + "."
         )
@@ -2334,7 +2334,7 @@ def main() -> None:
         action="store_true",
         help=(
             "при --resume добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) "
-            "как отдельный хост — интерактивно запросит данные подключения"
+            "как отдельный хост - интерактивно запросит данные подключения"
         ),
     )
     parser.add_argument(
@@ -2660,15 +2660,15 @@ def main() -> None:
         proxy_password = getpass.getpass("Пароль SOCKS5, если требуется (ввод скрыт): ")
         if bool(proxy_username) != bool(proxy_password):
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
-        expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
+        expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто - определить автоматически", "")
 
     reality_fallback_enabled = False
     reality_fallback_dest = "yandex.ru"
-    # yandex.ru первым — RU-правдоподобный, собственная инфраструктура
+    # yandex.ru первым - RU-правдоподобный, собственная инфраструктура
     # Yandex (не CDN), стабильно проходит preflight-проверку сертификата на
-    # живом каскаде. www.microsoft.com исключён — отдаётся через Akamai
+    # живом каскаде. www.microsoft.com исключён - отдаётся через Akamai
     # (сторонний CDN), что на практике повышало долю сорванных
-    # REALITY-хендшейков. www.debian.org сюда намеренно не включён —
+    # REALITY-хендшейков. www.debian.org сюда намеренно не включён -
     # резолвится в несколько IP (DNS round-robin) и не проходит
     # preflight-проверку стабильности сертификата.
     reality_candidates = [
@@ -2709,7 +2709,7 @@ def main() -> None:
                 fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
             if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
                 fail(
-                    f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 —"
+                    f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 -"
                     " выберите другой (та же проверка также выполняется во время deploy)"
                 )
             print(f"dest-сайт {reality_fallback_dest} проверен.")
@@ -2762,7 +2762,7 @@ def main() -> None:
         print(f"Telegram-бот подтверждён: @{bot['username']}")
 
         telegram_chat = prompt(
-            "Числовой Telegram chat ID; Enter — определить автоматически"
+            "Числовой Telegram chat ID; Enter - определить автоматически"
         )
         if not telegram_chat:
             ui_panel(

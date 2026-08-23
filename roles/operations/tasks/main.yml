@@ -1,5 +1,5 @@
 ---
-- name: "Проверка: администрирование — этап 1"
+- name: "Проверка: администрирование - этап 1"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -8,14 +8,14 @@
       - awg_maintenance_calendar | length > 0
     fail_msg: "Для административных таймеров требуются проверенные интервалы systemd"
 
-- name: "Установка: администрирование — этап 2"
+- name: "Установка: администрирование - этап 2"
   ansible.builtin.apt:
     name: unattended-upgrades
     state: present
     lock_timeout: 600
   when: awg_unattended_security_updates | bool
 
-- name: "Настройка: администрирование — этап 3"
+- name: "Настройка: администрирование - этап 3"
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/20auto-upgrades
     owner: root
@@ -28,7 +28,7 @@
       APT::Periodic::Unattended-Upgrade "0";
   when: awg_unattended_security_updates | bool
 
-- name: "Запрет: администрирование — этап 4"
+- name: "Запрет: администрирование - этап 4"
   ansible.builtin.copy:
     dest: /etc/apt/apt.conf.d/52awg-maintenance-policy
     owner: root
@@ -44,7 +44,7 @@
       };
   when: awg_unattended_security_updates | bool
 
-- name: "Установка: администрирование — этап 5"
+- name: "Установка: администрирование - этап 5"
   ansible.builtin.template:
     src: server-audit.sh.j2
     dest: "{{ awg_server_audit_path }}"
@@ -60,7 +60,7 @@
     group: root
     mode: "0750"
 
-- name: "Установка: администрирование — этап 6"
+- name: "Установка: администрирование - этап 6"
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "/usr/local/sbin/{{ item.dest }}"
@@ -78,7 +78,7 @@
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
   changed_when: false
 
-- name: "Установка: администрирование — этап 7"
+- name: "Установка: администрирование - этап 7"
   ansible.builtin.template:
     src: "{{ item }}.j2"
     dest: "/etc/systemd/system/{{ item }}"
@@ -90,7 +90,7 @@
     - awg-maintenance.timer
   notify: Перезагрузить модули systemd для администрирования
 
-- name: "Создание: администрирование — этап 8"
+- name: "Создание: администрирование - этап 8"
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -105,7 +105,7 @@
     - "{{ awg_mobile_local_peer_dir }}"
   when: awg_node_role == 'entry'
 
-- name: "Установка: администрирование — этап 9"
+- name: "Установка: администрирование - этап 9"
   ansible.builtin.copy:
     dest: "{{ awg_domain_policy_dir }}/{{ item.name }}"
     content: ""
@@ -119,7 +119,7 @@
     - {name: entry-domain}
   when: awg_node_role == 'entry'
 
-- name: "Установка: администрирование — этап 10"
+- name: "Установка: администрирование - этап 10"
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "/usr/local/sbin/{{ item.dest }}"
@@ -217,7 +217,7 @@
   changed_when: false
   when: awg_node_role == 'entry'
 
-- name: "Установка: администрирование — этап 11"
+- name: "Установка: администрирование - этап 11"
   ansible.builtin.template:
     src: awg-local-peer-apply.service.j2
     dest: /etc/systemd/system/awg-local-peer-apply.service
@@ -252,7 +252,7 @@
   when: awg_node_role == 'entry'
   notify: Перезагрузить модули systemd для администрирования
 
-- name: "Установка: администрирование — этап 12"
+- name: "Установка: администрирование - этап 12"
   ansible.builtin.file:
     src: /usr/local/sbin/awg-domain-admin
     dest: "/usr/local/sbin/{{ item }}"
@@ -261,14 +261,14 @@
   loop: [ru-domain, se-domain, entry-domain]
   when: awg_node_role == 'entry'
 
-- name: "Синхронизация: администрирование — этап 13"
+- name: "Синхронизация: администрирование - этап 13"
   ansible.builtin.command:
     argv: ["{{ awg_dns_policy_path }}"]
   register: operations_dns_policy
   changed_when: operations_dns_policy.stdout | length > 0
   when: awg_node_role == 'entry'
 
-- name: "Установка: администрирование — этап 14"
+- name: "Установка: администрирование - этап 14"
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "/etc/systemd/system/{{ item.dest }}"
@@ -294,7 +294,7 @@
   when: awg_telegram_monitor_enabled | bool
   no_log: true
 
-- name: "Проверка: администрирование — этап 15"
+- name: "Проверка: администрирование - этап 15"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -304,7 +304,7 @@
       двоеточием и отдельный числовой chat ID в зашифрованном Vault.
   when: awg_telegram_monitor_enabled | bool
 
-- name: "Создание: администрирование — этап 16"
+- name: "Создание: администрирование - этап 16"
   ansible.builtin.file:
     path: "{{ awg_telegram_monitor_state_dir }}"
     state: directory
@@ -313,7 +313,7 @@
     mode: "0700"
   when: awg_telegram_monitor_enabled | bool
 
-- name: "Установка: администрирование — этап 17"
+- name: "Установка: администрирование - этап 17"
   ansible.builtin.template:
     src: telegram-monitor.env.j2
     dest: "{{ awg_telegram_monitor_env_path }}"
@@ -323,7 +323,7 @@
   when: awg_telegram_monitor_enabled | bool
   no_log: true
 
-- name: "Установка: администрирование — этап 18"
+- name: "Установка: администрирование - этап 18"
   ansible.builtin.template:
     src: telegram-monitor.sh.j2
     dest: "{{ awg_telegram_monitor_path }}"
@@ -339,7 +339,7 @@
     force: true
   when: awg_telegram_monitor_enabled | bool
 
-- name: "Установка: администрирование — этап 19"
+- name: "Установка: администрирование - этап 19"
   ansible.builtin.template:
     src: "{{ item.src }}"
     dest: "/etc/systemd/system/{{ item.dest }}"
@@ -353,42 +353,42 @@
       dest: "{{ awg_telegram_monitor_timer_name }}"
   notify: Перезагрузить модули systemd для администрирования
 
-- name: "Применение: администрирование — этап 20"
+- name: "Применение: администрирование - этап 20"
   ansible.builtin.meta: flush_handlers
 
-- name: "Включение: администрирование — этап 21"
+- name: "Включение: администрирование - этап 21"
   ansible.builtin.systemd_service:
     name: awg-local-peer-apply.service
     enabled: true
     state: started
   when: awg_node_role == 'entry'
 
-- name: "Согласование: администрирование — этап 22"
+- name: "Согласование: администрирование - этап 22"
   ansible.builtin.command:
     argv: ["{{ awg_local_peer_apply_path }}"]
   changed_when: false
   no_log: true
   when: awg_node_role == 'entry'
 
-- name: "Включение: администрирование — этап 23"
+- name: "Включение: администрирование - этап 23"
   ansible.builtin.systemd_service:
     name: "{{ awg_server_audit_timer_name }}"
     enabled: true
     state: started
 
-- name: "Очистка: администрирование — этап 24"
+- name: "Очистка: администрирование - этап 24"
   ansible.builtin.command:
     argv: [/usr/bin/systemctl, reset-failed, "{{ awg_server_audit_service_name }}"]
   changed_when: false
   failed_when: false
 
-- name: "Включение: администрирование — этап 25"
+- name: "Включение: администрирование - этап 25"
   ansible.builtin.systemd_service:
     name: awg-maintenance.timer
     enabled: true
     state: started
 
-- name: "Включение: администрирование — этап 26"
+- name: "Включение: администрирование - этап 26"
   ansible.builtin.systemd_service:
     name: "{{ awg_telegram_monitor_timer_name }}"
     enabled: >-
@@ -422,7 +422,7 @@
     not (awg_telegram_monitor_enabled | bool) or
     (awg_telegram_monitor_start_immediately | bool)
 
-- name: "Удаление: администрирование — этап 27"
+- name: "Удаление: администрирование - этап 27"
   ansible.builtin.file:
     path: "{{ awg_telegram_monitor_env_path }}"
     state: absent

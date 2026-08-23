@@ -1,10 +1,10 @@
 ---
-# include_tasks (а не template с loop:) — потому что check-front.yml заранее
+# include_tasks (а не template с loop:) - потому что check-front.yml заранее
 # include_vars-ит roles/front/defaults/main.yml, где front_xhttp_mode,
 # front_reality_flow и оба новых переключателя заданы значениями по
 # умолчанию. include_vars по приоритету Ansible перебивает обычный vars: на
 # уровне задачи, поэтому перебор режимов через vars: молча проверял бы один
-# и тот же дефолт — set_fact стоит выше include_vars и действительно
+# и тот же дефолт - set_fact стоит выше include_vars и действительно
 # переопределяет значение на каждой итерации (та же ловушка, что в
 # render-sing-box-fixture.yml).
 - name: >-
@@ -36,7 +36,7 @@
   no_log: true
 
 # Именно здесь ловится класс ошибок, который шаблон пройти не мешает, а
-# настоящий бинарник отвергает — например "uplinkHTTPMethod can be GET only
+# настоящий бинарник отвергает - например "uplinkHTTPMethod can be GET only
 # in packet-up mode": роль допускает четыре режима XHTTP, два flow и два
 # независимых переключателя (VLESS Encryption, маскировка XHTTP), и
 # недопустимое сочетание должно падать здесь, а не на живом сервере.

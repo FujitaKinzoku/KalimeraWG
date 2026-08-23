@@ -46,7 +46,7 @@
   no_log: true
   when: awg3_transit_enabled | default(false) | bool
 
-- name: "Проверка: ENTRY сервер — этап 1"
+- name: "Проверка: ENTRY сервер - этап 1"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -70,7 +70,7 @@
   when: entry_manage_awg_configs | bool
   no_log: true
 
-- name: "Создание: ENTRY сервер — этап 2"
+- name: "Создание: ENTRY сервер - этап 2"
   ansible.builtin.file:
     path: "{{ entry_awg_config_dir }}"
     state: directory
@@ -109,7 +109,7 @@
     - entry_manage_awg_configs | bool
     - entry_mobile_client_available | bool
 
-- name: "Безопасное применение: ENTRY сервер — этап 3"
+- name: "Безопасное применение: ENTRY сервер - этап 3"
   ansible.builtin.include_tasks: manage_config.yml
   loop:
     - interface: "{{ entry_client_interface }}"
@@ -131,7 +131,7 @@
     - entry_manage_awg_configs | bool
     - entry_awg_config_item.enabled | bool
 
-- name: "Включение: ENTRY сервер — этап 4"
+- name: "Включение: ENTRY сервер - этап 4"
   ansible.builtin.systemd_service:
     name: "awg-quick@{{ item }}.service"
     enabled: true

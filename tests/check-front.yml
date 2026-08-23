@@ -14,7 +14,7 @@
 
     # include_vars имеет более высокий приоритет, чем vars: на уровне
     # отдельной задачи (та же ловушка, что уже чинили в check-sing-box.yml
-    # для reality_fallback_enabled) — front_origin_domain из defaults пустой,
+    # для reality_fallback_enabled) - front_origin_domain из defaults пустой,
     # и любой последующий vars: front_origin_domain: ... в задачах ниже
     # молча игнорировался бы. set_fact стоит выше include_vars и переопределяет
     # его для всех последующих задач без необходимости повторять в каждой.
@@ -53,7 +53,7 @@
             mode: "0755"
 
         # Тестовые REALITY-факты ENTRY генерируются закреплённым sing-box, а не
-        # хранятся в репозитории литералом — та же практика, что в
+        # хранятся в репозитории литералом - та же практика, что в
         # tests/check-sing-box.yml, без ложных срабатываний check-secrets.sh.
         - name: "Проверка: генерация тестовой ключевой пары REALITY (ENTRY)"
           ansible.builtin.command:
@@ -82,8 +82,8 @@
           changed_when: false
           no_log: true
 
-        # Вывод "xray x25519" в v26 — "Password (PublicKey): <значение>" (в
-        # более старых версиях был просто "Public key:") — regex без якоря
+        # Вывод "xray x25519" в v26 - "Password (PublicKey): <значение>" (в
+        # более старых версиях был просто "Public key:") - regex без якоря
         # на конкретную скобочную часть устойчив к обоим вариантам метки.
         - name: "Проверка: разбор тестового материала ENTRY"
           ansible.builtin.set_fact:
@@ -94,7 +94,7 @@
           no_log: true
 
         # xray vlessenc всегда выводит обе пары (X25519 и ML-KEM-768) без
-        # флага выбора — тот же разбор по якорной строке, что и в
+        # флага выбора - тот же разбор по якорной строке, что и в
         # roles/front/tasks/main.yml.
         - name: "Проверка: генерация тестовой пары VLESS Encryption"
           ansible.builtin.command:
@@ -113,8 +113,8 @@
                  | first }}
           no_log: true
 
-        # front_entry_* — простые факты (не groups/hostvars, это служебные
-        # переменные Ansible, их нельзя подменить через vars: в задаче) —
+        # front_entry_* - простые факты (не groups/hostvars, это служебные
+        # переменные Ansible, их нельзя подменить через vars: в задаче) -
         # тот же набор, что roles/front/tasks/main.yml вычисляет один раз
         # через set_fact из hostvars ENTRY перед рендерингом обоих шаблонов.
         #
@@ -133,10 +133,10 @@
             label: "{{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }}"
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
-        # приходят из set_fact выше (тестовые значения), не отсюда — задавать
+        # приходят из set_fact выше (тестовые значения), не отсюда - задавать
         # их здесь через vars: бессмысленно, include_vars/set_fact в этом
         # плейбуке имеют более высокий приоритет, чем vars: отдельной задачи.
-        # front_subscription_enabled: true проверяет новый location — nginx -t
+        # front_subscription_enabled: true проверяет новый location - nginx -t
         # проверяет только синтаксис, физическое существование файла из
         # alias ему не требуется.
         - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком и подпиской)
@@ -175,7 +175,7 @@
 
         # roles/front/templates/nginx-front.conf.j2 рендерит только фрагмент
         # server{} (в реальном деплое подключается через sites-enabled внутри
-        # системного http{} из /etc/nginx/nginx.conf) — nginx -t -c ожидает
+        # системного http{} из /etc/nginx/nginx.conf) - nginx -t -c ожидает
         # ПОЛНЫЙ конфиг с events{}/http{}, поэтому для проверки синтаксиса
         # оборачиваем фрагмент через include в минимальный конфиг-обёртку.
         - name: Формирование конфига-обёртки для проверки синтаксиса Nginx
@@ -202,7 +202,7 @@
         - name: Отчёт о проверке синтаксиса Nginx
           ansible.builtin.debug:
             msg: >-
-              {{ 'nginx недоступен в этом окружении — синтаксис не проверен'
+              {{ 'nginx недоступен в этом окружении - синтаксис не проверен'
                  if front_test_nginx_syntax.rc is undefined or front_test_nginx_syntax.rc == 127
                  else front_test_nginx_syntax.stderr }}
 

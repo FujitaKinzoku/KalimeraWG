@@ -90,11 +90,11 @@ else
 fi
 
 {% if reality_fallback_enabled | default(false) | bool %}
-# Тот же DISABLED_FLAG, что и выше для ядерного каскада — единственный
+# Тот же DISABLED_FLAG, что и выше для ядерного каскада - единственный
 # источник истины о состоянии SOAX, чтобы REALITY и ipset-маршрутизация не
 # могли разойтись во мнениях. Сверяется на каждом запуске (а не только в
 # момент переключения флага), поэтому переживает перезагрузку: /run
-# очищается, а вот /etc/sing-box/config.json — нет, и без этой сверки после
+# очищается, а вот /etc/sing-box/config.json - нет, и без этой сверки после
 # reboot состояние REALITY могло бы остаться устаревшим.
 readonly REALITY_CONFIG={{ sing_box_config_path | quote }}
 readonly REALITY_SERVICE={{ sing_box_service_name | quote }}

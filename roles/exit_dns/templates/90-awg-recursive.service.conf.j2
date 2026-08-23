@@ -10,7 +10,7 @@ StartLimitBurst=5
 # запуске обновляет уже существующий auto-trust-anchor-file, а не создаёт его
 # заново, и при частых рестартах (Restart=on-failure) это приводило к порче
 # файла ("trust anchor presented twice"). Сбрасываем унаследованный список
-# ExecStartPre и явно удаляем файл перед пересозданием — так хук всегда идёт
+# ExecStartPre и явно удаляем файл перед пересозданием - так хук всегда идёт
 # по чистому пути "создать заново", а не "обновить существующий".
 ExecStartPre=
 ExecStartPre=/usr/libexec/unbound-helper chroot_setup

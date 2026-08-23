@@ -976,7 +976,7 @@ class InteractiveDeployTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertLess(
             sing_box_tasks.index("Связывание запуска sing-box"),
-            sing_box_tasks.index("Применение: прокси sing-box — этап 17"),
+            sing_box_tasks.index("Применение: прокси sing-box - этап 17"),
         )
         self.assertIn("awg-entry-routing-reconcile", dropin)
         self.assertIn("test ! -x", dropin)
@@ -1200,7 +1200,7 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("Изоляция служебного AWG 3+", security_tasks)
         self.assertIn("взаимно изолированы", health)
         self.assertLess(
-            security_tasks.index('name: "Удаление: безопасность — этап 38"'),
+            security_tasks.index('name: "Удаление: безопасность - этап 38"'),
             security_tasks.index(
                 'name: "Фиксация отпечатка окончательной политики UFW"'
             ),

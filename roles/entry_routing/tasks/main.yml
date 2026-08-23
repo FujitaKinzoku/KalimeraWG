@@ -1,5 +1,5 @@
 ---
-- name: "Проверка: маршрутизация ENTRY сервера — этап 1"
+- name: "Проверка: маршрутизация ENTRY сервера - этап 1"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -12,7 +12,7 @@
       - entry_ru_zone_fallback_url is match('^https://')
     fail_msg: "Переменные маршрутизации ENTRY не соответствуют проверенной архитектуре"
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 2"
+- name: "Установка: маршрутизация ENTRY сервера - этап 2"
   ansible.builtin.apt:
     name:
       - curl
@@ -23,7 +23,7 @@
     state: present
     lock_timeout: 600
 
-- name: "Создание: маршрутизация ENTRY сервера — этап 3"
+- name: "Создание: маршрутизация ENTRY сервера - этап 3"
   ansible.builtin.file:
     path: "{{ entry_ru_zone_state_dir }}"
     state: directory
@@ -31,7 +31,7 @@
     group: root
     mode: "0755"
 
-- name: "Создание: маршрутизация ENTRY сервера — этап 4"
+- name: "Создание: маршрутизация ENTRY сервера - этап 4"
   ansible.builtin.file:
     path: "{{ entry_ru_direct_tcp_ports_file | dirname }}"
     state: directory
@@ -39,7 +39,7 @@
     group: root
     mode: "0700"
 
-- name: "Создание: маршрутизация ENTRY сервера — этап 5"
+- name: "Создание: маршрутизация ENTRY сервера - этап 5"
   ansible.builtin.copy:
     dest: "{{ entry_ru_direct_tcp_ports_file }}"
     content: ""
@@ -48,7 +48,7 @@
     mode: "0644"
     force: false
 
-- name: "Запись: маршрутизация ENTRY сервера — этап 6"
+- name: "Запись: маршрутизация ENTRY сервера - этап 6"
   ansible.builtin.copy:
     content: "{{ entry_ru_proxy_enabled | bool | ternary('proxy', 'direct') }}\n"
     dest: "{{ entry_ru_proxy_mode_path }}"
@@ -57,7 +57,7 @@
     mode: "0644"
   notify: Перезапустить маршрутизацию ENTRY сервера
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 7"
+- name: "Установка: маршрутизация ENTRY сервера - этап 7"
   ansible.builtin.template:
     src: awg-entry-routing.sh.j2
     dest: "{{ entry_routing_script_path }}"
@@ -74,7 +74,7 @@
     group: root
     mode: "0750"
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 8"
+- name: "Установка: маршрутизация ENTRY сервера - этап 8"
   ansible.builtin.template:
     src: awg-ru-zone-update.sh.j2
     dest: "{{ entry_ru_zone_update_script_path }}"
@@ -82,7 +82,7 @@
     group: root
     mode: "0750"
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 9"
+- name: "Установка: маршрутизация ENTRY сервера - этап 9"
   ansible.builtin.template:
     src: awg-entry-routing.service.j2
     dest: "/etc/systemd/system/{{ entry_routing_service_name }}"
@@ -93,7 +93,7 @@
     - Перезагрузить systemd
     - Перезапустить маршрутизацию ENTRY сервера
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 10"
+- name: "Установка: маршрутизация ENTRY сервера - этап 10"
   ansible.builtin.template:
     src: awg-ru-zone-update.service.j2
     dest: "/etc/systemd/system/{{ entry_ru_zone_service_name }}"
@@ -102,7 +102,7 @@
     mode: "0644"
   notify: Перезагрузить systemd
 
-- name: "Установка: маршрутизация ENTRY сервера — этап 11"
+- name: "Установка: маршрутизация ENTRY сервера - этап 11"
   ansible.builtin.template:
     src: awg-ru-zone-update.timer.j2
     dest: "/etc/systemd/system/{{ entry_ru_zone_timer_name }}"
@@ -111,27 +111,27 @@
     mode: "0644"
   notify: Перезагрузить systemd
 
-- name: "Применение: маршрутизация ENTRY сервера — этап 12"
+- name: "Применение: маршрутизация ENTRY сервера - этап 12"
   ansible.builtin.meta: flush_handlers
 
-- name: "Проверка: маршрутизация ENTRY сервера — этап 13"
+- name: "Проверка: маршрутизация ENTRY сервера - этап 13"
   ansible.builtin.stat:
     path: "{{ entry_ru_zone_cache_path }}"
   register: entry_ru_zone_cache
 
-- name: "Первичное заполнение: маршрутизация ENTRY сервера — этап 14"
+- name: "Первичное заполнение: маршрутизация ENTRY сервера - этап 14"
   ansible.builtin.systemd_service:
     name: "{{ entry_ru_zone_service_name }}"
     state: started
   when: not entry_ru_zone_cache.stat.exists
 
-- name: "Включение: маршрутизация ENTRY сервера — этап 15"
+- name: "Включение: маршрутизация ENTRY сервера - этап 15"
   ansible.builtin.systemd_service:
     name: "{{ entry_routing_service_name }}"
     enabled: true
     state: started
 
-- name: "Включение: маршрутизация ENTRY сервера — этап 16"
+- name: "Включение: маршрутизация ENTRY сервера - этап 16"
   ansible.builtin.systemd_service:
     name: "{{ entry_ru_zone_timer_name }}"
     enabled: true
