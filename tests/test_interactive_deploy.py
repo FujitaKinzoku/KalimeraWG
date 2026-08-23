@@ -396,7 +396,9 @@ class InteractiveDeployTests(unittest.TestCase):
             with mock.patch.object(
                 MODULE, "ssh_connection_works", side_effect=connection_works
             ):
-                recovered = MODULE.recover_saved_admin_access(hosts, hosts_path)
+                recovered = MODULE.recover_saved_admin_access(
+                    hosts, hosts_path, root_login_finalized=True
+                )
 
             self.assertEqual(recovered, ["exit-managed"])
             updated = MODULE.load_yaml(hosts_path)["all"]["children"]["exit"][
@@ -410,6 +412,36 @@ class InteractiveDeployTests(unittest.TestCase):
                 updated["ansible_become_password"],
                 "{{ vault_exit_kalimera_password }}",
             )
+
+    def test_finalized_root_is_not_probed_before_admin_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            with mock.patch.object(
+                MODULE, "ssh_connection_works", return_value=True
+            ) as connection:
+                MODULE.recover_saved_admin_access(
+                    hosts, hosts_path, root_login_finalized=True
+                )
+            self.assertEqual(connection.call_count, 1)
+            self.assertEqual(connection.call_args.args[1], "kalimera")
 
     def test_saved_inventory_does_not_change_without_verified_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1588,7 +1620,14 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("mode = aggressive", fail2ban_jail)
         self.assertIn("banaction = ufw", fail2ban_jail)
         self.assertIn("usedns = no", fail2ban_jail)
-        self.assertIn("ignoreip = 127.0.0.1/8 ::1", fail2ban_jail)
+        self.assertIn(
+            "ignoreip = 127.0.0.1/8 ::1 {{ security_automation_source_ipv4 }}",
+            fail2ban_jail,
+        )
+        self.assertIn(
+            "Исключение подтверждённого управляющего SSH из ограничения частоты",
+            security_tasks,
+        )
         self.assertIn("fail2ban_sshd_policy_is_strict", health)
 
     def test_no_logs_baseline_keeps_only_volatile_operational_state(self) -> None:

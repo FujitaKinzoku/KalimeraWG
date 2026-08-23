@@ -547,6 +547,7 @@
           (entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface),
           (ansible_port | default(22) | string),
           (ssh_listen_port | string),
+          (security_automation_source_ipv4 | string),
           (security_interserver_peer_ipv4 | string),
           (security_interserver_listen_port | string),
           (awg3_transit_interface | default('') | string),
@@ -658,6 +659,19 @@
     direction: in
     comment: Управляемый SSH
   loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+
+- name: "Исключение подтверждённого управляющего SSH из ограничения частоты"
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    interface: "{{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}"
+    direction: in
+    from_ip: "{{ security_automation_source_ipv4 }}"
+    insert: 1
+    comment: Подтверждённая автоматизация SSH
+  loop: "{{ [ansible_port | default(22) | int, ssh_listen_port | int] | unique }}"
+  when: security_automation_source_ipv4 | length > 0
 
 - name: "Удаление прежних SSH-правил без привязки к интерфейсу"
   community.general.ufw:

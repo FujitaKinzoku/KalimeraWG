@@ -1256,6 +1256,7 @@ def cleanup_deployment(repo: Path, hosts: Path, vault_password: Path) -> None:
             hosts_document,
             hosts,
             str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
         )
     except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError):
         # Cleanup остаётся best-effort даже для частично записанного inventory.
@@ -2476,6 +2477,7 @@ def recover_saved_admin_access(
     hosts_document: dict,
     hosts_path: Path,
     admin_user: str = "kalimera",
+    root_login_finalized: bool = False,
 ) -> list[str]:
     """Исправить inventory, если root уже закрыт, а kalimera доступен.
 
@@ -2499,7 +2501,12 @@ def recover_saved_admin_access(
             host = str(host_value)
             current_user = str(variables.get("ansible_user", admin_user))
             current_port = int(port_value)
-            if ssh_connection_works(host, current_user, current_port, private_key):
+            current_login_expected = not (
+                root_login_finalized and current_user == "root"
+            )
+            if current_login_expected and ssh_connection_works(
+                host, current_user, current_port, private_key
+            ):
                 continue
 
             candidate_ports = [current_port]
@@ -3138,6 +3145,7 @@ def main() -> None:
             hosts_document,
             hosts_path,
             str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
         )
         verify_saved_inventory_access(hosts_document)
         refresh_saved_automation_sources(hosts_document, hosts_path)

@@ -140,7 +140,7 @@ fail2ban_sshd_policy_ok() {
         grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
-        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+        grep -Fqx {{ ('ignoreip = 127.0.0.1/8 ::1 ' ~ security_automation_source_ipv4) | quote }} "$jail"
 }
 
 {% if security_manage_admin_account | default(false) | bool %}
