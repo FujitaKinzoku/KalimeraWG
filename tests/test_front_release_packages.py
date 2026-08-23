@@ -66,6 +66,11 @@ class FrontReleasePackagesTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("tasks_from: client-export-update.yml", playbook)
         self.assertIn("name: health", playbook)
+        self.assertIn(
+            "{{ playbook_dir }}/../inventory/production/group_vars/front.yml",
+            playbook,
+        )
+        self.assertNotIn("{{ inventory_dir }}", playbook)
         self.assertIn("vless-client-settings.json.j2", tasks)
         self.assertIn("vless-user.py.j2", tasks)
         self.assertIn("front_vless_user_command_path", tasks)

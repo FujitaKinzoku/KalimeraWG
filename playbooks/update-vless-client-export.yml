@@ -7,7 +7,7 @@
   tasks:
     - name: Проверка наличия production-переменных FRONT
       ansible.builtin.stat:
-        path: "{{ inventory_dir }}/group_vars/front.yml"
+        path: "{{ playbook_dir }}/../inventory/production/group_vars/front.yml"
       register: front_production_vars
 
     - name: Проверка production inventory FRONT
@@ -19,7 +19,7 @@
 
     - name: Сохранение обязательных параметров FRONT
       ansible.builtin.lineinfile:
-        path: "{{ inventory_dir }}/group_vars/front.yml"
+        path: "{{ playbook_dir }}/../inventory/production/group_vars/front.yml"
         regexp: "^{{ item.key }}:"
         line: "{{ item.key }}: true"
         insertafter: EOF
