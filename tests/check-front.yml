@@ -216,7 +216,9 @@
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.mode == 'packet-up'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.uplinkHTTPMethod == 'GET'
               - (lookup('file', front_xray_config_path) | from_json).inbounds[0].settings.clients | length == 1
-          no_log: true
+            fail_msg: >-
+              Экспортированный CDN JSON или активный список VLESS-пользователей
+              не соответствует проверяемому профилю
 
         - name: Создание тестового CDN-пользователя
           ansible.builtin.command:
