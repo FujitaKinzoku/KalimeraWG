@@ -37,3 +37,7 @@
       ansible.builtin.include_role:
         name: front
         tasks_from: client-export-update.yml
+
+    - name: Установка проверки VLESS Encryption на FRONT
+      ansible.builtin.include_role:
+        name: health
