@@ -141,9 +141,11 @@ class FrontReleasePackagesTest(unittest.TestCase):
             tasks,
         )
         self.assertIn(
-            "{{ reality_fallback_rule_set_dir | default('/etc/sing-box/reality/rules') }}",
+            "reality_fallback_rule_set_dir | default('/etc/sing-box/reality/rules')",
             service,
         )
+        self.assertNotIn("{% if reality_fallback_enabled", service)
+        self.assertIn("ProtectClock=true", service)
         self.assertNotIn("ReadWritePaths={{ reality_fallback_state_dir }}", service)
         self.assertIn(
             '"([.rules[]?.ip_cidr[]?] | length) >= $minimum"', routing_tasks

@@ -396,8 +396,10 @@
           ansible.builtin.shell: |
             set -Eeuo pipefail
             unit={{ (rendered_shell_root ~ '/awg-ru-zone-update.service') | quote }}
-            grep -Fq 'ProtectSystem=strict' "$unit"
-            grep -Fq 'ReadWritePaths={{ entry_ru_zone_state_dir }} /run {{ reality_fallback_rule_set_dir }}' "$unit"
+            grep -Fxq 'ProtectSystem=strict' "$unit"
+            grep -Fxq 'ReadWritePaths={{ entry_ru_zone_state_dir }} /run {{ reality_fallback_rule_set_dir }}' "$unit"
+            grep -Fxq 'ProtectClock=true' "$unit"
+            ! grep -Fq 'rulesProtectClock=' "$unit"
             ! grep -Fq 'ReadWritePaths={{ reality_fallback_state_dir }}' "$unit"
           args:
             executable: /bin/bash
