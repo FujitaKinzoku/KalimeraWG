@@ -64,7 +64,11 @@ class FrontReleasePackagesTest(unittest.TestCase):
         tasks = (
             ROOT / "roles/front/tasks/client-export-update.yml"
         ).read_text(encoding="utf-8")
+        entry_facts = (
+            ROOT / "roles/sing_box/tasks/front-export-facts.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn("tasks_from: client-export-update.yml", playbook)
+        self.assertIn("tasks_from: front-export-facts.yml", playbook)
         self.assertIn("name: health", playbook)
         self.assertIn(
             "{{ playbook_dir }}/../inventory/production/group_vars/front.yml",
@@ -86,6 +90,10 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("notify: Перезапустить Xray-core FRONT", tasks)
         self.assertIn("Строгая проверка FRONT", tasks)
         self.assertNotIn("systemd_service", tasks)
+        self.assertIn("reality_fallback_public_key", entry_facts)
+        self.assertIn("reality_fallback_front_client_uuid", entry_facts)
+        self.assertIn("sing_box_reality_dest_override_path", entry_facts)
+        self.assertNotIn("systemd_service", entry_facts)
 
     def test_front_encryption_profile_is_enabled_by_every_installer_path(self) -> None:
         defaults = (ROOT / "roles/front/defaults/main.yml").read_text(

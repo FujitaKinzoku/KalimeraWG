@@ -28,6 +28,16 @@
         - key: front_vless_encryption_enabled
         - key: front_xhttp_disguise_enabled
 
+- name: Чтение действующих параметров backend FRONT на ENTRY
+  hosts: entry
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Чтение параметров без изменения служб ENTRY
+      ansible.builtin.include_role:
+        name: sing_box
+        tasks_from: front-export-facts.yml
+
 - name: Включение VLESS Encryption и обновление клиентского JSON на FRONT
   hosts: front
   gather_facts: false

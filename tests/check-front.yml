@@ -98,6 +98,57 @@
                  | first }}
           no_log: true
 
+        - name: Создание тестового runtime-каталога REALITY на ENTRY
+          ansible.builtin.file:
+            path: "{{ front_test_root }}/entry-reality"
+            state: directory
+            mode: "0700"
+
+        - name: Формирование тестовых публичных параметров backend FRONT
+          ansible.builtin.copy:
+            dest: "{{ front_test_root }}/entry-reality/{{ item.name }}"
+            content: "{{ item.value }}\n"
+            mode: "0600"
+          loop:
+            - name: public.key
+              value: "{{ front_test_entry_public_key }}"
+            - name: short_id
+              value: "0011223344556677"
+            - name: client_uuid
+              value: "{{ front_test_entry_client_uuid.stdout | trim }}"
+            - name: front_client_uuid
+              value: "{{ front_test_entry_front_uuid.stdout | trim }}"
+          no_log: true
+
+        - name: Проверка автономного чтения параметров backend FRONT с ENTRY
+          ansible.builtin.include_role:
+            name: sing_box
+            tasks_from: front-export-facts.yml
+          vars:
+            awg_node_role: entry
+            reality_fallback_enabled: true
+            front_backend_enabled: true
+            front_relay_enabled: true
+            reality_fallback_state_dir: "{{ front_test_root }}/entry-reality"
+            reality_fallback_short_id_path: "{{ front_test_root }}/entry-reality/short_id"
+            reality_fallback_client_uuid_path: "{{ front_test_root }}/entry-reality/client_uuid"
+            reality_fallback_front_client_uuid_path: "{{ front_test_root }}/entry-reality/front_client_uuid"
+            sing_box_reality_dest_override_path: "{{ front_test_root }}/missing-reality-override.json"
+            reality_fallback_dest: example.com
+            reality_fallback_dest_port: 443
+            reality_fallback_port: 443
+
+        - name: Подтверждение автономного чтения параметров ENTRY
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - reality_fallback_effective_dest == 'example.com'
+              - reality_fallback_public_key == front_test_entry_public_key
+              - reality_fallback_short_id == '0011223344556677'
+              - reality_fallback_client_uuid == (front_test_entry_client_uuid.stdout | trim)
+              - reality_fallback_front_client_uuid == (front_test_entry_front_uuid.stdout | trim)
+          no_log: true
+
         # xray vlessenc всегда выводит обе пары (X25519 и ML-KEM-768) без
         # флага выбора - тот же разбор по якорной строке, что и в
         # roles/front/tasks/main.yml.
