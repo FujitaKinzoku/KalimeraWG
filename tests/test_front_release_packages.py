@@ -47,6 +47,39 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("seal_integrity()", manager)
         self.assertIn("restart_xray()", manager)
 
+    def test_xray_cannot_modify_runtime_configuration_tree(self) -> None:
+        tasks = (ROOT / "roles/front/tasks/main.yml").read_text(encoding="utf-8")
+        service = (ROOT / "roles/front/templates/xray.service.j2").read_text(
+            encoding="utf-8"
+        )
+        manager = (ROOT / "roles/front/templates/vless-user.py.j2").read_text(
+            encoding="utf-8"
+        )
+        directory_task = tasks[
+            tasks.index('- name: "Создание: каталог состояния Xray-core"') :
+            tasks.index('- name: "Проверка: пара VLESS Encryption уже создана"')
+        ]
+        base_config_task = tasks[
+            tasks.index('- name: "Установка: базовая конфигурация Xray-core FRONT"') :
+            tasks.index('- name: "Установка: параметры защищённого экспорта VLESS JSON"')
+        ]
+        self.assertIn("owner: root", directory_task)
+        self.assertIn('mode: "0750"', directory_task)
+        self.assertIn("owner: root", base_config_task)
+        self.assertIn('mode: "0640"', base_config_task)
+        self.assertNotIn("ReadWritePaths=", service)
+        self.assertIn("os.chown(temporary, 0, account.pw_gid)", manager)
+        audit = (ROOT / "roles/operations/templates/server-audit.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("xray_read_only_config_ok", audit)
+        self.assertIn("root:xray:640", audit)
+
+    def test_standalone_front_playbook_seals_runtime_and_integrity(self) -> None:
+        playbook = (ROOT / "playbooks/front.yml").read_text(encoding="utf-8")
+        self.assertIn("role: runtime_secrets", playbook)
+        self.assertIn("awg-managed-integrity, seal", playbook)
+
     def test_replacement_is_staged_and_preserves_cdn_identifiers(self) -> None:
         installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
             encoding="utf-8"

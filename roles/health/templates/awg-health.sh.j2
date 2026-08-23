@@ -639,6 +639,16 @@ front_vless_users_are_consistent() {
         {{ front_vless_user_command_path | quote }} list >/dev/null
 }
 
+front_xray_permissions_are_restricted() {
+    local mode numeric_mode
+    [[ "$(stat -c %U {{ front_xray_state_dir | quote }})" == root ]] || return 1
+    mode="$(stat -c %a {{ front_xray_state_dir | quote }})" || return 1
+    numeric_mode=$((8#$mode))
+    (( (numeric_mode & 0022) == 0 )) &&
+        ! systemctl cat {{ front_xray_service_name | quote }} |
+            grep -Fq 'ReadWritePaths='
+}
+
 front_tls_endpoint_ready() {
     local domain="$1"
     getent ahostsv4 "$domain" >/dev/null 2>&1 &&
@@ -651,6 +661,7 @@ check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ f
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
 check 'синтаксис Nginx FRONT-релея' nginx -t
 check 'реестр VLESS-пользователей согласован с Xray' front_vless_users_are_consistent
+check 'Xray не может изменять каталог конфигурации' front_xray_permissions_are_restricted
 check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}

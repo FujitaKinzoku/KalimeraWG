@@ -60,6 +60,10 @@
    `--commit-front-replacement` удаляет временное UFW-правило старого FRONT.
 9. До commit команда `--rollback-front-replacement` возвращает прежний
    inventory и рабочий endpoint.
+10. После prepare повторный `vless-user export ИМЯ` для direct-пользователя
+    содержит новый origin-домен, а CDN JSON сохраняет прежний CDN-домен.
+11. После commit установщик явно требует выключить или переустановить старый
+    FRONT и показывает его прежний адрес без секретных данных.
 
 Параметры `packet-up`, GET uplink, XHTTP path, Nginx buffering/timeout,
 публичный CDN-домен, пользовательские UUID и служебный REALITY backend не

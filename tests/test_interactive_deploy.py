@@ -26,6 +26,190 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_front_replacement_prepare_transfers_users_and_preserves_cdn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            home = root / "home"
+            ssh_root = home / ".ssh"
+            ssh_root.mkdir(parents=True)
+            (ssh_root / "awg-iac-production").write_text("private", encoding="ascii")
+            (ssh_root / "awg-iac-production.pub").write_text(
+                "ssh-ed25519 AAAAtest controller\n", encoding="ascii"
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {"ansible_host": "9.9.9.9"}
+                                }
+                            },
+                            "front": {
+                                "hosts": {
+                                    "front-managed": {
+                                        "ansible_host": "8.8.8.8",
+                                        "ansible_user": "kalimera",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            MODULE.yaml_write(
+                production / "group_vars" / "entry.yml",
+                {
+                    "front_public_ipv4": "8.8.8.8",
+                    "front_replacement_state": "active",
+                },
+            )
+            MODULE.yaml_write(production / "group_vars" / "exit.yml", {})
+            MODULE.yaml_write(all_root / "main.yml", {})
+            MODULE.yaml_write(
+                production / "group_vars" / "front.yml",
+                {
+                    "front_replacement_state": "active",
+                    "front_origin_domain": "old-origin.example.invalid",
+                    "front_direct_domain": "old-origin.example.invalid",
+                    "front_cdn_domain": "edge.example.invalid",
+                    "front_client_domain": "edge.example.invalid",
+                    "front_access_modes": ["direct", "cdn"],
+                    "front_xhttp_path": "/preserved-path",
+                    "front_certbot_email": "old@example.invalid",
+                },
+            )
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            vault_path = all_root / "vault.yml"
+            vault_path.write_bytes(
+                vault.encrypt(yaml.safe_dump({"existing": "value"}).encode("utf-8"))
+            )
+            users = {
+                "schema": 1,
+                "users": [
+                    {
+                        "name": "phone",
+                        "id": "11111111-1111-4111-8111-111111111111",
+                        "mode": "cdn",
+                    },
+                    {
+                        "name": "laptop",
+                        "id": "22222222-2222-4222-8222-222222222222",
+                        "mode": "direct",
+                    },
+                ],
+            }
+            replacement_root = root / "replacement"
+
+            with (
+                mock.patch.object(MODULE.Path, "home", return_value=home),
+                mock.patch.object(
+                    MODULE,
+                    "_front_replacement_state_root",
+                    return_value=replacement_root,
+                ),
+                mock.patch.object(
+                    MODULE, "_read_front_users_over_ssh", return_value=users
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "prompt",
+                    side_effect=[
+                        "1.1.1.1",
+                        "root",
+                        "new-origin.example.invalid",
+                        "new@example.invalid",
+                    ],
+                ),
+                mock.patch.object(MODULE, "prompt_port", side_effect=[22, 56779]),
+                mock.patch.object(MODULE.getpass, "getpass", return_value="password"),
+                mock.patch.object(MODULE, "bootstrap_key", return_value=""),
+                mock.patch.object(
+                    MODULE,
+                    "remote_observed_ssh_source_ipv4",
+                    return_value="4.4.4.4",
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.prepare_front_replacement(production, password_path)
+                )
+
+            children = MODULE.load_yaml(production / "hosts.yml")["all"]["children"]
+            replacement = children["front"]["hosts"]["front-managed"]
+            self.assertEqual(replacement["ansible_host"], "1.1.1.1")
+            self.assertEqual(replacement["ansible_user"], "root")
+            self.assertEqual(replacement["ansible_port"], 22)
+            self.assertEqual(replacement["ssh_listen_port"], 56779)
+            self.assertEqual(replacement["security_automation_source_ipv4"], "4.4.4.4")
+
+            entry = MODULE.load_yaml(production / "group_vars" / "entry.yml")
+            front = MODULE.load_yaml(production / "group_vars" / "front.yml")
+            self.assertEqual(entry["front_public_ipv4"], "1.1.1.1")
+            self.assertEqual(entry["front_previous_public_ipv4"], "8.8.8.8")
+            self.assertEqual(front["front_replacement_state"], "prepared")
+            self.assertEqual(front["front_origin_domain"], "new-origin.example.invalid")
+            self.assertEqual(front["front_direct_domain"], "new-origin.example.invalid")
+            self.assertEqual(front["front_cdn_domain"], "edge.example.invalid")
+            self.assertEqual(front["front_xhttp_path"], "/preserved-path")
+
+            decrypted = yaml.safe_load(vault.decrypt(vault_path.read_bytes()))
+            self.assertEqual(decrypted["vault_front_vless_users"], users)
+            marker = json.loads(
+                (replacement_root / "current.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(Path(marker["backup"]).is_dir())
+
+            shares = [
+                f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                for index in range(1, 6)
+            ]
+            exchange_counter = iter(range(1, 4))
+
+            def exchange_keypair() -> tuple[str, str]:
+                index = next(exchange_counter)
+                return f"private-{index}", f"ssh-ed25519 public-{index} exchange"
+
+            with (
+                mock.patch.object(MODULE.Path, "home", return_value=home),
+                mock.patch.object(MODULE, "split_runtime_secret", return_value=shares),
+                mock.patch.object(
+                    MODULE, "ssh_exchange_keypair", side_effect=exchange_keypair
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.ensure_runtime_secret_material(production, password_path)
+                )
+
+            protected_children = MODULE.load_yaml(production / "hosts.yml")["all"][
+                "children"
+            ]
+            protected_front = protected_children["front"]["hosts"]["front-managed"]
+            self.assertEqual(protected_front["runtime_secrets_share_index"], 3)
+            self.assertEqual(
+                protected_front["runtime_secrets_advertise_ipv4"], "1.1.1.1"
+            )
+            protected_vault = yaml.safe_load(vault.decrypt(vault_path.read_bytes()))
+            self.assertEqual(protected_vault["vault_front_vless_users"], users)
+            self.assertEqual(
+                set(protected_vault["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed", "front-managed"},
+            )
+
     def test_front_replacement_commit_and_finish_are_two_phase(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             production = Path(temporary) / "production"
@@ -56,11 +240,20 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertIn(
                 "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
             )
-            with mock.patch.object(
-                MODULE, "_front_replacement_state_root", return_value=Path(temporary)
+            with (
+                mock.patch.object(
+                    MODULE, "_front_replacement_state_root", return_value=Path(temporary)
+                ),
+                mock.patch("builtins.print") as output,
             ):
                 (Path(temporary) / "current.json").write_text("{}", encoding="utf-8")
                 MODULE.finish_front_replacement(production)
+            self.assertTrue(
+                any(
+                    "old.example.invalid (198.51.100.20)" in str(call)
+                    for call in output.call_args_list
+                )
+            )
             self.assertNotIn(
                 "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
             )
@@ -98,6 +291,25 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual((group_vars / "front.yml").read_bytes(), expected["front.yml"])
             self.assertEqual((group_vars / "all" / "vault.yml").read_bytes(), expected["vault.yml"])
             self.assertTrue((marker_root / "current.json").is_file())
+
+    def test_component_update_cannot_be_combined_with_front_operation(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "deploy",
+                    "--repo-root",
+                    str(Path(__file__).parents[1]),
+                    "--resume",
+                    "--update-components",
+                    "--replace-front",
+                ],
+            ),
+            self.assertRaises(SystemExit) as error,
+        ):
+            MODULE.main()
+        self.assertEqual(error.exception.code, 2)
 
     def test_remote_observed_source_uses_ssh_connection_ipv4(self) -> None:
         with (

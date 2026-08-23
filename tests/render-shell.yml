@@ -441,9 +441,26 @@
             dest: "{{ rendered_shell_root }}/awg-health-exit"
             mode: "0700"
 
+        - name: Формирование полной проверки роли EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-test-exit"
+            mode: "0700"
+
+        - name: Загрузка defaults и безопасных переменных FRONT
+          ansible.builtin.include_vars:
+            file: "{{ playbook_dir }}/../{{ item }}"
+          loop:
+            - roles/front/defaults/main.yml
+            - inventory/example/group_vars/front.yml
+
         - name: Выбор ветви terminal-шаблона FRONT
           ansible.builtin.set_fact:
             awg_node_role: front
+            front_relay_enabled: true
+            front_entry_address: 192.0.2.10
+            front_entry_reality_port: 443
+            front_entry_reality_stopped: false
 
         - name: Формирование сводки текущей конфигурации FRONT
           ansible.builtin.template:
@@ -468,6 +485,29 @@
             'ЗАЩИТА FRONT' not in rendered_kalimera_status_front.stdout or
             'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' in rendered_kalimera_status_front.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_front.stdout
+
+        - name: Формирование health-программы FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-front"
+            mode: "0700"
+
+        - name: Формирование полной проверки роли FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-test-front"
+            mode: "0700"
+
+        - name: Проверка выбранных ролей в сформированных программах
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fxq 'readonly role=exit' {{ rendered_shell_root }}/kalimera-test-exit
+            grep -Fxq 'readonly role=front' {{ rendered_shell_root }}/kalimera-test-front
+            grep -Fq 'Xray не может изменять каталог конфигурации' \
+              {{ rendered_shell_root }}/awg-health-front
+          args:
+            executable: /bin/bash
+          changed_when: false
 
         - name: Проверка сформированных программ через ShellCheck
           ansible.builtin.command:
@@ -509,8 +549,11 @@
               - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
+              - "{{ rendered_shell_root }}/awg-health-front"
               - "{{ rendered_shell_root }}/kalimera-help"
               - "{{ rendered_shell_root }}/kalimera-test"
+              - "{{ rendered_shell_root }}/kalimera-test-exit"
+              - "{{ rendered_shell_root }}/kalimera-test-front"
           changed_when: false
 
       always:

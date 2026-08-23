@@ -306,9 +306,9 @@
   ansible.builtin.file:
     path: "{{ front_xray_state_dir }}"
     state: directory
-    owner: "{{ front_xray_user }}"
+    owner: root
     group: "{{ front_xray_group }}"
-    mode: "0700"
+    mode: "0750"
   when: front_relay_enabled | default(false) | bool
 
 - name: "Проверка: пара VLESS Encryption уже создана"
@@ -379,9 +379,9 @@
   ansible.builtin.template:
     src: xray-config.json.j2
     dest: "{{ front_xray_base_config_path }}"
-    owner: "{{ front_xray_user }}"
+    owner: root
     group: "{{ front_xray_group }}"
-    mode: "0600"
+    mode: "0640"
   when: front_relay_enabled | default(false) | bool
 
 - name: "Установка: параметры защищённого экспорта VLESS JSON"

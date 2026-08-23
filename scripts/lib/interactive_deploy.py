@@ -879,7 +879,15 @@ def prepare_front_replacement(production: Path, vault_password: Path) -> bool:
     encrypted = vault_lib.encrypt(
         yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
     )
-    secure_write(vault_path, encrypted)
+    temporary_vault = vault_path.with_name(
+        f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        secure_write(temporary_vault, encrypted)
+        os.replace(temporary_vault, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary_vault.unlink(missing_ok=True)
 
     entry_vars = load_yaml(entry_path)
     entry_vars.update(
@@ -994,6 +1002,8 @@ def finish_front_replacement(production: Path) -> None:
     front_path = production / "group_vars" / "front.yml"
     entry_vars = load_yaml(entry_path)
     front_vars = load_yaml(front_path)
+    previous_ipv4 = str(entry_vars.get("front_previous_public_ipv4", "")).strip()
+    previous_origin = str(front_vars.get("front_previous_origin_domain", "")).strip()
     for document in (entry_vars, front_vars):
         document.pop("front_previous_public_ipv4", None)
         document.pop("front_previous_origin_domain", None)
@@ -1002,6 +1012,14 @@ def finish_front_replacement(production: Path) -> None:
     marker = _front_replacement_state_root() / "current.json"
     marker.unlink(missing_ok=True)
     print("Замена FRONT подтверждена; временный доступ прежнего FRONT удалён.")
+    if previous_ipv4:
+        previous_label = previous_ipv4
+        if previous_origin:
+            previous_label = f"{previous_origin} ({previous_ipv4})"
+        print(
+            f"Старый FRONT {previous_label} больше не входит в каскад. "
+            "Выключите или переустановите его после контрольной проверки нового FRONT."
+        )
 
 
 def prompt(label: str, default: str | None = None) -> str:
@@ -2947,6 +2965,15 @@ def main() -> None:
         parser.error("выберите только одну операцию FRONT")
     if args.update_components and not args.resume:
         parser.error("--update-components используется только вместе с --resume")
+    if args.update_components and any(
+        (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ):
+        parser.error("--update-components нельзя объединять с операциями FRONT")
     if args.terminal_only and (
         args.resume
         or args.summary
@@ -3157,7 +3184,9 @@ def main() -> None:
             print("Компоненты каскада обновлены транзакционно и успешно проверены.")
         elif args.replace_front:
             print(
-                "Новый FRONT применён. Проверьте direct/CDN VLESS-сессию, "
+                "Новый FRONT применён. Для каждого direct-пользователя повторно "
+                "выполните 'vless-user export ИМЯ' на новом FRONT и импортируйте "
+                "JSON с новым origin-доменом. Затем проверьте direct/CDN VLESS-сессию, "
                 "переключите CDN origin и выполните "
                 "'kalimera-deploy --resume --commit-front-replacement'."
             )

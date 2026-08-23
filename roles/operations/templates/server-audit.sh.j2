@@ -62,9 +62,7 @@ sensitive_modes_ok() {
 /etc/awg-telegram-monitor.env
 /etc/sing-box/config.json
 /etc/sing-box/front-backend.json
-/usr/local/etc/xray/config.json
 {% if awg_node_role == 'front' %}
-{{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') }}
 {{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
 {{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
 {{ front_origin_key_path | default('/etc/letsencrypt/live/invalid/privkey.pem') }}
@@ -84,6 +82,26 @@ EOF
         esac
     done
 }
+
+{% if awg_node_role == 'front' %}
+xray_read_only_config_ok() {
+    local file metadata target
+    for file in \
+        {{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') | quote }} \
+        {{ front_xray_config_path | default('/usr/local/etc/xray/config.json') | quote }}; do
+        [[ -e "$file" ]] || return 1
+        if [[ -L "$file" ]]; then
+            target="$(readlink -f "$file")"
+            [[ "$target" == /run/kalimera-secrets/* ]] || return 1
+            metadata="$(stat -c '%U:%G:%a' "$target")"
+            [[ "$metadata" == 'root:root:640' ]] || return 1
+        else
+            metadata="$(stat -c '%U:%G:%a' "$file")"
+            [[ "$metadata" == 'root:xray:640' ]] || return 1
+        fi
+    done
+}
+{% endif %}
 
 {% if runtime_secrets_enabled | default(false) | bool %}
 runtime_secrets_ok() {
@@ -291,6 +309,9 @@ record 'учёт входов хранится только в RAM' login_accoun
 record 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 record 'постоянные журналы активности отсутствуют' no_persistent_activity_logs
 record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
+{% if awg_node_role == 'front' %}
+record 'Xray имеет только чтение рабочей конфигурации' xray_read_only_config_ok
+{% endif %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 record 'пороговое хранилище runtime-секретов исправно' runtime_secrets_ok
 {% endif %}

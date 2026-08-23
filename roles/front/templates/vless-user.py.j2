@@ -121,8 +121,8 @@ def sync_config(users: list[dict]) -> bool:
             output.write(rendered)
             output.flush()
             os.fsync(output.fileno())
-        os.chmod(temporary, 0o600)
-        os.chown(temporary, account.pw_uid, account.pw_gid)
+        os.chmod(temporary, 0o640)
+        os.chown(temporary, 0, account.pw_gid)
         validation = subprocess.run(
             [XRAY, "run", "-test", "-c", str(temporary)],
             text=True,
@@ -309,8 +309,8 @@ def main() -> int:
                 atomic_write(
                     ACTIVE_CONFIG,
                     previous_config,
-                    0o600,
-                    (account.pw_uid, account.pw_gid),
+                    0o640,
+                    (0, account.pw_gid),
                 )
                 subprocess.run([SYSTEMCTL, "try-restart", SERVICE], check=False)
             if os.path.isfile(SECRETCTL) and os.access(SECRETCTL, os.X_OK):
