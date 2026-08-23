@@ -207,6 +207,12 @@
           changed_when: false
           no_log: true
 
+        - name: Чтение исходной активной конфигурации Xray
+          ansible.builtin.slurp:
+            src: "{{ front_xray_config_path }}"
+          register: front_test_active_initial
+          no_log: true
+
         - name: Проверка экспортированного CDN JSON и активной конфигурации
           ansible.builtin.assert:
             quiet: true
@@ -215,7 +221,7 @@
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.network == 'xhttp'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.mode == 'packet-up'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.uplinkHTTPMethod == 'GET'
-              - (lookup('file', front_xray_config_path) | from_json).inbounds[0].settings.clients | length == 1
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.clients | length == 1
             fail_msg: >-
               Экспортированный CDN JSON или активный список VLESS-пользователей
               не соответствует проверяемому профилю
@@ -227,12 +233,18 @@
           changed_when: true
           no_log: true
 
+        - name: Чтение активной конфигурации после создания пользователя
+          ansible.builtin.slurp:
+            src: "{{ front_xray_config_path }}"
+          register: front_test_active_created
+          no_log: true
+
         - name: Проверка JSON нового пользователя и двух активных UUID
           ansible.builtin.assert:
             quiet: true
             that:
               - (front_test_vless_create.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
-              - (lookup('file', front_xray_config_path) | from_json).inbounds[0].settings.clients | length == 2
+              - (front_test_active_created.content | b64decode | from_json).inbounds[0].settings.clients | length == 2
           no_log: true
 
         - name: Удаление тестового CDN-пользователя
@@ -241,12 +253,21 @@
           changed_when: true
           no_log: true
 
+        - name: Чтение итоговой конфигурации и журнала тестового systemctl
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - "{{ front_xray_config_path }}"
+            - "{{ front_test_root }}/systemctl.log"
+          register: front_test_final_files
+          no_log: true
+
         - name: Проверка возврата к исходному пользователю
           ansible.builtin.assert:
             quiet: true
             that:
-              - (lookup('file', front_xray_config_path) | from_json).inbounds[0].settings.clients | length == 1
-              - lookup('file', front_test_root + '/systemctl.log').splitlines() | length == 2
+              - (front_test_final_files.results[0].content | b64decode | from_json).inbounds[0].settings.clients | length == 1
+              - (front_test_final_files.results[1].content | b64decode).splitlines() | length == 2
           no_log: true
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
