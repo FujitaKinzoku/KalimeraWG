@@ -78,6 +78,37 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("xray_read_only_config_ok", audit)
         self.assertIn("root:xray:640", audit)
 
+        health = (ROOT / "roles/health/templates/awg-health.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('resolved="$(readlink -f -- "$state_dir")"', health)
+        self.assertIn('stat -Lc %U -- "$state_dir"', health)
+
+    def test_front_ufw_is_only_managed_by_security_role(self) -> None:
+        front_tasks = (ROOT / "roles/front/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        security_tasks = (ROOT / "roles/security/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("community.general.ufw", front_tasks)
+        self.assertIn(
+            "Разрешение веб-доступа к FRONT в управляемой политике UFW",
+            security_tasks,
+        )
+
+    def test_front_backend_gets_minimal_rule_set_access(self) -> None:
+        runtime_config = (
+            ROOT / "roles/runtime_secrets/templates/config.json.j2"
+        ).read_text(encoding="utf-8")
+        secretctl = (
+            ROOT / "roles/runtime_secrets/templates/secretctl.py.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("'access_group': 'sing-box'", runtime_config)
+        self.assertIn("'read_paths': ['reality/rules']", runtime_config)
+        self.assertIn("def apply_runtime_access(config: dict)", secretctl)
+        self.assertIn("apply_runtime_access(config)", secretctl)
+
     def test_standalone_front_playbook_seals_runtime_and_integrity(self) -> None:
         playbook = (ROOT / "playbooks/front.yml").read_text(encoding="utf-8")
         self.assertIn("role: runtime_secrets", playbook)

@@ -640,9 +640,15 @@ front_vless_users_are_consistent() {
 }
 
 front_xray_permissions_are_restricted() {
-    local mode numeric_mode
-    [[ "$(stat -c %U {{ front_xray_state_dir | quote }})" == root ]] || return 1
-    mode="$(stat -c %a {{ front_xray_state_dir | quote }})" || return 1
+    local state_dir resolved mode numeric_mode
+    state_dir={{ front_xray_state_dir | quote }}
+    resolved="$(readlink -f -- "$state_dir")" || return 1
+    [[ -d "$resolved" ]] || return 1
+{% if runtime_secrets_enabled | default(false) | bool %}
+    [[ "$resolved" == {{ (runtime_secrets_runtime_root ~ '/xray') | quote }} ]] || return 1
+{% endif %}
+    [[ "$(stat -Lc %U -- "$state_dir")" == root ]] || return 1
+    mode="$(stat -Lc %a -- "$state_dir")" || return 1
     numeric_mode=$((8#$mode))
     (( (numeric_mode & 0022) == 0 )) &&
         ! systemctl cat {{ front_xray_service_name | quote }} |
