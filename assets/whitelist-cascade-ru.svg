@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
   <title id="title">Три пути подключения к каскаду KalimeraWG</title>
-  <desc id="desc">Клиент выбирает прямой AmneziaWG, прямой VLESS Reality или подтверждённый резерв через Yandex Cloud CDN и FRONT. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной — через AWG3 на EXIT.</desc>
+  <desc id="desc">Клиент выбирает прямой AmneziaWG, прямой VLESS Reality или подтверждённый резерв через совместимый облачный CDN и FRONT. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной — через AWG3 на EXIT.</desc>
 
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
@@ -61,7 +61,7 @@
     <text x="400" y="370" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">TCP/443 · прямой резерв</text>
 
     <rect x="270" y="474" width="260" height="92" rx="14" fill="#123239" stroke="#39c5cf" stroke-width="4"/>
-    <text x="400" y="509" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="700">Yandex Cloud CDN</text>
+    <text x="400" y="509" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="700">Облачный CDN</text>
     <text x="400" y="540" text-anchor="middle" fill="#7ee7ea" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">TLS + VLESS/XHTTP · TCP/443</text>
 
     <rect x="590" y="474" width="220" height="92" rx="14" fill="#352b16" stroke="#d8b64c" stroke-width="3"/>

@@ -108,7 +108,7 @@ front_xhttp_disguise_uplink_param: _dc
 front_xhttp_disguise_padding_key: mc_token
 
 # Домен, на который в итоге смотрит клиент — сегодня совпадает с
-# origin-доменом (CDN ещё не настроен), после подключения Yandex CDN
+# origin-доменом (CDN ещё не настроен), после подключения внешнего CDN
 # достаточно переопределить только эту переменную в group_vars/front.yml.
 front_client_domain: "{{ front_origin_domain }}"
 

@@ -54,7 +54,7 @@ branch. Confirm the local version with `./deploy --version`.
 
 > **Status on August 23, 2026.** The `feature/vless-reality-fallback` branch
 > established a new client session while mobile allowlist restrictions were
-> active. The validated path was **Yandex Cloud CDN → FRONT → ENTRY**, and the
+> active. The validated path was **compatible cloud CDN → FRONT → ENTRY**, and the
 > existing RU/EXIT routing policy remained intact after ingress. This records
 > one field-tested milestone; it is not a stable release or a universal carrier
 > availability guarantee.
@@ -137,7 +137,7 @@ and transit segments use separate interfaces, keys, and parameters.
 | iOS | `mobile` profile on the dedicated UDP/8443 interface in the official AmneziaWG client |
 | KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
 | RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
-| Mobile allowlist | feature branch established a new Yandex Cloud CDN → FRONT → ENTRY session while retaining RU/EXIT routing |
+| Mobile allowlist | feature branch established a new session via compatible cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
 
 This matrix records scenarios that were actually exercised. It cannot guarantee
 identical behavior across every carrier, hosting provider, and client version.
