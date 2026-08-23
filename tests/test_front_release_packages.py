@@ -124,6 +124,9 @@ class FrontReleasePackagesTest(unittest.TestCase):
         service = (
             ROOT / "roles/entry_routing/templates/awg-ru-zone-update.service.j2"
         ).read_text(encoding="utf-8")
+        routing_tasks = (ROOT / "roles/entry_routing/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn(
             'reality_fallback_rule_set_dir: "{{ reality_fallback_state_dir }}/rules"',
@@ -142,6 +145,10 @@ class FrontReleasePackagesTest(unittest.TestCase):
             service,
         )
         self.assertNotIn("ReadWritePaths={{ reality_fallback_state_dir }}", service)
+        self.assertIn(
+            '"([.rules[]?.ip_cidr[]?] | length) >= $minimum"', routing_tasks
+        )
+        self.assertIn("entry_ru_zone_reality_rule_set.rc", routing_tasks)
 
 
 if __name__ == "__main__":
