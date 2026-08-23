@@ -114,6 +114,35 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertNotIn("subscription", nginx.lower())
         self.assertIn("reality_fallback_direct_client_enabled: false", entry)
 
+    def test_ru_zone_updater_can_only_write_the_public_rule_set_directory(self) -> None:
+        defaults = (ROOT / "roles/sing_box/defaults/main.yml").read_text(
+            encoding="utf-8"
+        )
+        tasks = (ROOT / "roles/sing_box/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        service = (
+            ROOT / "roles/entry_routing/templates/awg-ru-zone-update.service.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'reality_fallback_rule_set_dir: "{{ reality_fallback_state_dir }}/rules"',
+            defaults,
+        )
+        self.assertIn(
+            'reality_fallback_ru_zone_rule_set_path: "{{ reality_fallback_rule_set_dir }}/ru-zone.json"',
+            defaults,
+        )
+        self.assertIn(
+            'path: "{{ reality_fallback_rule_set_dir }}"',
+            tasks,
+        )
+        self.assertIn(
+            "{{ reality_fallback_rule_set_dir | default('/etc/sing-box/reality/rules') }}",
+            service,
+        )
+        self.assertNotIn("ReadWritePaths={{ reality_fallback_state_dir }}", service)
+
 
 if __name__ == "__main__":
     unittest.main()

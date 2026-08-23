@@ -26,6 +26,11 @@ reality_fallback_state_dir: /etc/sing-box/reality
 reality_fallback_private_key_path: "{{ reality_fallback_state_dir }}/private.key"
 reality_fallback_short_id_path: "{{ reality_fallback_state_dir }}/short_id"
 reality_fallback_client_uuid_path: "{{ reality_fallback_state_dir }}/client_uuid"
+# Производные списки маршрутизации не являются секретами, но должны
+# обновляться атомарно отдельными административными службами. Отдельный
+# подкаталог позволяет открыть на запись только rule-set, не закрытые ключи
+# REALITY в родительском каталоге.
+reality_fallback_rule_set_dir: "{{ reality_fallback_state_dir }}/rules"
 # Настоящий, доступный TLS 1.3 сайт без ECH - маска для REALITY.
 # yandex.ru: собственная инфраструктура Yandex (не за сторонним CDN, в
 # отличие от www.microsoft.com - тот отдаётся через Akamai), стабильно
@@ -37,14 +42,14 @@ reality_fallback_dest: yandex.ru
 reality_fallback_dest_port: 443
 reality_fallback_server_names:
   - "{{ reality_fallback_dest }}"
-reality_fallback_ru_rule_set_path: /etc/sing-box/reality/ru-domains.json
-reality_fallback_ru_zone_rule_set_path: /etc/sing-box/reality/ru-zone.json
+reality_fallback_ru_rule_set_path: "{{ reality_fallback_rule_set_dir }}/ru-domains.json"
+reality_fallback_ru_zone_rule_set_path: "{{ reality_fallback_rule_set_dir }}/ru-zone.json"
 # Список se-domain («всегда через EXIT») - производный от того же файла, что
 # питает ipset force_exit для клиентов AmneziaWG. Нужен, чтобы исключения
 # работали одинаково на обоих транспортах: классификация по российским
 # подсетям даёт ложные срабатывания на зарубежных сервисах, отдающихся с
 # кеш-узлов внутри РФ (googlevideo.com и прочий Google Global Cache).
-reality_fallback_se_rule_set_path: /etc/sing-box/reality/se-domains.json
+reality_fallback_se_rule_set_path: "{{ reality_fallback_rule_set_dir }}/se-domains.json"
 
 # Служебный REALITY-клиент, зарезервированный за FRONT-релеем. Отдельный UUID
 # не распространяется конечным пользователям и применяется только на участке

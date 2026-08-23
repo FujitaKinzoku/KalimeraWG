@@ -298,6 +298,15 @@
     mode: "0700"
   when: reality_fallback_enabled | default(false) | bool
 
+- name: "Создание: отдельный каталог производных rule-set REALITY"
+  ansible.builtin.file:
+    path: "{{ reality_fallback_rule_set_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Проверка: ключевая пара REALITY уже создана"
   ansible.builtin.stat:
     path: "{{ reality_fallback_private_key_path }}"

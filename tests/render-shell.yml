@@ -386,6 +386,23 @@
             dest: "{{ rendered_shell_root }}/awg-ru-proxy-watch.service"
             mode: "0600"
 
+        - name: Формирование модуля атомарного обновления RU rule-set
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/entry_routing/templates/awg-ru-zone-update.service.j2"
+            dest: "{{ rendered_shell_root }}/awg-ru-zone-update.service"
+            mode: "0600"
+
+        - name: Проверка точного доступа службы только к каталогу rule-set
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            unit={{ (rendered_shell_root ~ '/awg-ru-zone-update.service') | quote }}
+            grep -Fq 'ProtectSystem=strict' "$unit"
+            grep -Fq 'ReadWritePaths={{ entry_ru_zone_state_dir }} /run {{ reality_fallback_rule_set_dir }}' "$unit"
+            ! grep -Fq 'ReadWritePaths={{ reality_fallback_state_dir }}' "$unit"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
         - name: Формирование модуля systemd credentials для awg-quick@
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/awg-quick-credential.conf.j2"
