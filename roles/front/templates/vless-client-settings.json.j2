@@ -6,15 +6,25 @@
     "cdn": {{ front_cdn_domain | to_json }}
   },
   "encryption": {{ (front_vless_encryption if front_vless_encryption_enabled | default(false) | bool else 'none') | to_json }},
+  "dns": {
+    "queryStrategy": "UseIP",
+    "servers": [
+      "77.88.8.8",
+      "77.88.8.1"
+    ]
+  },
   "xhttp": {
     "path": {{ front_xhttp_path | to_json }},
     "mode": {{ front_xhttp_mode | to_json }}{% if front_xhttp_mode == 'packet-up' %},
     "uplinkHTTPMethod": "GET"{% endif %}{% if front_xhttp_disguise_enabled | default(false) | bool %},
     "extra": {
+      "path": {{ front_xhttp_path | to_json }},
       "sessionIDKey": {{ front_xhttp_disguise_session_cookie | to_json }},
       "sessionIDPlacement": "cookie",
       "sessionIDLength": "16-32",
       "sessionIDTable": "Base36",
+      "sessionKey": {{ front_xhttp_disguise_session_cookie | to_json }},
+      "sessionPlacement": "cookie",
       "uplinkDataKey": {{ front_xhttp_disguise_uplink_param | to_json }},
       "uplinkDataPlacement": "body",
       "seqKey": "chunk",
@@ -27,6 +37,7 @@
       "xmux": {
         "maxConnections": 3,
         "cMaxReuseTimes": "200-300",
+        "hKeepAlivePeriod": 30,
         "hMaxRequestTimes": "2000-3000",
         "hMaxReusableSecs": "1800-2400"
       }

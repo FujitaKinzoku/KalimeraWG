@@ -116,6 +116,10 @@
               {{ front_test_vlessenc.stdout
                  | regex_search('ML-KEM-768[\s\S]*?"decryption": "([^"]+)"', '\1')
                  | first }}
+            front_test_vless_encryption: >-
+              {{ front_test_vlessenc.stdout
+                 | regex_search('ML-KEM-768[\s\S]*?"encryption": "([^"]+)"', '\1')
+                 | first }}
           no_log: true
 
         # front_entry_* - простые факты (не groups/hostvars, это служебные
@@ -158,8 +162,10 @@
             front_cdn_domain: edge.example.invalid
             front_xhttp_mode: packet-up
             front_xhttp_path: /verified-allowlist-path
-            front_xhttp_disguise_enabled: false
-            front_vless_encryption_enabled: false
+            front_xhttp_disguise_enabled: true
+            front_vless_encryption_enabled: true
+            front_vless_decryption: "{{ front_test_vless_decryption }}"
+            front_vless_encryption: "{{ front_test_vless_encryption }}"
             front_vless_initial_user_name: initial
             front_entry_address: 198.51.100.10
             front_entry_reality_port: 443
@@ -209,6 +215,17 @@
           changed_when: false
           no_log: true
 
+        - name: Семантическая проверка клиентского CDN JSON закреплённым Xray-core
+          ansible.builtin.command:
+            argv:
+              - "{{ front_xray_binary_path }}"
+              - run
+              - -test
+              - -c
+              - "{{ front_vless_export_dir }}/initial.json"
+          changed_when: false
+          no_log: true
+
         - name: Чтение исходной активной конфигурации Xray
           ansible.builtin.slurp:
             src: "{{ front_xray_config_path }}"
@@ -220,9 +237,32 @@
             quiet: true
             that:
               - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
+              - (front_test_vless_export.stdout | from_json).dns.queryStrategy == 'UseIP'
+              - (front_test_vless_export.stdout | from_json).dns.servers == ['77.88.8.8', '77.88.8.1']
+              - (front_test_vless_export.stdout | from_json).inbounds | length == 2
+              - (front_test_vless_export.stdout | from_json).inbounds[0].protocol == 'socks'
+              - (front_test_vless_export.stdout | from_json).inbounds[0].settings.auth == 'noauth'
+              - (front_test_vless_export.stdout | from_json).inbounds[0].settings.udp
+              - (front_test_vless_export.stdout | from_json).inbounds[0].tag == 'socks-in'
+              - (front_test_vless_export.stdout | from_json).inbounds[1].protocol == 'http'
+              - (front_test_vless_export.stdout | from_json).inbounds[1].port == 10809
+              - (front_test_vless_export.stdout | from_json).inbounds[1].tag == 'http-in'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.network == 'xhttp'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].flow == ''
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.alpn == ['h2', 'http/1.1']
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.fingerprint == 'firefox'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.serverName == 'edge.example.invalid'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.mode == 'packet-up'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.uplinkHTTPMethod == 'GET'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.host == 'edge.example.invalid'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.path == '/verified-allowlist-path'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionIDKey == 'PHPESSID'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionKey == 'PHPESSID'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.xmux.hKeepAlivePeriod == 30
+              - (front_test_vless_export.stdout | from_json).outbounds[1].tag == 'direct'
+              - (front_test_vless_export.stdout | from_json).outbounds[2].tag == 'block'
+              - (front_test_vless_export.stdout | from_json).routing.rules[0].outboundTag == 'proxy'
+              - (front_test_vless_export.stdout | from_json).remarks == 'Kalimera-FRONT-disguiseV2'
               - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.clients | length == 1
             fail_msg: >-
               Экспортированный CDN JSON или активный список VLESS-пользователей

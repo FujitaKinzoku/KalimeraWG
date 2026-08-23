@@ -173,16 +173,39 @@ def client_config(record: dict, settings: dict) -> dict:
     if not isinstance(xhttp, dict):
         fail("Параметры XHTTP отсутствуют")
     encryption = settings.get("encryption", "none")
+    dns = settings.get("dns")
+    if not isinstance(dns, dict):
+        fail("Параметры DNS клиентского профиля отсутствуют")
+    xhttp_settings = copy.deepcopy(xhttp)
+    xhttp_settings["host"] = domain
     return {
-        "log": {"loglevel": "none"},
+        "dns": copy.deepcopy(dns),
         "inbounds": [
             {
                 "listen": "127.0.0.1",
                 "port": 10808,
                 "protocol": "socks",
-                "settings": {"udp": True},
-            }
+                "settings": {"auth": "noauth", "udp": True},
+                "sniffing": {
+                    "destOverride": ["http", "tls", "quic"],
+                    "enabled": True,
+                },
+                "tag": "socks-in",
+            },
+            {
+                "listen": "127.0.0.1",
+                "port": 10809,
+                "protocol": "http",
+                "sniffing": {
+                    "destOverride": ["http", "tls", "quic"],
+                    "enabled": True,
+                },
+                "tag": "http-in",
+            },
         ],
+        # HAPP подставляет собственный локальный путь access.log после импорта.
+        # Жёстко заданный iOS AppGroup здесь сделал бы JSON непереносимым.
+        "log": {"dnsLog": True, "loglevel": "Warning"},
         "outbounds": [
             {
                 "tag": "proxy",
@@ -196,6 +219,7 @@ def client_config(record: dict, settings: dict) -> dict:
                                 {
                                     "id": record["id"],
                                     "encryption": encryption,
+                                    "flow": "",
                                 }
                             ],
                         }
@@ -204,11 +228,29 @@ def client_config(record: dict, settings: dict) -> dict:
                 "streamSettings": {
                     "network": "xhttp",
                     "security": "tls",
-                    "tlsSettings": {"serverName": domain},
-                    "xhttpSettings": copy.deepcopy(xhttp),
+                    "tlsSettings": {
+                        "alpn": ["h2", "http/1.1"],
+                        "fingerprint": "firefox",
+                        "serverName": domain,
+                    },
+                    "xhttpSettings": xhttp_settings,
                 },
-            }
+            },
+            {"protocol": "freedom", "tag": "direct"},
+            {"protocol": "blackhole", "tag": "block"},
         ],
+        "remarks": "Kalimera-FRONT-disguiseV2",
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {
+                    "network": "tcp,udp",
+                    "outboundTag": "proxy",
+                    "type": "field",
+                }
+            ],
+        },
+        "stats": {},
     }
 
 

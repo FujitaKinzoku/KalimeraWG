@@ -49,6 +49,13 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("EXPORT_DIR / f\"{record['name']}.json\"", manager)
         self.assertIn('print(f"Открыть конфигурацию: nano {path}"', manager)
         self.assertIn("0o600", manager)
+        self.assertIn('"protocol": "socks"', manager)
+        self.assertIn('"port": 10809', manager)
+        self.assertIn('"flow": ""', manager)
+        self.assertIn('"fingerprint": "firefox"', manager)
+        self.assertIn('"protocol": "blackhole"', manager)
+        self.assertIn('"domainStrategy": "AsIs"', manager)
+        self.assertIn('"remarks": "Kalimera-FRONT-disguiseV2"', manager)
 
     def test_xray_cannot_modify_runtime_configuration_tree(self) -> None:
         tasks = (ROOT / "roles/front/tasks/main.yml").read_text(encoding="utf-8")

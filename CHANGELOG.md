@@ -2,6 +2,11 @@
 
 ## [Unreleased] - фиксация тестового этапа
 
+- Экспорт `vless-user` для режима CDN приведён к подтверждённому формату
+  полного JSON-профиля HAPP: SOCKS и HTTP inbounds, sniffing, DNS, VLESS
+  Encryption, TLS ALPN/fingerprint, полный XHTTP camouflage, routing и
+  служебные outbounds. Клиентский JSON теперь дополнительно проверяется
+  закреплённым Xray-core с включёнными ML-KEM-768 и XHTTP disguise.
 - Исправлен первый запуск `awg-ru-zone-update` на чистом ENTRY с включённым
   FRONT: публичные rule-set вынесены в отдельный каталог, доступный службе на
   запись без открытия каталога закрытых ключей REALITY. Повторный deploy
