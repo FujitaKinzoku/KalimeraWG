@@ -358,6 +358,88 @@ class InteractiveDeployTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "Ansible и аварийная очистка не запускались"):
                 MODULE.verify_saved_inventory_access(hosts)
 
+    def test_saved_inventory_recovers_confirmed_kalimera_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {"ansible_connection": "local"}
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+
+            def connection_works(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                self.assertEqual(host, "198.51.100.20")
+                self.assertEqual(port, 56777)
+                self.assertEqual(private_key, Path("/root/.ssh/automation"))
+                return user == "kalimera"
+
+            with mock.patch.object(
+                MODULE, "ssh_connection_works", side_effect=connection_works
+            ):
+                recovered = MODULE.recover_saved_admin_access(hosts, hosts_path)
+
+            self.assertEqual(recovered, ["exit-managed"])
+            updated = MODULE.load_yaml(hosts_path)["all"]["children"]["exit"][
+                "hosts"
+            ]["exit-managed"]
+            self.assertEqual(updated["ansible_user"], "kalimera")
+            self.assertEqual(updated["ansible_port"], 56777)
+            self.assertTrue(updated["ansible_become"])
+            self.assertEqual(updated["ansible_become_method"], "sudo")
+            self.assertEqual(
+                updated["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
+
+    def test_saved_inventory_does_not_change_without_verified_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            before = hosts_path.read_bytes()
+            with mock.patch.object(MODULE, "ssh_connection_works", return_value=False):
+                self.assertEqual(
+                    MODULE.recover_saved_admin_access(hosts, hosts_path), []
+                )
+            self.assertEqual(hosts_path.read_bytes(), before)
+
     def test_resume_refreshes_observed_automation_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             hosts_path = Path(temporary) / "hosts.yml"

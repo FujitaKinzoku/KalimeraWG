@@ -1249,6 +1249,18 @@ def cleanup_deployment(repo: Path, hosts: Path, vault_password: Path) -> None:
     if not ansible_playbook or not hosts.is_file() or not vault_password.is_file():
         return
     try:
+        hosts_document = load_yaml(hosts)
+        all_vars_path = hosts.parent / "group_vars" / "all" / "main.yml"
+        all_vars = load_yaml(all_vars_path) if all_vars_path.is_file() else {}
+        recover_saved_admin_access(
+            hosts_document,
+            hosts,
+            str(all_vars.get("security_admin_user", "kalimera")),
+        )
+    except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError):
+        # Cleanup остаётся best-effort даже для частично записанного inventory.
+        pass
+    try:
         subprocess.run(
             [
             ansible_playbook,
@@ -2460,6 +2472,72 @@ def verify_saved_inventory_access(hosts_document: dict) -> None:
         )
 
 
+def recover_saved_admin_access(
+    hosts_document: dict,
+    hosts_path: Path,
+    admin_user: str = "kalimera",
+) -> list[str]:
+    """Исправить inventory, если root уже закрыт, а kalimera доступен.
+
+    Финальная SSH-политика может успеть примениться непосредственно перед
+    прерыванием deploy. Тогда новый сеанс root уже запрещён, хотя inventory
+    ещё содержит промежуточного пользователя root. Менять канал можно только
+    после отдельной успешной проверки того же ключа как ``kalimera``.
+    """
+    recovered: list[str] = []
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            private_key_value = variables.get("ansible_ssh_private_key_file")
+            host_value = variables.get("ansible_host")
+            port_value = variables.get("ansible_port")
+            if not private_key_value or not host_value or port_value is None:
+                continue
+            private_key = Path(str(private_key_value))
+            host = str(host_value)
+            current_user = str(variables.get("ansible_user", admin_user))
+            current_port = int(port_value)
+            if ssh_connection_works(host, current_user, current_port, private_key):
+                continue
+
+            candidate_ports = [current_port]
+            managed_port = int(variables.get("ssh_listen_port", current_port))
+            if managed_port not in candidate_ports:
+                candidate_ports.append(managed_port)
+            recovered_port = next(
+                (
+                    port
+                    for port in candidate_ports
+                    if ssh_connection_works(host, admin_user, port, private_key)
+                ),
+                None,
+            )
+            if recovered_port is None:
+                continue
+
+            variables["ansible_user"] = admin_user
+            variables["ansible_port"] = recovered_port
+            variables["ansible_become"] = True
+            variables["ansible_become_method"] = "sudo"
+            variables["ansible_become_password"] = (
+                "{{ vault_" + group + "_kalimera_password }}"
+            )
+            if recovered_port != current_port:
+                variables["security_previous_ssh_port"] = current_port
+                variables["security_allow_ssh_port_change"] = False
+            recovered.append(name)
+
+    if recovered:
+        yaml_write(hosts_path, hosts_document)
+        print(
+            "Production inventory восстановлен через подтверждённый SSH-доступ "
+            f"{admin_user}: " + ", ".join(recovered) + "."
+        )
+    return recovered
+
+
 def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> bool:
     """Актуализировать ``from=`` по уже проверенному управляющему SSH-сеансу."""
     changed = False
@@ -3056,6 +3134,11 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        recover_saved_admin_access(
+            hosts_document,
+            hosts_path,
+            str(all_vars.get("security_admin_user", "kalimera")),
+        )
         verify_saved_inventory_access(hosts_document)
         refresh_saved_automation_sources(hosts_document, hosts_path)
         if args.update_components:
