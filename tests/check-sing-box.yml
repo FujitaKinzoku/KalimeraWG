@@ -103,6 +103,68 @@
             sing_box_test_reality_uuid: "{{ sing_box_test_reality_uuid.stdout | trim }}"
           no_log: true
 
+        - name: Формирование отдельной тестовой конфигурации backend FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/front_backend/templates/front-backend.json.j2"
+            dest: "{{ sing_box_test_root }}/front-backend.json"
+            mode: "0600"
+          vars:
+            reality_fallback_port: 8444
+            reality_fallback_front_client_uuid: "{{ sing_box_test_reality_uuid }}"
+            reality_fallback_effective_dest: example.com
+            reality_fallback_dest: example.com
+            reality_fallback_effective_dest_port: 443
+            reality_fallback_dest_port: 443
+            reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
+            reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
+            reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
+            reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
+            reality_fallback_se_rule_set_path: "{{ sing_box_test_root }}/reality-se-domains.json"
+            entry_exit_mark: "0x1"
+            entry_ru_mark: "0x2"
+            entry_wan_interface: lo
+            entry_dns_default_port: 5353
+          no_log: true
+
+        - name: Семантическая проверка отдельного backend FRONT
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - check
+              - --config
+              - "{{ sing_box_test_root }}/front-backend.json"
+          changed_when: false
+          no_log: true
+
+        - name: Чтение отдельной конфигурации backend FRONT
+          ansible.builtin.slurp:
+            src: "{{ sing_box_test_root }}/front-backend.json"
+          register: sing_box_test_front_backend_raw
+          no_log: true
+
+        - name: Проверка изоляции backend FRONT от RU-прокси и прямых клиентов
+          vars:
+            sing_box_test_front_backend: >-
+              {{ sing_box_test_front_backend_raw.content | b64decode | from_json }}
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - sing_box_test_front_backend.log.disabled | bool
+              - sing_box_test_front_backend.dns.disable_cache | bool
+              - sing_box_test_front_backend.inbounds | length == 1
+              - sing_box_test_front_backend.inbounds[0].tag == 'front-reality-in'
+              - sing_box_test_front_backend.inbounds[0].users | length == 1
+              - sing_box_test_front_backend.inbounds[0].users[0].name == 'front-service'
+              - sing_box_test_front_backend.outbounds | length == 2
+              - sing_box_test_front_backend.outbounds[0].tag == 'direct-exit'
+              - sing_box_test_front_backend.outbounds[0].routing_mark == '0x1'
+              - sing_box_test_front_backend.outbounds[1].tag == 'direct-ru'
+              - sing_box_test_front_backend.outbounds[1].routing_mark == '0x2'
+              - sing_box_test_front_backend.route.final == 'direct-exit'
+            fail_msg: >-
+              Backend FRONT должен содержать только служебный peer, не иметь
+              прямых VLESS-клиентов и выбирать EXIT/RU через policy marks.
+
         - name: Формирование тестовых SOCKS5/REALITY-конфигураций
           ansible.builtin.include_tasks: tasks/render-sing-box-fixture.yml
           loop:

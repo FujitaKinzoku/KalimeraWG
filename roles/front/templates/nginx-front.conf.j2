@@ -14,6 +14,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name {{ front_origin_domain }};
+    access_log off;
+    error_log /dev/null crit;
 
     location /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -37,6 +39,8 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name {{ front_origin_domain }};
+    access_log off;
+    error_log /dev/null crit;
 
     ssl_certificate {{ front_origin_cert_path }};
     ssl_certificate_key {{ front_origin_key_path }};
@@ -69,15 +73,6 @@ server {
         proxy_send_timeout 1h;
         client_max_body_size 0;
     }
-
-{% if front_subscription_enabled | default(false) | bool %}
-    location {{ front_subscription_path }} {
-        alias {{ front_subscription_file_path }};
-        default_type text/plain;
-        add_header profile-title "{{ front_subscription_title }}" always;
-        add_header profile-update-interval "{{ front_subscription_update_interval_hours }}" always;
-    }
-{% endif %}
 
     location / {
         return 404;

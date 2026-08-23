@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
-  <title id="title">Три пути подключения к каскаду KalimeraWG</title>
-  <desc id="desc">Клиент выбирает прямой AmneziaWG, прямой VLESS Reality или подтверждённый резерв через совместимый облачный CDN и FRONT. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной - через AWG3 на EXIT.</desc>
+  <title id="title">Основной AWG и два режима VLESS через FRONT</title>
+  <desc id="desc">Клиент выбирает прямой AmneziaWG до ENTRY либо VLESS XHTTP до FRONT напрямую или через совместимый CDN. Прямого пользовательского VLESS на ENTRY нет. После ENTRY российский трафик идёт через SOCKS5 либо напрямую, а остальной через AWG3 на EXIT.</desc>
 
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
@@ -27,7 +27,7 @@
   <rect x="1" y="1" width="1438" height="758" rx="23" fill="none" stroke="#30363d" stroke-width="2"/>
 
   <text x="48" y="52" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="26" font-weight="700">KalimeraWG · доступ при обычной сети и белых списках</text>
-  <text x="48" y="84" fill="#8b949e" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="17">Три независимых входа сходятся в одной политике маршрутизации ENTRY</text>
+  <text x="48" y="84" fill="#8b949e" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="17">VLESS всегда проходит через защищённый FRONT и отдельный backend ENTRY</text>
 
   <rect x="250" y="112" width="580" height="500" rx="18" fill="#111820" stroke="#263442" stroke-width="2"/>
   <text x="274" y="143" fill="#8b949e" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="1.2">ВАРИАНТЫ ВХОДА</text>
@@ -39,7 +39,7 @@
   <path d="M 225 402 C 248 402 246 520 270 520" fill="none" stroke="#39c5cf" stroke-width="5" marker-end="url(#arrow-cyan)"/>
 
   <path d="M 530 198 C 650 198 710 320 850 332" fill="none" stroke="#58a6ff" stroke-width="4" marker-end="url(#arrow-blue)"/>
-  <path d="M 530 350 H 850" fill="none" stroke="#a371f7" stroke-width="4" marker-end="url(#arrow-purple)"/>
+  <path d="M 530 350 C 565 350 560 488 590 500" fill="none" stroke="#a371f7" stroke-width="4" marker-end="url(#arrow-purple)"/>
   <path d="M 530 520 H 590" fill="none" stroke="#39c5cf" stroke-width="5" marker-end="url(#arrow-cyan)"/>
   <path d="M 810 520 C 825 520 830 392 850 380" fill="none" stroke="#39c5cf" stroke-width="5" marker-end="url(#arrow-cyan)"/>
 
@@ -57,8 +57,8 @@
     <text x="400" y="218" text-anchor="middle" fill="#79c0ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">UDP/443 · основной путь</text>
 
     <rect x="270" y="307" width="260" height="86" rx="14" fill="#211a36" stroke="#a371f7" stroke-width="3"/>
-    <text x="400" y="340" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">VLESS + REALITY</text>
-    <text x="400" y="370" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">TCP/443 · прямой резерв</text>
+    <text x="400" y="340" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">FRONT без CDN</text>
+    <text x="400" y="370" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">TLS + VLESS/XHTTP · TCP/443</text>
 
     <rect x="270" y="474" width="260" height="92" rx="14" fill="#123239" stroke="#39c5cf" stroke-width="4"/>
     <text x="400" y="509" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="700">Облачный CDN</text>
@@ -71,7 +71,7 @@
     <rect x="850" y="290" width="170" height="130" rx="14" fill="#211a36" stroke="#a371f7" stroke-width="3"/>
     <text x="935" y="340" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">ENTRY</text>
     <text x="935" y="373" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">единая точка</text>
-    <text x="935" y="397" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">маршрутизации</text>
+    <text x="935" y="397" text-anchor="middle" fill="#d2a8ff" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">backend + маршрутизация</text>
 
     <rect x="1050" y="290" width="170" height="130" rx="14" fill="#20252b" stroke="#8b949e" stroke-width="2"/>
     <text x="1135" y="335" text-anchor="middle" fill="#f0f6fc" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="700">Политика</text>

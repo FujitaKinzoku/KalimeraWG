@@ -59,6 +59,16 @@
         ansible_port: 56777
         terminal_summary_entry_host: 192.0.2.10
         terminal_summary_exit_host: 192.0.2.20
+        terminal_summary_front_present: true
+        terminal_summary_front_host: 192.0.2.30
+        terminal_summary_front_user: kalimera
+        terminal_summary_front_ssh_port: 56777
+        terminal_summary_front_origin_domain: front.example.invalid
+        terminal_summary_front_direct_enabled: true
+        terminal_summary_front_cdn_enabled: true
+        terminal_summary_front_cdn_state: ready
+        terminal_summary_front_cdn_domain: cdn.example.invalid
+        terminal_summary_front_backend_port: 8444
         terminal_summary_entry_user: root
         terminal_summary_exit_user: root
         terminal_summary_entry_ssh_port: 56777
@@ -116,7 +126,8 @@
                 d=json.load(open(sys.argv[1], encoding='utf-8'));
                 paths={m['source'] for m in d['mappings']};
                 assert '/etc/awg' in paths and '/etc/sing-box' in paths and
-                '/etc/amnezia/amneziawg-v3' in paths
+                '/etc/amnezia/amneziawg-v3' in paths and
+                '/usr/local/etc/xray' in paths and '/etc/letsencrypt' in paths
               - "{{ rendered_shell_root }}/runtime-config.json"
           changed_when: false
 
@@ -252,6 +263,8 @@
               dest: awg3-validate-config
             - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
               dest: kalimera-secrets-unlock
+            - src: roles/front/templates/certbot-deploy-hook.sh.j2
+              dest: certbot-deploy-hook
 
         - name: Формирование настроек интерактивного терминала
           ansible.builtin.template:
@@ -265,6 +278,8 @@
               dest: kalimera-shell-tools
             - src: roles/terminal/templates/kalimera-help.sh.j2
               dest: kalimera-help
+            - src: roles/terminal/templates/kalimera-test.sh.j2
+              dest: kalimera-test
             - src: roles/terminal/templates/kalimera-status.py.j2
               dest: kalimera-status
             - src: roles/terminal/templates/kalimera-blesh-init.sh.j2
@@ -282,6 +297,7 @@
             - kalimera-prompt
             - kalimera-shell-tools
             - kalimera-help
+            - kalimera-test
             - kalimera-blesh-init
             - blesh-loader
           changed_when: false
@@ -334,8 +350,14 @@
                 echo 'Посторонний тестовый root-ключ не был обнаружен.' >&2
                 exit 1
             fi
-            grep -Fq 'WARN строка 1: 256 SHA256:' status.out
-            grep -Fq 'удалить: ssh-key-audit delete SHA256:' status.out
+            grep -Fq 'WARN строка 1: 256 SHA256:' status.out || {
+                cat status.out >&2
+                exit 1
+            }
+            grep -Fq 'удалить: ssh-key-audit delete SHA256:' status.out || {
+                cat status.out >&2
+                exit 1
+            }
             : >"$root_keys"
             {{ (rendered_shell_root ~ '/ssh-key-audit') | quote }} status |
                 grep -Fq 'не содержит активных ключей'
@@ -419,6 +441,34 @@
             dest: "{{ rendered_shell_root }}/awg-health-exit"
             mode: "0700"
 
+        - name: Выбор ветви terminal-шаблона FRONT
+          ansible.builtin.set_fact:
+            awg_node_role: front
+
+        - name: Формирование сводки текущей конфигурации FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-status.py.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-status-front"
+            mode: "0700"
+
+        - name: Исполняемая проверка ролевой сводки FRONT
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ rendered_shell_root }}/kalimera-status-front"
+              - --with-commands
+          environment:
+            NO_COLOR: "1"
+          register: rendered_kalimera_status_front
+          changed_when: false
+          failed_when: >-
+            rendered_kalimera_status_front.rc != 0 or
+            'ПОДКЛЮЧЕНИЯ FRONT' not in rendered_kalimera_status_front.stdout or
+            'СХЕМА FRONT' not in rendered_kalimera_status_front.stdout or
+            'ЗАЩИТА FRONT' not in rendered_kalimera_status_front.stdout or
+            'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' in rendered_kalimera_status_front.stdout or
+            'VPN-КЛИЕНТЫ' in rendered_kalimera_status_front.stdout
+
         - name: Проверка сформированных программ через ShellCheck
           ansible.builtin.command:
             argv:
@@ -456,9 +506,11 @@
               - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
               - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
+              - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/kalimera-help"
+              - "{{ rendered_shell_root }}/kalimera-test"
           changed_when: false
 
       always:

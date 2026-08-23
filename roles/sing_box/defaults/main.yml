@@ -13,11 +13,14 @@ entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
 entry_ru_tun_stack: gvisor
 entry_ru_endpoint_independent_nat: true
 
-# Запасной транспорт VLESS+REALITY поверх уже работающего sing-box. Требует
-# entry_ru_proxy_enabled - переиспользует существующий outbound ru-socks для
-# RU-ветки, отдельный SOAX/прокси не нужен. Выключено по умолчанию -
-# обратная совместимость.
+# Прежний запасной транспорт VLESS+REALITY может работать внутри основной
+# службы sing-box и тогда требует entry_ru_proxy_enabled. Управляемый FRONT
+# использует отдельную службу backend и не зависит от жизненного цикла
+# SOCKS5/TUN. По умолчанию оба варианта выключены.
 reality_fallback_enabled: false
+front_enabled: false
+front_backend_enabled: "{{ front_enabled | bool }}"
+reality_fallback_direct_client_enabled: "{{ not (front_backend_enabled | bool) }}"
 reality_fallback_port: 443
 reality_fallback_state_dir: /etc/sing-box/reality
 reality_fallback_private_key_path: "{{ reality_fallback_state_dir }}/private.key"
@@ -43,11 +46,8 @@ reality_fallback_ru_zone_rule_set_path: /etc/sing-box/reality/ru-zone.json
 # кеш-узлов внутри РФ (googlevideo.com и прочий Google Global Cache).
 reality_fallback_se_rule_set_path: /etc/sing-box/reality/se-domains.json
 
-# Второй REALITY-клиент, зарезервированный за FRONT-релеем (roles/front) -
-# CDN-фронтированный VLESS+XHTTP на отдельной VPS, который сам подключается
-# сюда как обычный REALITY-клиент, чтобы отдать клиентам путь, устойчивый к
-# режиму белых списков (см. docs/front-relay.md). Требует reality_fallback_enabled.
-# Отдельный uuid - не для распространения конечным пользователям, только для
-# внутреннего хопа FRONT→ENTRY.
+# Служебный REALITY-клиент, зарезервированный за FRONT-релеем. Отдельный UUID
+# не распространяется конечным пользователям и применяется только на участке
+# FRONT → ENTRY.
 front_relay_enabled: false
 reality_fallback_front_client_uuid_path: "{{ reality_fallback_state_dir }}/front_client_uuid"

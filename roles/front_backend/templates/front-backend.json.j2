@@ -1,0 +1,113 @@
+{
+  "log": {
+    "disabled": true
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "front-reality-in",
+      "listen": "::",
+      "listen_port": {{ reality_fallback_port }},
+      "users": [
+        {
+          "uuid": "{{ reality_fallback_front_client_uuid }}",
+          "flow": "xtls-rprx-vision",
+          "name": "front-service"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ reality_fallback_effective_dest | default(reality_fallback_dest) }}",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "{{ reality_fallback_effective_dest | default(reality_fallback_dest) }}",
+            "server_port": {{ reality_fallback_effective_dest_port | default(reality_fallback_dest_port) }}
+          },
+          "private_key": "{{ reality_fallback_private_key }}",
+          "short_id": ["{{ reality_fallback_short_id }}"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-exit",
+      "routing_mark": "{{ entry_exit_mark }}",
+      "domain_resolver": {
+        "server": "bootstrap-unbound",
+        "strategy": "ipv4_only"
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct-ru",
+      "routing_mark": "{{ entry_ru_mark }}",
+      "domain_resolver": {
+        "server": "bootstrap-unbound",
+        "strategy": "ipv4_only"
+      }
+    }
+  ],
+  "route": {
+    "final": "direct-exit",
+    "default_interface": "{{ entry_wan_interface }}",
+    "default_domain_resolver": "bootstrap-unbound",
+    "rule_set": [
+      {
+        "type": "local",
+        "tag": "front-ru-domains",
+        "format": "source",
+        "path": "{{ reality_fallback_ru_rule_set_path }}"
+      },
+      {
+        "type": "local",
+        "tag": "front-ru-zone",
+        "format": "source",
+        "path": "{{ reality_fallback_ru_zone_rule_set_path }}"
+      },
+      {
+        "type": "local",
+        "tag": "front-se-domains",
+        "format": "source",
+        "path": "{{ reality_fallback_se_rule_set_path }}"
+      }
+    ],
+    "rules": [
+      {
+        "inbound": ["front-reality-in"],
+        "action": "sniff"
+      },
+      {
+        "inbound": ["front-reality-in"],
+        "rule_set": ["front-se-domains"],
+        "outbound": "direct-exit"
+      },
+      {
+        "inbound": ["front-reality-in"],
+        "domain_suffix": [".ru", ".xn--p1ai"],
+        "outbound": "direct-ru"
+      },
+      {
+        "inbound": ["front-reality-in"],
+        "rule_set": ["front-ru-domains", "front-ru-zone"],
+        "outbound": "direct-ru"
+      }
+    ]
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "udp",
+        "tag": "bootstrap-unbound",
+        "server": "127.0.0.1",
+        "server_port": {{ entry_dns_default_port }}
+      }
+    ],
+    "final": "bootstrap-unbound",
+    "strategy": "ipv4_only",
+    "disable_cache": true
+  }
+}
+

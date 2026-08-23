@@ -5,6 +5,34 @@
       {{ hostvars[groups['entry'][0]].entry_public_endpoint |
          default(hostvars[groups['entry'][0]].ansible_host) }}
     terminal_summary_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
+    terminal_summary_front_present: "{{ groups['front'] | default([]) | length > 0 }}"
+    terminal_summary_front_host: >-
+      {{ hostvars[groups['front'][0]].ansible_host
+         if groups['front'] | default([]) | length > 0 else '' }}
+    terminal_summary_front_user: >-
+      {{ hostvars[groups['front'][0]].security_admin_user | default('kalimera')
+         if groups['front'] | default([]) | length > 0 else 'kalimera' }}
+    terminal_summary_front_ssh_port: >-
+      {{ hostvars[groups['front'][0]].ssh_listen_port |
+         default(hostvars[groups['front'][0]].ansible_port | default(22))
+         if groups['front'] | default([]) | length > 0 else 22 }}
+    terminal_summary_front_origin_domain: >-
+      {{ hostvars[groups['front'][0]].front_origin_domain | default('')
+         if groups['front'] | default([]) | length > 0 else '' }}
+    terminal_summary_front_direct_enabled: >-
+      {{ 'direct' in (hostvars[groups['front'][0]].front_access_modes | default([]))
+         if groups['front'] | default([]) | length > 0 else false }}
+    terminal_summary_front_cdn_enabled: >-
+      {{ 'cdn' in (hostvars[groups['front'][0]].front_access_modes | default([]))
+         if groups['front'] | default([]) | length > 0 else false }}
+    terminal_summary_front_cdn_state: >-
+      {{ hostvars[groups['front'][0]].front_cdn_state | default('not_configured')
+         if groups['front'] | default([]) | length > 0 else 'not_configured' }}
+    terminal_summary_front_cdn_domain: >-
+      {{ hostvars[groups['front'][0]].front_cdn_domain | default('')
+         if groups['front'] | default([]) | length > 0 else '' }}
+    terminal_summary_front_backend_port: >-
+      {{ hostvars[groups['entry'][0]].reality_fallback_port | default(8444) }}
     terminal_summary_entry_user: "{{ security_admin_user | default('kalimera') }}"
     terminal_summary_exit_user: "{{ security_admin_user | default('kalimera') }}"
     terminal_summary_entry_ssh_port: >-
@@ -200,6 +228,16 @@
     group: root
     mode: "0755"
     validate: /usr/bin/python3 -m py_compile %s
+  when: terminal_enabled | bool
+
+- name: Установка полной проверки с учётом роли сервера
+  ansible.builtin.template:
+    src: kalimera-test.sh.j2
+    dest: /usr/local/sbin/kalimera-test
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
   when: terminal_enabled | bool
 
 - name: Установка цветных инструментов Bash

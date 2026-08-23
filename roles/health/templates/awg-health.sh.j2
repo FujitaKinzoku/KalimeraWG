@@ -111,7 +111,7 @@ ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
 
-{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] and security_manage_admin_account | default(false) | bool %}
 managed_admin_is_ready() {
     id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
         id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
@@ -132,9 +132,24 @@ runtime_secrets_are_healthy() {
 }
 
 runtime_secret_dependencies_are_loaded() {
+{% if awg_node_role == 'front' %}
+    systemctl cat {{ front_xray_service_name | default('xray.service') | quote }} |
+        grep -Fq 'LoadCredential=config.json:' &&
+        systemctl cat nginx.service |
+            grep -Fq 'Requires={{ runtime_secrets_service_name }}' &&
+        systemctl cat certbot.service |
+            grep -Fq 'Requires={{ runtime_secrets_service_name }}'
+{% elif awg_node_role == 'entry' and front_backend_enabled | default(false) | bool %}
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:' &&
+        systemctl cat {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} |
+            grep -Fq 'LoadCredential=front-backend.json:'
+{% else %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:'
+{% endif %}
 }
 {% endif %}
 
@@ -301,11 +316,9 @@ printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
-# Всё в этом блоке - артефакты ролей amneziawg/security/operations, которые
-# к FRONT не применяются (docs/front-relay.md, "Известные ограничения"):
-# модуля AmneziaWG, sysctl-профиля, journald/coredump/wtmp-политики и
-# таймера аудита там нет, поэтому на FRONT эти проверки не имеют смысла и
-# всегда падали бы, а health запускается с --strict прямо во время deploy.
+# В этом блоке находятся только проверки ядра и сетевого профиля AWG.
+# FRONT получает общие политики security, operations и no-logs, но не
+# использует модуль AmneziaWG и межсерверный sysctl-профиль.
 check 'модуль AmneziaWG' modprobe -n amneziawg
 check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
@@ -338,13 +351,13 @@ check 'состояние Fail2Ban хранится только в RAM' fail2ba
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
-{% if awg_node_role | default('') in ['entry', 'exit'] and security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] and security_manage_admin_account | default(false) | bool %}
 check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
-{% if awg_node_role | default('') in ['entry', 'exit'] %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
-check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
+check 'защищённые службы получают конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
 {% if awg_telegram_monitor_enabled | default(false) | bool %}
@@ -521,6 +534,13 @@ check 'российские назначения идут напрямую че�
 check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
 check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
 check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
+{% if front_backend_enabled | default(false) | bool %}
+check 'отдельная служба backend FRONT активна' systemctl is-active --quiet {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}
+check 'backend FRONT прослушивает служебный порт' tcp_port_listening {{ reality_fallback_port | int }}
+check 'backend FRONT содержит только служебный peer' \
+    jq -e '.inbounds[] | select(.tag == "front-reality-in") | (.users | length == 1) and (.users[0].name == "front-service")' \
+    {{ front_backend_config_path | default('/etc/sing-box/front-backend.json') | quote }}
+{% else %}
 check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }} {{ entry_ru_proxy_manual_disabled_flag | quote }}
 {% if entry_ru_proxy_manual_disabled_flag is defined %}
 # REALITY живёт внутри того же процесса sing-box, что и российский прокси,
@@ -536,8 +556,11 @@ fi
 {% else %}
 check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
 {% endif %}
+{% endif %}
 {% if front_relay_enabled | default(false) | bool %}
+{% if not (front_backend_enabled | default(false) | bool) %}
 check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
+{% endif %}
 check 'UFW ограничивает REALITY адресом FRONT-релея' \
     ufw_interserver_restricted \
     {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
@@ -578,6 +601,21 @@ check 'рекурсивный DNS EXIT сервера активен' systemctl 
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
 {% endif %}
 {% elif awg_node_role == 'front' %}
+nginx_no_logs_policy_is_active() {
+    local effective
+    effective="$(nginx -T 2>&1)" || return 1
+    grep -Eq '^[[:space:]]*access_log[[:space:]]+off;' <<<"$effective" &&
+        grep -Eq '^[[:space:]]*error_log[[:space:]]+/dev/null[[:space:]]+crit;' <<<"$effective" &&
+        ! find /var/log/nginx -type f -size +0c -print -quit 2>/dev/null | grep -q .
+}
+
+check 'UFW активен' ufw_active
+check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check 'журналирование UFW отключено' ufw_logging_is_disabled
+check 'systemd journal хранится только в RAM' journald_is_volatile
+check 'постоянный rsyslog отключён' rsyslog_is_disabled
+check 'coredump не сохраняются' coredump_storage_is_disabled
+check 'учёт входов хранится только в RAM' login_accounting_is_volatile
 # Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво - только
 # когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
 # поэтому проверка established-соединения всегда падала бы, а health
@@ -591,6 +629,7 @@ front_entry_reality_reachable() {
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
 check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
 {% if front_entry_reality_stopped | default(false) | bool %}

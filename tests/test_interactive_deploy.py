@@ -2043,6 +2043,7 @@ class InteractiveDeployTests(unittest.TestCase):
                     "n",
                     "entry.invalid",
                     "exit.invalid",
+                    "n",
                     "ubuntu",
                     "deployer",
                     "22",

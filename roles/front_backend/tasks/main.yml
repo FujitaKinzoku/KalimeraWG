@@ -1,0 +1,104 @@
+---
+- name: Проверка параметров backend FRONT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - reality_fallback_enabled | default(false) | bool
+      - front_relay_enabled | default(false) | bool
+      - reality_fallback_private_key | default('') | length > 0
+      - reality_fallback_short_id | default('') | length > 0
+      - reality_fallback_front_client_uuid | default('') | length > 0
+      - reality_fallback_port | int >= 1
+      - reality_fallback_port | int <= 65535
+    fail_msg: ENTRY не подготовил служебные параметры FRONT backend
+  no_log: true
+  when: front_backend_enabled | bool
+
+- name: Создание каталога состояния backend FRONT
+  ansible.builtin.file:
+    path: "{{ front_backend_config_path | dirname }}"
+    state: directory
+    owner: sing-box
+    group: sing-box
+    mode: "0700"
+  when: front_backend_enabled | bool
+
+- name: Создание runtime-каталога backend FRONT
+  ansible.builtin.file:
+    path: /var/lib/sing-box-front
+    state: directory
+    owner: sing-box
+    group: sing-box
+    mode: "0700"
+  when: front_backend_enabled | bool
+
+- name: Формирование кандидата backend FRONT
+  ansible.builtin.template:
+    src: front-backend.json.j2
+    dest: "{{ front_backend_candidate_path }}"
+    owner: sing-box
+    group: sing-box
+    mode: "0600"
+  changed_when: false
+  no_log: true
+  when: front_backend_enabled | bool
+
+- name: Проверка кандидата backend FRONT
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/sing-box
+      - check
+      - --config
+      - "{{ front_backend_candidate_path }}"
+  changed_when: false
+  no_log: true
+  when: front_backend_enabled | bool
+
+- name: Установка конфигурации backend FRONT
+  ansible.builtin.copy:
+    src: "{{ front_backend_candidate_path }}"
+    dest: "{{ front_backend_config_path }}"
+    remote_src: true
+    owner: sing-box
+    group: sing-box
+    mode: "0600"
+  notify: Перезапустить backend FRONT
+  no_log: true
+  when: front_backend_enabled | bool
+
+- name: Удаление кандидата backend FRONT
+  ansible.builtin.file:
+    path: "{{ front_backend_candidate_path }}"
+    state: absent
+  changed_when: false
+  no_log: true
+
+- name: Установка systemd-службы backend FRONT
+  ansible.builtin.template:
+    src: front-backend.service.j2
+    dest: "/etc/systemd/system/{{ front_backend_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Перечитать systemd для backend FRONT
+    - Перезапустить backend FRONT
+  when: front_backend_enabled | bool
+
+- name: Применение обработчиков backend FRONT
+  ansible.builtin.meta: flush_handlers
+
+- name: Включение backend FRONT
+  ansible.builtin.systemd_service:
+    name: "{{ front_backend_service_name }}"
+    enabled: true
+    state: started
+  when: front_backend_enabled | bool
+
+- name: Отключение backend FRONT
+  ansible.builtin.systemd_service:
+    name: "{{ front_backend_service_name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: not (front_backend_enabled | bool)

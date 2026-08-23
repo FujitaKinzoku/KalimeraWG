@@ -54,6 +54,8 @@ jobs:
           ansible-playbook --syntax-check playbooks/exit.yml
           ansible-playbook --syntax-check playbooks/front.yml
           ansible-playbook --syntax-check playbooks/verify.yml
+          ansible-playbook --syntax-check playbooks/finalize-monitoring.yml
+          ansible-playbook --syntax-check playbooks/terminal.yml
           ansible-playbook --syntax-check playbooks/rollback-entry.yml
           ansible-playbook --syntax-check playbooks/rollback-exit.yml
           ansible-playbook --syntax-check playbooks/test-failover.yml

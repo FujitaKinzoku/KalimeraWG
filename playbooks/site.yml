@@ -433,6 +433,8 @@
       when: awg_adoption_mode == 'apply'
     - role: operations
       when: awg_adoption_mode == 'apply'
+    - role: front_backend
+      when: awg_adoption_mode == 'apply'
     - role: entry_watchdog
       when: awg_adoption_mode == 'apply'
     - role: fail2ban
@@ -502,6 +504,19 @@
     - name: Сбор сведений о FRONT сервере
       ansible.builtin.setup:
 
+    - name: Определение внешнего интерфейса FRONT
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        ip -4 route show default | awk 'NR == 1 {print $5}'
+      args:
+        executable: /bin/bash
+      register: front_wan_interface_probe
+      changed_when: false
+
+    - name: Выбор внешнего интерфейса FRONT
+      ansible.builtin.set_fact:
+        exit_wan_interface: "{{ front_wan_interface_probe.stdout | trim }}"
+
     - name: Проверка служб перед защищённой установкой
       ansible.builtin.service_facts:
       when: not (awg_enable_fail2ban | default(true) | bool)
@@ -517,7 +532,11 @@
       when: awg_adoption_mode == 'apply'
     - role: terminal
       when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
     - role: front
+      when: awg_adoption_mode == 'apply'
+    - role: operations
       when: awg_adoption_mode == 'apply'
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
@@ -543,11 +562,9 @@
         - awg_adoption_mode == 'apply'
         - entry_dns_default_via_exit | default(false) | bool
 
-# Пороговое (Shamir 2-of-N) хранилище - свойство пары ENTRY/EXIT: доли,
-# индексы и peer-списки задаются только в group_vars entry/exit, а на FRONT
-# нет ни ключей AmneziaWG, ни доли (docs/front-relay.md). Флаг
-# runtime_secrets_enabled лежит в group_vars/all, поэтому FRONT наследует
-# его как true - отсюда явная привязка к роли узла, а не к одному флагу.
+# Пороговое (Shamir 2-of-N) хранилище охватывает все активные роли.
+# Каждый ENTRY, EXIT и FRONT получает отдельную долю и может восстановиться
+# при доступности любого второго держателя.
 - name: Подготовка взаимной аутентификации держателей Shamir-долей
   hosts: all
   gather_facts: false
@@ -559,7 +576,7 @@
       register: runtime_secrets_host_public_key_file
       when:
         - awg_adoption_mode == 'apply'
-        - awg_node_role | default('') in ['entry', 'exit']
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
     - name: Сохранение проверенного host key только в памяти Ansible
@@ -570,7 +587,7 @@
       no_log: true
       when:
         - awg_adoption_mode == 'apply'
-        - awg_node_role | default('') in ['entry', 'exit']
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Шифрование постоянных секретов и перенос открытых данных в tmpfs
@@ -581,7 +598,7 @@
     - role: runtime_secrets
       when:
         - awg_adoption_mode == 'apply'
-        - awg_node_role | default('') in ['entry', 'exit']
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Фиксация контрольных сумм управляемой конфигурации
@@ -589,15 +606,13 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
-    # Манифест ставит roles/operations, которая на FRONT не применяется
-    # (см. "Настройка FRONT сервера" выше) - бинарника там нет.
     - name: Создание манифеста после полного применения ролей
       ansible.builtin.command:
         argv: [/usr/local/sbin/awg-managed-integrity, seal]
       changed_when: true
       when:
         - awg_adoption_mode == 'apply'
-        - awg_node_role | default('') in ['entry', 'exit']
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
 
 - name: Восстановление автоматических обновлений
   hosts: all

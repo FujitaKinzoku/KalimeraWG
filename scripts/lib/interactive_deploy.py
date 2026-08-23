@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Интерактивный production-оркестратор ENTRY и EXIT без раскрытия секретов."""
+"""Интерактивный production-оркестратор ENTRY, EXIT и необязательного FRONT."""
 
 from __future__ import annotations
 
@@ -230,6 +230,77 @@ def migrate_production_inventory(production: Path) -> bool:
     all_vars = load_yaml(all_path) if all_path.is_file() else {}
     changed = False
     all_changed = False
+
+    hosts_path = production / "hosts.yml"
+    front_path = production / "group_vars" / "front.yml"
+    hosts_document = load_yaml(hosts_path) if hosts_path.is_file() else {}
+    front_hosts = (
+        hosts_document.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    front_present = isinstance(front_hosts, dict) and bool(front_hosts)
+    legacy_front = bool(entry_vars.get("front_relay_enabled", False)) or front_present
+    if legacy_front:
+        front_vars = load_yaml(front_path) if front_path.is_file() else {}
+        origin_domain = str(front_vars.get("front_origin_domain", "")).strip()
+        client_domain = str(front_vars.get("front_client_domain", "")).strip()
+        cdn_ready = bool(
+            front_vars.get("front_cdn_state") == "ready"
+            or (client_domain and client_domain != origin_domain)
+        )
+        access_modes = front_vars.get("front_access_modes")
+        if not isinstance(access_modes, list) or not access_modes:
+            access_modes = ["direct", "cdn"] if cdn_ready else ["direct"]
+        front_defaults: dict[str, object] = {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_active_id": str(front_vars.get("front_active_id", "front-1")),
+            "front_access_modes": access_modes,
+            "front_cdn_state": "ready" if cdn_ready else "not_configured",
+            "front_direct_domain": str(
+                front_vars.get("front_direct_domain", origin_domain)
+            ),
+            "front_cdn_domain": str(
+                front_vars.get("front_cdn_domain", client_domain if cdn_ready else "")
+            ),
+            "front_subscription_enabled": False,
+            "awg3_transit_enabled": False,
+        }
+        front_changed = False
+        for key, value in front_defaults.items():
+            if key not in front_vars:
+                front_vars[key] = value
+                front_changed = True
+        for key, value in {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_subscription_enabled": False,
+            "awg3_transit_enabled": False,
+        }.items():
+            if front_vars.get(key) != value:
+                front_vars[key] = value
+                front_changed = True
+        entry_front_defaults: dict[str, object] = {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_backend_enabled": True,
+            "reality_fallback_enabled": True,
+            "reality_fallback_direct_client_enabled": False,
+        }
+        for key, value in entry_front_defaults.items():
+            if entry_vars.get(key) != value:
+                entry_vars[key] = value
+                changed = True
+        if front_changed:
+            yaml_write(front_path, front_vars)
+            changed = True
+        if front_changed or changed:
+            print(
+                "Production inventory обновлён: FRONT переведён на модель "
+                "front_enabled/access_modes/cdn_state с отдельным backend ENTRY."
+            )
 
     awg3_defaults_path = (
         production.parents[1] / "roles" / "awg3_transit" / "defaults" / "main.yml"
@@ -484,10 +555,9 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     ui_panel(
         "FRONT-РЕЛЕЙ: CDN-ФРОНТИРОВАННЫЙ VLESS ДЛЯ РЕЖИМА БЕЛЫХ СПИСКОВ",
         [
-            "Отдельная VPS с Nginx+Xray-core, авторизуется на ENTRY как ещё",
-            "один REALITY-клиент. Требует УЖЕ настроенных вручную DNS",
-            "(A-запись на этот сервер) и CDN-ресурса перед сертификатом -",
-            "подробности в docs/front-relay.md.",
+            "Отдельная VPS с Nginx+Xray-core и служебным каналом до ENTRY.",
+            "Прямой режим работает без CDN. CDN-режим включается только после",
+            "подтверждения готового внешнего CDN-ресурса.",
         ],
         "cyan",
     )
@@ -501,6 +571,12 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     front_public_ipv4 = resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
     front_user = prompt("Пользователь SSH FRONT сервера", "root")
     front_port = prompt_port("Текущий SSH-порт FRONT сервера", 22)
+    front_new_port = prompt_port("Новый управляемый SSH-порт FRONT сервера", 56777)
+    if front_new_port < 1024:
+        fail("Управляемый SSH-порт FRONT должен находиться в диапазоне 1024–65535")
+    front_password = getpass.getpass("Пароль SSH FRONT сервера (ввод скрыт): ")
+    if not front_password:
+        fail("Начальный пароль SSH FRONT не может быть пустым")
 
     front_origin_domain = prompt("Origin-домен FRONT (A-запись уже указывает на этот сервер)")
     if not _DOMAIN_RE.match(front_origin_domain or ""):
@@ -509,20 +585,70 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     if not _EMAIL_RE.match(front_certbot_email or ""):
         fail("Некорректный e-mail для Certbot")
 
+    ui_panel(
+        "РЕЖИМ ДОСТУПА FRONT",
+        [
+            "1 · прямой TLS+XHTTP через FRONT без CDN",
+            "2 · TLS+XHTTP только через уже готовый CDN",
+            "3 · оба варианта одновременно",
+        ],
+        "cyan",
+    )
+    access_choice = prompt("Выберите режим FRONT", "1")
+    access_modes_by_choice = {
+        "1": ["direct"],
+        "2": ["cdn"],
+        "3": ["direct", "cdn"],
+    }
+    if access_choice not in access_modes_by_choice:
+        fail("Выбран неподдерживаемый режим FRONT")
+    front_access_modes = access_modes_by_choice[access_choice]
+    front_direct_domain = front_origin_domain
+    front_cdn_domain = ""
+    front_cdn_state = "not_configured"
+    if "direct" in front_access_modes:
+        print(f"Домен прямого доступа FRONT: {front_origin_domain}")
+    if "cdn" in front_access_modes:
+        if not prompt_bool("CDN-ресурс уже создан и готов к проверке", False):
+            fail(
+                "CDN-режим нельзя включить до готовности ресурса. "
+                "Выберите прямой режим и добавьте CDN следующим deploy."
+            )
+        front_cdn_domain = prompt("Публичный домен готового CDN-ресурса")
+        if not _DOMAIN_RE.match(front_cdn_domain or ""):
+            fail("Публичный домен CDN должен быть корректным DNS-именем")
+        front_cdn_state = "ready"
+
     entry_vars = load_yaml(entry_path)
-    entry_changed = not bool(entry_vars.get("front_relay_enabled", False))
+    entry_changed = False
+    for key, value in {
+        "front_enabled": True,
+        "front_relay_enabled": True,
+        "front_backend_enabled": True,
+        "reality_fallback_enabled": True,
+        "reality_fallback_direct_client_enabled": False,
+        "front_public_ipv4": front_public_ipv4,
+    }.items():
+        if entry_vars.get(key) != value:
+            entry_vars[key] = value
+            entry_changed = True
     if entry_changed:
-        entry_vars["front_relay_enabled"] = True
-        entry_vars["front_public_ipv4"] = front_public_ipv4
         yaml_write(entry_path, entry_vars)
 
     front_vars = {
         "awg_node_role": "front",
-        # runtime_secrets_enabled лежит в group_vars/all и наследуется всеми
-        # хостами, но пороговое хранилище - свойство пары ENTRY/EXIT: доли и
-        # peer-списки задаются только в их group_vars (docs/front-relay.md).
-        "runtime_secrets_enabled": False,
+        "front_enabled": True,
         "front_relay_enabled": True,
+        "front_active_id": "front-1",
+        "front_access_modes": front_access_modes,
+        "front_cdn_state": front_cdn_state,
+        "front_direct_domain": front_direct_domain,
+        "front_cdn_domain": front_cdn_domain,
+        "front_client_domain": (
+            front_cdn_domain if front_access_modes == ["cdn"] else front_direct_domain
+        ),
+        "front_subscription_enabled": False,
+        "awg3_transit_enabled": False,
         # Дефолт роли ("/api/stream") - общеизвестный путь и лёгкий
         # fingerprint; путь генерируется здесь, потому что он должен быть
         # постоянным (входит в клиентские ссылки и правила кэширования CDN),
@@ -534,22 +660,66 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     yaml_write(front_path, front_vars)
 
     ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    front_password = bootstrap_key(
+        front_host,
+        front_user,
+        front_port,
+        front_password,
+        ssh_public,
+        "FRONT сервер",
+    )
+    front_automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+        front_host,
+        front_user,
+        front_port,
+        ssh_private,
+    )
+    if not front_automation_source_ipv4:
+        fail("FRONT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+    if front_user != "root":
+        vault_path = production / "group_vars" / "all" / "vault.yml"
+        vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+        vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+        try:
+            vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+        except Exception as error:
+            fail(f"Не удалось открыть Vault для FRONT: {type(error).__name__}")
+        if not isinstance(vault_document, dict):
+            fail("Production Vault должен содержать словарь переменных")
+        vault_document["vault_front_become_password"] = front_password
+        encrypted = vault_lib.encrypt(
+            yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
+        )
+        temporary = vault_path.with_name(
+            f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            secure_write(temporary, encrypted)
+            os.replace(temporary, vault_path)
+            vault_path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
     front_host_vars: dict[str, object] = {
         "ansible_host": front_host,
         "ansible_user": front_user,
         "ansible_port": front_port,
         "ansible_become": True,
         "ansible_ssh_private_key_file": str(ssh_private),
+        "ssh_listen_port": front_new_port,
+        "security_allow_ssh_port_change": front_port != front_new_port,
+        "security_automation_source_ipv4": front_automation_source_ipv4,
     }
+    if front_user != "root":
+        front_host_vars["ansible_become_password"] = "{{ vault_front_become_password }}"
     children["front"] = {"hosts": {"front-managed": front_host_vars}}
     yaml_write(hosts_path, hosts_document)
 
     print(
         "Production inventory обновлён: добавлен FRONT-релей "
-        f"({front_origin_domain}); интерфейс пока не применён.\n"
-        "Перед 'deploy --resume' убедитесь, что DNS и ресурс CDN настроены "
-        "вручную (docs/front-relay.md), затем запустите:\n"
-        "  ./deploy --resume"
+        f"({front_origin_domain}); он будет применён текущим deploy."
     )
     return True
 
@@ -877,6 +1047,7 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     all_path = production / "group_vars" / "all" / "main.yml"
     entry_path = production / "group_vars" / "entry.yml"
     exit_path = production / "group_vars" / "exit.yml"
+    front_path = production / "group_vars" / "front.yml"
     hosts_path = production / "hosts.yml"
     if not all(
         path.is_file()
@@ -897,11 +1068,14 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     children = hosts_document.get("all", {}).get("children", {})
     entry_hosts = children.get("entry", {}).get("hosts", {})
     exit_hosts = children.get("exit", {}).get("hosts", {})
+    front_hosts = children.get("front", {}).get("hosts", {})
     if not isinstance(entry_hosts, dict) or len(entry_hosts) != 1:
         fail("Пороговое хранилище требует ровно один ENTRY сервер")
     if not isinstance(exit_hosts, dict) or not exit_hosts:
         fail("Пороговое хранилище требует хотя бы один EXIT сервер")
-    active_hosts = list(entry_hosts) + list(exit_hosts)
+    if not isinstance(front_hosts, dict):
+        front_hosts = {}
+    active_hosts = list(entry_hosts) + list(exit_hosts) + list(front_hosts)
 
     changed = False
     shares = document.get("vault_runtime_secret_shares")
@@ -970,7 +1144,13 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     )
 
     for share_index, host in enumerate(active_hosts, start=1):
-        host_group = entry_hosts if host in entry_hosts else exit_hosts
+        host_group = (
+            entry_hosts
+            if host in entry_hosts
+            else exit_hosts
+            if host in exit_hosts
+            else front_hosts
+        )
         host_values = host_group[host]
         if not isinstance(host_values, dict):
             host_values = {}
@@ -978,7 +1158,7 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         if host_values.get("runtime_secrets_share_index") != share_index:
             host_values["runtime_secrets_share_index"] = share_index
             changed = True
-        if host in exit_hosts:
+        if host in exit_hosts or host in front_hosts:
             advertise_ipv4 = host_values.get("ansible_host", host)
             if host_values.get("runtime_secrets_advertise_ipv4") != advertise_ipv4:
                 host_values["runtime_secrets_advertise_ipv4"] = advertise_ipv4
@@ -986,15 +1166,22 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
 
     existing_entry_vars = load_yaml(entry_path)
     existing_exit_vars = load_yaml(exit_path)
-    for path, index, peers in (
-        (entry_path, 1, "{{ groups['exit'] | default([]) }}"),
+    all_runtime_peers = (
+        "{{ ((groups['entry'] | default([])) + "
+        "(groups['exit'] | default([])) + (groups['front'] | default([]))) "
+        "| reject('equalto', inventory_hostname) | list }}"
+    )
+    group_runtime_values: list[tuple[Path, int, str]] = [
+        (entry_path, 1, all_runtime_peers),
         (
             exit_path,
             2,
-            "{{ (groups['entry'] | default([])) + "
-            "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}",
+            all_runtime_peers,
         ),
-    ):
+    ]
+    if front_hosts:
+        group_runtime_values.append((front_path, 3, all_runtime_peers))
+    for path, index, peers in group_runtime_values:
         values = load_yaml(path)
         if values.get("runtime_secrets_share_index") != index:
             values["runtime_secrets_share_index"] = index
@@ -1002,11 +1189,11 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         if values.get("runtime_secrets_peer_inventory_hosts") != peers:
             values["runtime_secrets_peer_inventory_hosts"] = peers
             changed = True
-        advertise = (
-            existing_exit_vars.get("security_interserver_peer_ipv4")
-            if index == 1
-            else existing_entry_vars.get("security_interserver_peer_ipv4")
-        )
+        advertise = None
+        if index == 1:
+            advertise = existing_exit_vars.get("security_interserver_peer_ipv4")
+        elif index == 2:
+            advertise = existing_entry_vars.get("security_interserver_peer_ipv4")
         if not advertise:
             advertise = (
                 "{{ entry_public_endpoint | default(ansible_host) }}"
@@ -1082,11 +1269,15 @@ def ensure_admin_account_material(
         fail("Production Vault должен содержать словарь переменных")
 
     all_vars = load_yaml(all_path)
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.get("all", {}).get("children", {})
+    front_hosts = children.get("front", {}).get("hosts", {})
+    has_front = isinstance(front_hosts, dict) and bool(front_hosts)
     passwords_delivered = all_vars.get("security_account_passwords_delivered")
     redeliver_undelivered = bool(
         regenerate_undelivered and passwords_delivered is False
     )
-    required = (
+    required: list[tuple[str, str | None, str]] = [
         (
             "vault_entry_kalimera_password_hash",
             "vault_entry_kalimera_password",
@@ -1099,7 +1290,18 @@ def ensure_admin_account_material(
             "EXIT · kalimera",
         ),
         ("vault_exit_root_password_hash", None, "EXIT · root"),
-    )
+    ]
+    if has_front:
+        required.extend(
+            [
+                (
+                    "vault_front_kalimera_password_hash",
+                    "vault_front_kalimera_password",
+                    "FRONT · kalimera",
+                ),
+                ("vault_front_root_password_hash", None, "FRONT · root"),
+            ]
+        )
     passwords_for_delivery: dict[str, str] = {}
     vault_changed = False
     admin_material_changed = False
@@ -1134,7 +1336,6 @@ def ensure_admin_account_material(
                 vault_document[automation_password_key] = password
                 admin_material_changed = True
 
-    hosts_document = load_yaml(hosts_path)
     changed = vault_changed
     transition_required = admin_material_changed or not bool(
         all_vars.get("security_manage_admin_account", False)
@@ -1161,8 +1362,7 @@ def ensure_admin_account_material(
             all_vars[key] = value
             changed = True
 
-    children = hosts_document.get("all", {}).get("children", {})
-    host_mappings = (
+    host_mappings: list[tuple[object, str, str]] = [
         (
             children.get("entry", {}).get("hosts", {}),
             "{{ vault_entry_kalimera_password_hash }}",
@@ -1173,10 +1373,18 @@ def ensure_admin_account_material(
             "{{ vault_exit_kalimera_password_hash }}",
             "{{ vault_exit_root_password_hash }}",
         ),
-    )
+    ]
+    if has_front:
+        host_mappings.append(
+            (
+                front_hosts,
+                "{{ vault_front_kalimera_password_hash }}",
+                "{{ vault_front_root_password_hash }}",
+            )
+        )
     for hosts, admin_hash, root_hash in host_mappings:
         if not isinstance(hosts, dict) or len(hosts) != 1:
-            fail("Для миграции учётных записей требуется один ENTRY и один EXIT")
+            fail("Для миграции учётных записей требуется по одному хосту каждой активной роли")
         values = next(iter(hosts.values()))
         if not isinstance(values, dict):
             fail("Некорректные host variables production inventory")
@@ -1239,7 +1447,11 @@ def remove_bootstrap_become_passwords(
     if not isinstance(document, dict):
         fail("Production Vault должен содержать словарь переменных")
     changed = False
-    for key in ("vault_entry_become_password", "vault_exit_become_password"):
+    for key in (
+        "vault_entry_become_password",
+        "vault_exit_become_password",
+        "vault_front_become_password",
+    ):
         if key in document:
             del document[key]
             changed = True
@@ -1924,21 +2136,22 @@ def remote_observed_ssh_source_ipv4(
 def verify_saved_inventory_access(hosts_document: dict) -> None:
     """Не запускать resume и cleanup через уже недоступную учётную запись."""
     inaccessible: list[str] = []
-    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
-        variables = hosts_document["all"]["children"][group]["hosts"][name]
-        if variables.get("ansible_connection") == "local":
-            continue
-        private_key = Path(str(variables["ansible_ssh_private_key_file"]))
-        if not ssh_connection_works(
-            str(variables["ansible_host"]),
-            str(variables["ansible_user"]),
-            int(variables["ansible_port"]),
-            private_key,
-        ):
-            inaccessible.append(
-                f"{name}: {variables['ansible_user']}@{variables['ansible_host']}:"
-                f"{variables['ansible_port']}"
-            )
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            private_key = Path(str(variables["ansible_ssh_private_key_file"]))
+            if not ssh_connection_works(
+                str(variables["ansible_host"]),
+                str(variables["ansible_user"]),
+                int(variables["ansible_port"]),
+                private_key,
+            ):
+                inaccessible.append(
+                    f"{name}: {variables['ansible_user']}@{variables['ansible_host']}:"
+                    f"{variables['ansible_port']}"
+                )
     if inaccessible:
         fail(
             "Сохранённый управляющий SSH-канал недоступен:\n  - "
@@ -1953,25 +2166,26 @@ def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> 
     """Актуализировать ``from=`` по уже проверенному управляющему SSH-сеансу."""
     changed = False
     observed_values: set[str] = set()
-    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
-        variables = hosts_document["all"]["children"][group]["hosts"][name]
-        if variables.get("ansible_connection") == "local":
-            continue
-        observed = remote_observed_ssh_source_ipv4(
-            str(variables["ansible_host"]),
-            str(variables["ansible_user"]),
-            int(variables["ansible_port"]),
-            Path(str(variables["ansible_ssh_private_key_file"])),
-        )
-        if not observed:
-            fail(
-                f"{name} не подтвердил исходный IPv4 проверенного SSH-сеанса. "
-                "Конфигурация не изменялась."
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            observed = remote_observed_ssh_source_ipv4(
+                str(variables["ansible_host"]),
+                str(variables["ansible_user"]),
+                int(variables["ansible_port"]),
+                Path(str(variables["ansible_ssh_private_key_file"])),
             )
-        observed_values.add(observed)
-        if variables.get("security_automation_source_ipv4") != observed:
-            variables["security_automation_source_ipv4"] = observed
-            changed = True
+            if not observed:
+                fail(
+                    f"{name} не подтвердил исходный IPv4 проверенного SSH-сеанса. "
+                    "Конфигурация не изменялась."
+                )
+            observed_values.add(observed)
+            if variables.get("security_automation_source_ipv4") != observed:
+                variables["security_automation_source_ipv4"] = observed
+                changed = True
     if changed:
         yaml_write(hosts_path, hosts_document)
         print(
@@ -1984,10 +2198,50 @@ def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> 
 
 def require_operator_ssh_confirmation() -> None:
     print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
-    print("Проверьте вход пользователем kalimera по вашему закрытому ключу на ENTRY и EXIT через новые SSH-порты.")
-    print("Не подтверждайте этап, пока оба независимых SSH-сеанса не открылись.")
-    if not prompt_bool("Вход kalimera по административному ключу проверен на обоих серверах", False):
+    print("Проверьте вход пользователем kalimera по вашему закрытому ключу на всех активных серверах через новые SSH-порты.")
+    print("Не подтверждайте этап, пока все независимые SSH-сеансы не открылись.")
+    if not prompt_bool("Вход kalimera по административному ключу проверен на всех серверах", False):
         fail("Установка безопасно остановлена: старые SSH-порты сохранены, Fail2Ban не включён")
+
+
+def show_front_deploy_state(production: Path) -> None:
+    """Показать оператору выбранную топологию FRONT до изменения серверов."""
+    hosts_path = production / "hosts.yml"
+    front_path = production / "group_vars" / "front.yml"
+    if not hosts_path.is_file():
+        return
+    hosts = load_yaml(hosts_path)
+    front_hosts = (
+        hosts.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    if not isinstance(front_hosts, dict) or not front_hosts:
+        ui_panel(
+            "FRONT И CDN",
+            [
+                "FRONT: не включён",
+                "CDN: не используется",
+                "Пользовательский VLESS: отсутствует",
+            ],
+            "yellow",
+        )
+        return
+    front_vars = load_yaml(front_path) if front_path.is_file() else {}
+    modes = front_vars.get("front_access_modes", ["direct"])
+    mode_text = ", ".join(str(mode) for mode in modes)
+    cdn_state = str(front_vars.get("front_cdn_state", "not_configured"))
+    ui_panel(
+        "FRONT И CDN",
+        [
+            f"FRONT: включён ({front_vars.get('front_active_id', 'front-1')})",
+            f"Режимы доступа: {mode_text}",
+            f"CDN: {cdn_state}",
+            "VLESS: только через FRONT; прямой inbound ENTRY отключён",
+        ],
+        "cyan",
+    )
 
 
 def show_deployment_summary(production: Path) -> None:
@@ -1995,9 +2249,12 @@ def show_deployment_summary(production: Path) -> None:
     all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     entry_vars = load_yaml(production / "group_vars" / "entry.yml")
     exit_vars = load_yaml(production / "group_vars" / "exit.yml")
+    front_path = production / "group_vars" / "front.yml"
+    front_vars = load_yaml(front_path) if front_path.is_file() else {}
     children = hosts["all"]["children"]
     entry = children["entry"]["hosts"]["entry-managed"]
     exit_node = children["exit"]["hosts"]["exit-managed"]
+    front_nodes = children.get("front", {}).get("hosts", {})
     entry_public = str(entry_vars.get("entry_public_endpoint", entry["ansible_host"]))
     exit_public = str(exit_node["ansible_host"])
     proxy_enabled = bool(entry_vars.get("entry_ru_proxy_enabled", False))
@@ -2029,6 +2286,21 @@ def show_deployment_summary(production: Path) -> None:
             f"{entry_public}:{entry_vars.get('entry_awg0_listen_port')}/UDP",
         ),
     ]
+    if front_nodes:
+        front_name, front_node = next(iter(front_nodes.items()))
+        access_rows.append(
+            (
+                "SSH FRONT",
+                f"{admin_user}@{front_node['ansible_host']}:{front_node['ansible_port']}",
+            )
+        )
+        front_modes = ", ".join(front_vars.get("front_access_modes", ["direct"]))
+        access_rows.append(
+            (
+                "VLESS FRONT",
+                f"{front_modes}; CDN: {front_vars.get('front_cdn_state', 'not_configured')}",
+            )
+        )
     if entry_vars.get("entry_legacy_client_available", False):
         legacy_state = (
             "включён" if entry_vars.get("entry_legacy_client_enabled", False)
@@ -2069,6 +2341,13 @@ def show_deployment_summary(production: Path) -> None:
     architecture_rows: list[tuple[str, object]] = [
         ("Основной маршрут", "VPN-клиент → ENTRY → EXIT → Интернет"),
     ]
+    if front_nodes:
+        architecture_rows.append(
+            (
+                "VLESS-маршрут",
+                "клиент → FRONT → отдельный REALITY backend ENTRY → EXIT/RU",
+            )
+        )
     if proxy_enabled:
         architecture_rows.extend(
             [
@@ -2108,6 +2387,14 @@ def show_deployment_summary(production: Path) -> None:
         ),
         ("Fail2Ban", "включён после подтверждения нового SSH-доступа"),
     ]
+    if front_nodes:
+        front_node = next(iter(front_nodes.values()))
+        security_rows.append(
+            (
+                "UFW FRONT",
+                f"TCP/{front_node['ansible_port']} SSH; TCP/80 ACME; TCP/443 VLESS",
+            )
+        )
 
     mtu_rows: list[tuple[str, object]] = []
     if entry_vars.get("awg3_transit_enabled", False):
@@ -2182,7 +2469,7 @@ def show_deployment_summary(production: Path) -> None:
     ui_panel(
         "СЛЕДУЮЩИЕ ШАГИ",
         [
-            "1. Откройте новое SSH-соединение к обоим адресам из блока «ПОДКЛЮЧЕНИЯ».",
+            "1. Откройте новое SSH-соединение ко всем серверам из блока «ПОДКЛЮЧЕНИЯ».",
             "2. Безопасно перенесите первый файл клиента и импортируйте его в AmneziaWG.",
             "3. Проверьте handshake клиента и выполните awg-health --strict.",
             "Подсказки: kalimera-help · точный синтаксис: <команда> --help.",
@@ -2223,9 +2510,10 @@ def complete_ssh_transition(
     awg_package_lock: Path,
 ) -> bool:
     children = hosts_document["all"]["children"]
-    managed_hosts = (
-        ("entry", "entry-managed"),
-        ("exit", "exit-managed"),
+    managed_hosts = tuple(
+        (group, name)
+        for group in ("entry", "exit", "front")
+        for name in children.get(group, {}).get("hosts", {})
     )
     transitioning = []
     for group, name in managed_hosts:
@@ -2287,9 +2575,7 @@ def complete_ssh_transition(
             variables["ansible_become"] = True
             variables["ansible_become_method"] = "sudo"
             variables["ansible_become_password"] = (
-                "{{ vault_entry_kalimera_password }}"
-                if group == "entry"
-                else "{{ vault_exit_kalimera_password }}"
+                "{{ vault_" + group + "_kalimera_password }}"
             )
 
     require_operator_ssh_confirmation()
@@ -2383,7 +2669,7 @@ def main() -> None:
             fail("Не найден production inventory или внешний пароль Ansible Vault")
         ansible(repo, hosts_path, vault_password, "playbooks/terminal.yml")
         print(
-            "Терминальный интерфейс ENTRY и EXIT обновлён без изменения SSH, "
+            "Терминальный интерфейс всех активных серверов обновлён без изменения SSH, "
             "AWG, UFW, DNS и маршрутизации."
         )
         return
@@ -2396,6 +2682,9 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        if args.enable_front:
+            enable_front_profile(production, vault_password)
+        show_front_deploy_state(production)
         ensure_runtime_secret_material(production, vault_password)
         pending_account_passwords: dict[str, str] = {}
         ensure_admin_account_material(
@@ -2407,8 +2696,6 @@ def main() -> None:
         )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
-        if args.enable_front:
-            enable_front_profile(production, vault_password)
         if args.mobile_i1_mode:
             set_mobile_i1_mode(production, args.mobile_i1_mode)
         update_saved_client_configs_cps(state_root / "clients")
@@ -2433,7 +2720,8 @@ def main() -> None:
         if args.update_components:
             transitioning = [
                 variables
-                for group in ("entry", "exit")
+                for group in ("entry", "exit", "front")
+                if group in hosts_document["all"]["children"]
                 for variables in hosts_document["all"]["children"][group]["hosts"].values()
                 if variables.get("security_allow_ssh_port_change", False)
             ]
@@ -2560,14 +2848,26 @@ def main() -> None:
         require_public_endpoint(entry_host, "Адрес удалённого ENTRY сервера")
     require_public_endpoint(exit_host, "Адрес EXIT сервера")
 
+    front_enabled = prompt_bool(
+        "Добавить отдельный FRONT для VLESS-доступа", False
+    )
+    front_host = ""
+    if front_enabled:
+        front_host = prompt("IP-адрес или DNS-имя FRONT сервера")
+        require_public_endpoint(front_host, "Адрес FRONT сервера")
+
     entry_user = prompt("Пользователь SSH ENTRY сервера", "root")
     exit_user = prompt("Пользователь SSH EXIT сервера", "root")
+    front_user = prompt("Пользователь SSH FRONT сервера", "root") if front_enabled else ""
     if local_entry and entry_user != "root":
         fail("Локальная установка ENTRY сервера должна выполняться от root")
     entry_current_port = prompt_port(
         "Текущий SSH-порт ENTRY сервера", detect_local_ssh_port() if local_entry else 22
     )
     exit_current_port = prompt_port("Текущий SSH-порт EXIT сервера", 22)
+    front_current_port = (
+        prompt_port("Текущий SSH-порт FRONT сервера", 22) if front_enabled else 22
+    )
 
     ui_section(
         2,
@@ -2576,7 +2876,12 @@ def main() -> None:
     )
     entry_new_port = prompt_port("Новый управляемый SSH-порт ENTRY сервера", 56777)
     exit_new_port = prompt_port("Новый управляемый SSH-порт EXIT сервера", 56777)
-    if entry_new_port < 1024 or exit_new_port < 1024:
+    front_new_port = (
+        prompt_port("Новый управляемый SSH-порт FRONT сервера", 56777)
+        if front_enabled
+        else 56777
+    )
+    if min(entry_new_port, exit_new_port, front_new_port) < 1024:
         fail("Управляемые SSH-порты должны находиться в диапазоне 1024–65535")
     client_awg_port = prompt_port("UDP-порт AWG для VPN-клиентов ENTRY сервера", 443)
     transit_awg_port = prompt_port(
@@ -2615,7 +2920,16 @@ def main() -> None:
     if not local_entry:
         entry_password = getpass.getpass("Пароль SSH ENTRY сервера (ввод скрыт): ")
     exit_password = getpass.getpass("Пароль SSH EXIT сервера (ввод скрыт): ")
-    if (not local_entry and not entry_password) or not exit_password:
+    front_password = (
+        getpass.getpass("Пароль SSH FRONT сервера (ввод скрыт): ")
+        if front_enabled
+        else ""
+    )
+    if (
+        (not local_entry and not entry_password)
+        or not exit_password
+        or (front_enabled and not front_password)
+    ):
         fail("Начальные пароли SSH удалённых серверов не могут быть пустыми")
 
     print("Вставьте ПУБЛИЧНЫЙ ключ с вашего компьютера. Никогда не вставляйте закрытый ключ.")
@@ -2626,6 +2940,9 @@ def main() -> None:
     )
     exit_sudo = exit_user != "root" and prompt_bool(
         "Для sudo на EXIT сервере используется тот же пароль", True
+    )
+    front_sudo = front_enabled and front_user != "root" and prompt_bool(
+        "Для sudo на FRONT сервере используется тот же пароль", True
     )
 
     ui_section(
@@ -2662,7 +2979,7 @@ def main() -> None:
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
         expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто - определить автоматически", "")
 
-    reality_fallback_enabled = False
+    reality_fallback_enabled = front_enabled
     reality_fallback_dest = "yandex.ru"
     # yandex.ru первым - RU-правдоподобный, собственная инфраструктура
     # Yandex (не CDN), стабильно проходит preflight-проверку сертификата на
@@ -2676,43 +2993,85 @@ def main() -> None:
         "market.yandex.ru", "maps.yandex.ru", "music.yandex.ru",
         "dzen.ru", "tinkoff.ru",
     ]
-    if proxy_enabled:
+    front_origin_domain = ""
+    front_certbot_email = ""
+    front_access_modes: list[str] = []
+    front_cdn_state = "not_configured"
+    front_direct_domain = ""
+    front_cdn_domain = ""
+    if front_enabled:
         ui_panel(
-            "ЗАПАСНОЙ ТРАНСПОРТ VLESS+REALITY",
+            "FRONT И СЛУЖЕБНЫЙ REALITY BACKEND",
             [
-                "Опционально: маскирует ENTRY под настоящий HTTPS-сайт на случай,",
-                "если сам AmneziaWG заблокируют по фингерпринту UDP-хендшейка.",
-                "Требует уже включённый выше RU-прокси (используется как RU-ветка).",
+                "VLESS доступен только через отдельный FRONT.",
+                "Прямого пользовательского VLESS-inbound на ENTRY не будет.",
+                "RU-прокси и backend FRONT работают разными службами.",
             ],
             "cyan",
         )
-        reality_fallback_enabled = prompt_bool(
-            "Включить запасной транспорт VLESS+REALITY", False
+        front_origin_domain = prompt(
+            "Origin-домен FRONT (A-запись указывает на FRONT)"
         )
-        if reality_fallback_enabled:
-            print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
-            results = {host: probe_reality_dest(host) for host in reality_candidates}
-            ui_panel(
-                "КАНДИДАТЫ DEST-САЙТА REALITY",
-                [
-                    f"{index} · {host} [{'OK' if results[host] else 'FAIL'}]"
-                    for index, host in enumerate(reality_candidates, start=1)
-                ] + ["0 · указать свой домен"],
-                "cyan",
-            )
-            dest_choice = prompt("Номер кандидата или 0 для своего домена", "1")
-            if dest_choice == "0":
-                reality_fallback_dest = prompt("Домен маскировочного сайта (например www.example.com)")
-            elif dest_choice.isdigit() and 1 <= int(dest_choice) <= len(reality_candidates):
-                reality_fallback_dest = reality_candidates[int(dest_choice) - 1]
-            else:
-                fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
-            if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
+        if not _DOMAIN_RE.match(front_origin_domain or ""):
+            fail("Origin-домен FRONT должен быть корректным DNS-именем")
+        front_certbot_email = prompt("E-mail для Let's Encrypt/Certbot")
+        if not _EMAIL_RE.match(front_certbot_email or ""):
+            fail("Некорректный e-mail для Certbot")
+        ui_panel(
+            "РЕЖИМ ДОСТУПА FRONT",
+            [
+                "1 · прямой TLS+XHTTP через FRONT без CDN",
+                "2 · TLS+XHTTP только через готовый CDN",
+                "3 · прямой доступ и готовый CDN одновременно",
+            ],
+            "cyan",
+        )
+        front_choice = prompt("Выберите режим FRONT", "1")
+        front_mode_map = {
+            "1": ["direct"],
+            "2": ["cdn"],
+            "3": ["direct", "cdn"],
+        }
+        if front_choice not in front_mode_map:
+            fail("Выбран неподдерживаемый режим FRONT")
+        front_access_modes = front_mode_map[front_choice]
+        if "direct" in front_access_modes:
+            front_direct_domain = front_origin_domain
+            print(f"Домен прямого доступа FRONT: {front_origin_domain}")
+        if "cdn" in front_access_modes:
+            if not prompt_bool("CDN-ресурс уже создан и готов", False):
                 fail(
-                    f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 -"
-                    " выберите другой (та же проверка также выполняется во время deploy)"
+                    "Для чистой установки выберите direct, если CDN ещё не готов. "
+                    "CDN можно подключить отдельным обновлением inventory."
                 )
-            print(f"dest-сайт {reality_fallback_dest} проверен.")
+            front_cdn_domain = prompt("Публичный домен готового CDN-ресурса")
+            if not _DOMAIN_RE.match(front_cdn_domain or ""):
+                fail("Публичный домен CDN должен быть корректным")
+            front_cdn_state = "ready"
+
+        print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
+        results = {host: probe_reality_dest(host) for host in reality_candidates}
+        ui_panel(
+            "КАНДИДАТЫ DEST-САЙТА REALITY",
+            [
+                f"{index} · {host} [{'OK' if results[host] else 'FAIL'}]"
+                for index, host in enumerate(reality_candidates, start=1)
+            ] + ["0 · указать свой домен"],
+            "cyan",
+        )
+        dest_choice = prompt("Номер кандидата или 0 для своего домена", "1")
+        if dest_choice == "0":
+            reality_fallback_dest = prompt("Домен маскировочного сайта")
+        elif dest_choice.isdigit() and 1 <= int(dest_choice) <= len(reality_candidates):
+            reality_fallback_dest = reality_candidates[int(dest_choice) - 1]
+        else:
+            fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
+        if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
+            fail(
+                f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 - "
+                "выберите другой"
+            )
+        print(f"dest-сайт {reality_fallback_dest} проверен.")
 
     ui_section(
         5,
@@ -2834,6 +3193,11 @@ def main() -> None:
     require_public_endpoint(entry_public_endpoint, "AWG endpoint ENTRY сервера")
     entry_public_ipv4 = resolve_single_public_ipv4(
         entry_public_endpoint, "AWG endpoint ENTRY сервера"
+    )
+    front_public_ipv4 = (
+        resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
+        if front_enabled
+        else ""
     )
     ui_section(
         6,
@@ -2963,6 +3327,15 @@ def main() -> None:
         ssh_public,
         "EXIT сервер",
     )
+    if front_enabled:
+        front_password = bootstrap_key(
+            front_host,
+            front_user,
+            front_current_port,
+            front_password,
+            ssh_public,
+            "FRONT сервер",
+        )
 
     # Не полагаться на адрес локального интерфейса: при SNAT, floating IP или
     # сложной сети хостинга удалённый sshd может видеть другой source IPv4.
@@ -2978,6 +3351,19 @@ def main() -> None:
             "Ограничение служебного ключа не применяется, чтобы не потерять доступ."
         )
     exit_automation_source_ipv4 = exit_observed_source_ipv4
+    front_automation_source_ipv4 = ""
+    if front_enabled:
+        front_automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+            front_host,
+            front_user,
+            front_current_port,
+            ssh_private,
+        )
+        if not front_automation_source_ipv4:
+            fail(
+                "FRONT сервер не подтвердил исходный IPv4 управляющего SSH-сеанса. "
+                "Конфигурация не изменялась."
+            )
     if local_entry:
         entry_automation_source_ipv4 = entry_public_ipv4
     else:
@@ -2994,6 +3380,8 @@ def main() -> None:
             )
         entry_automation_source_ipv4 = entry_observed_source_ipv4
     observed_sources = {entry_automation_source_ipv4, exit_automation_source_ipv4}
+    if front_automation_source_ipv4:
+        observed_sources.add(front_automation_source_ipv4)
     print(
         "Фактический IPv4 управляющего SSH подтверждён серверами: "
         + ", ".join(sorted(observed_sources))
@@ -3004,9 +3392,11 @@ def main() -> None:
     all_vars_path = staging / "group_vars" / "all" / "main.yml"
     entry_vars_path = staging / "group_vars" / "entry.yml"
     exit_vars_path = staging / "group_vars" / "exit.yml"
+    front_vars_path = staging / "group_vars" / "front.yml"
     all_vars = load_yaml(all_vars_path)
     entry_vars = load_yaml(entry_vars_path)
     exit_vars = load_yaml(exit_vars_path)
+    front_vars: dict[str, object] = {}
     client_mode = (
         "legacy" if client_profile_name == "old"
         else "mobile" if client_profile_name == "mobile"
@@ -3036,6 +3426,13 @@ def main() -> None:
         "EXIT · kalimera": generate_account_password(),
         "EXIT · root": generate_account_password(),
     }
+    if front_enabled:
+        account_passwords.update(
+            {
+                "FRONT · kalimera": generate_account_password(),
+                "FRONT · root": generate_account_password(),
+            }
+        )
     account_password_hashes = {
         label: hash_account_password(password)
         for label, password in account_passwords.items()
@@ -3121,12 +3518,20 @@ def main() -> None:
             "entry_ru_proxy_expected_ip": expected_proxy_ip,
             "reality_fallback_enabled": reality_fallback_enabled,
             "reality_fallback_dest": reality_fallback_dest,
+            "front_enabled": front_enabled,
+            "front_relay_enabled": front_enabled,
+            "front_backend_enabled": front_enabled,
+            "reality_fallback_direct_client_enabled": False,
+            "front_public_ipv4": front_public_ipv4,
             "entry_dot_upstreams": dot_upstreams,
             "entry_dns_doh_server": doh_server,
             "entry_dns_doh_tls_name": doh_tls_name,
             "entry_dns_doh_path": doh_path,
             "runtime_secrets_share_index": 1,
-            "runtime_secrets_peer_inventory_hosts": "{{ groups['exit'] | default([]) }}",
+            "runtime_secrets_peer_inventory_hosts": (
+                "{{ ((groups['exit'] | default([])) + "
+                "(groups['front'] | default([]))) | list }}"
+            ),
             "runtime_secrets_advertise_ipv4": entry_public_ipv4,
         }
     )
@@ -3166,7 +3571,8 @@ def main() -> None:
             "runtime_secrets_share_index": 2,
             "runtime_secrets_peer_inventory_hosts": (
                 "{{ (groups['entry'] | default([])) + "
-                "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}"
+                "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) + "
+                "(groups['front'] | default([])) }}"
             ),
             "runtime_secrets_advertise_ipv4": exit_public_ipv4,
         }
@@ -3174,6 +3580,36 @@ def main() -> None:
     yaml_write(all_vars_path, all_vars)
     yaml_write(entry_vars_path, entry_vars)
     yaml_write(exit_vars_path, exit_vars)
+    if front_enabled:
+        front_vars.update(
+            {
+                "awg_node_role": "front",
+                "front_enabled": True,
+                "front_relay_enabled": True,
+                "front_active_id": "front-1",
+                "front_access_modes": front_access_modes,
+                "front_cdn_state": front_cdn_state,
+                "front_origin_domain": front_origin_domain,
+                "front_direct_domain": front_direct_domain,
+                "front_cdn_domain": front_cdn_domain,
+                "front_client_domain": (
+                    front_cdn_domain
+                    if front_access_modes == ["cdn"]
+                    else front_direct_domain
+                ),
+                "front_certbot_email": front_certbot_email,
+                "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+                "front_subscription_enabled": False,
+                "awg3_transit_enabled": False,
+                "runtime_secrets_share_index": 3,
+                "runtime_secrets_peer_inventory_hosts": (
+                    "{{ (groups['entry'] | default([])) + "
+                    "(groups['exit'] | default([])) }}"
+                ),
+                "runtime_secrets_advertise_ipv4": front_public_ipv4,
+            }
+        )
+        yaml_write(front_vars_path, front_vars)
 
     host_vars = {
         "entry-managed": {
@@ -3203,6 +3639,20 @@ def main() -> None:
             "runtime_secrets_share_index": 2,
         },
     }
+    if front_enabled:
+        host_vars["front-managed"] = {
+            "ansible_host": front_host,
+            "ansible_user": front_user,
+            "ansible_port": front_current_port,
+            "ansible_become": True,
+            "ansible_ssh_private_key_file": str(ssh_private),
+            "ssh_listen_port": front_new_port,
+            "security_allow_ssh_port_change": front_current_port != front_new_port,
+            "security_automation_source_ipv4": front_automation_source_ipv4,
+            "security_admin_password_hash": "{{ vault_front_kalimera_password_hash }}",
+            "security_root_password_hash": "{{ vault_front_root_password_hash }}",
+            "runtime_secrets_share_index": 3,
+        }
     if local_entry:
         host_vars["entry-managed"]["ansible_connection"] = "local"
         host_vars["entry-managed"]["ansible_python_interpreter"] = "/usr/bin/python3"
@@ -3210,6 +3660,8 @@ def main() -> None:
         host_vars["entry-managed"]["ansible_become_password"] = "{{ vault_entry_become_password }}"
     if exit_sudo:
         host_vars["exit-managed"]["ansible_become_password"] = "{{ vault_exit_become_password }}"
+    if front_sudo:
+        host_vars["front-managed"]["ansible_become_password"] = "{{ vault_front_become_password }}"
 
     hosts_document = {
         "all": {
@@ -3219,6 +3671,10 @@ def main() -> None:
             }
         }
     }
+    if front_enabled:
+        hosts_document["all"]["children"]["front"] = {
+            "hosts": {"front-managed": host_vars["front-managed"]}
+        }
     hosts_path = staging / "hosts.yml"
     yaml_write(hosts_path, hosts_document)
 
@@ -3236,6 +3692,8 @@ def main() -> None:
     )
     entry_exchange_private, entry_exchange_public = ssh_exchange_keypair()
     exit_exchange_private, exit_exchange_public = ssh_exchange_keypair()
+    if front_enabled:
+        front_exchange_private, front_exchange_public = ssh_exchange_keypair()
     vault_document: dict[str, object] = {
         "vault_entry_kalimera_password": account_passwords["ENTRY · kalimera"],
         "vault_entry_kalimera_password_hash": account_password_hashes["ENTRY · kalimera"],
@@ -3299,10 +3757,26 @@ def main() -> None:
             "exit-managed": exit_exchange_public,
         },
     }
+    if front_enabled:
+        vault_document.update(
+            {
+                "vault_front_kalimera_password": account_passwords["FRONT · kalimera"],
+                "vault_front_kalimera_password_hash": account_password_hashes["FRONT · kalimera"],
+                "vault_front_root_password_hash": account_password_hashes["FRONT · root"],
+            }
+        )
+        vault_document["vault_runtime_exchange_private_keys"][
+            "front-managed"
+        ] = front_exchange_private
+        vault_document["vault_runtime_exchange_public_keys"][
+            "front-managed"
+        ] = front_exchange_public
     if entry_sudo:
         vault_document["vault_entry_become_password"] = entry_password
     if exit_sudo:
         vault_document["vault_exit_become_password"] = exit_password
+    if front_sudo:
+        vault_document["vault_front_become_password"] = front_password
     if telegram_enabled:
         vault_document["vault_telegram_bot_token"] = telegram_token
         vault_document["vault_telegram_chat_id"] = telegram_chat
@@ -3376,6 +3850,8 @@ def main() -> None:
     cleanup_callback = lambda: cleanup_deployment(repo, hosts_path, vault_password)
     atexit.register(cleanup_callback)
 
+    show_front_deploy_state(production)
+
     ui_step(
         "ПРЕДВАРИТЕЛЬНЫЙ АУДИТ",
         "Проверяем Ubuntu, сеть и доступ без изменения конфигурации серверов.",
@@ -3421,29 +3897,36 @@ def main() -> None:
             "SSH root через 127.0.0.1 не используется."
         )
     check_ssh(exit_host, "kalimera", exit_new_port, ssh_private)
+    if front_enabled:
+        check_ssh(front_host, "kalimera", front_new_port, ssh_private)
     require_operator_ssh_confirmation()
 
     all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     all_vars["security_finalize_admin_access"] = True
     yaml_write(production / "group_vars" / "all" / "main.yml", all_vars)
 
-    for name, group, current, desired in (
+    transition_hosts = [
         ("entry-managed", "entry", entry_current_port, entry_new_port),
         ("exit-managed", "exit", exit_current_port, exit_new_port),
-    ):
+    ]
+    if front_enabled:
+        transition_hosts.append(
+            ("front-managed", "front", front_current_port, front_new_port)
+        )
+    for name, group, current, desired in transition_hosts:
         host_vars[name]["ansible_user"] = "kalimera"
         host_vars[name]["ansible_become"] = True
         host_vars[name]["ansible_become_method"] = "sudo"
         host_vars[name]["ansible_become_password"] = (
-            "{{ vault_entry_kalimera_password }}"
-            if group == "entry"
-            else "{{ vault_exit_kalimera_password }}"
+            "{{ vault_" + group + "_kalimera_password }}"
         )
         host_vars[name]["ansible_port"] = desired
         host_vars[name]["security_allow_ssh_port_change"] = False
         host_vars[name]["security_previous_ssh_port"] = current
     hosts_document["all"]["children"]["entry"]["hosts"]["entry-managed"] = host_vars["entry-managed"]
     hosts_document["all"]["children"]["exit"]["hosts"]["exit-managed"] = host_vars["exit-managed"]
+    if front_enabled:
+        hosts_document["all"]["children"]["front"]["hosts"]["front-managed"] = host_vars["front-managed"]
     yaml_write(hosts_path, hosts_document)
     remove_bootstrap_become_passwords(production, vault_password)
 
@@ -3473,7 +3956,7 @@ def main() -> None:
     cleanup_deployment(repo, hosts_path, vault_password)
     atexit.unregister(cleanup_callback)
 
-    ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")
+    ui_success("Все активные серверы настроены, проверены и готовы к работе.")
     show_deployment_summary(production)
     show_generated_account_passwords(account_passwords)
     mark_account_passwords_delivered(production)

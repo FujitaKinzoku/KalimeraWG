@@ -42,10 +42,15 @@
             mode: "0600"
 
         - name: Распаковка релиза Xray-core
-          ansible.builtin.unarchive:
-            src: "{{ front_test_root }}/xray.zip"
-            dest: "{{ front_test_root }}"
-            remote_src: true
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - zipfile
+              - -e
+              - "{{ front_test_root }}/xray.zip"
+              - "{{ front_test_root }}"
+          changed_when: false
 
         - name: Права на исполнение бинарника Xray-core
           ansible.builtin.file:
@@ -133,13 +138,8 @@
             label: "{{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }}"
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
-        # приходят из set_fact выше (тестовые значения), не отсюда - задавать
-        # их здесь через vars: бессмысленно, include_vars/set_fact в этом
-        # плейбуке имеют более высокий приоритет, чем vars: отдельной задачи.
-        # front_subscription_enabled: true проверяет новый location - nginx -t
-        # проверяет только синтаксис, физическое существование файла из
-        # alias ему не требуется.
-        - name: Рендер тестовой конфигурации Nginx FRONT (с TLS-блоком и подпиской)
+        # приходят из set_fact выше. Подписка намеренно отсутствует в модели.
+        - name: Рендер тестовой конфигурации Nginx FRONT с TLS-блоком
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/front/templates/nginx-front.conf.j2"
             dest: "{{ front_test_root }}/nginx-front.conf"
@@ -148,11 +148,7 @@
             front_cert_present: true
             front_xhttp_listen_port: 8080
             front_xhttp_path: /api/stream
-            front_subscription_enabled: true
-            front_subscription_path: /api/v1/sub
-            front_subscription_file_path: "{{ front_test_root }}/subscription.b64"
-            front_subscription_title: Kalimera-FRONT
-            front_subscription_update_interval_hours: 24
+            front_subscription_enabled: false
 
         - name: Генерация одноразового самоподписанного сертификата для проверки синтаксиса
           ansible.builtin.command:
@@ -188,30 +184,36 @@
               }
             mode: "0644"
 
+        - name: Проверка наличия Nginx в окружении
+          ansible.builtin.stat:
+            path: /usr/sbin/nginx
+          register: front_test_nginx_binary
+
         - name: Проверка синтаксиса Nginx, если бинарник доступен в CI
           ansible.builtin.command:
             argv:
-              - nginx
+              - /usr/sbin/nginx
               - -t
               - -c
               - "{{ front_test_root }}/nginx-wrapper.conf"
           register: front_test_nginx_syntax
           changed_when: false
-          failed_when: false
+          when: front_test_nginx_binary.stat.executable | default(false)
 
         - name: Отчёт о проверке синтаксиса Nginx
           ansible.builtin.debug:
             msg: >-
               {{ 'nginx недоступен в этом окружении - синтаксис не проверен'
-                 if front_test_nginx_syntax.rc is undefined or front_test_nginx_syntax.rc == 127
+                 if not (front_test_nginx_binary.stat.executable | default(false))
                  else front_test_nginx_syntax.stderr }}
 
         - name: Проверка отсутствия синтаксических ошибок Nginx (если бинарник был доступен)
           ansible.builtin.assert:
             quiet: true
             that:
-              - front_test_nginx_syntax.rc is undefined or front_test_nginx_syntax.rc in [0, 127]
+              - front_test_nginx_syntax.rc == 0
             fail_msg: "roles/front/templates/nginx-front.conf.j2 рендерит невалидный конфиг Nginx"
+          when: front_test_nginx_binary.stat.executable | default(false)
 
       always:
         - name: Удаление изолированного каталога проверки FRONT

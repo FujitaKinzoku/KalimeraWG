@@ -19,6 +19,16 @@ CONFIG = {
     "role": {{ awg_node_role | default('front') | to_json }},
     "entry_host": {{ terminal_summary_entry_host | to_json }},
     "exit_host": {{ terminal_summary_exit_host | to_json }},
+    "front_present": {{ 'True' if terminal_summary_front_present | bool else 'False' }},
+    "front_host": {{ terminal_summary_front_host | to_json }},
+    "front_user": {{ terminal_summary_front_user | to_json }},
+    "front_ssh_port": {{ terminal_summary_front_ssh_port | int | to_json }},
+    "front_origin_domain": {{ terminal_summary_front_origin_domain | to_json }},
+    "front_direct_enabled": {{ 'True' if terminal_summary_front_direct_enabled | bool else 'False' }},
+    "front_cdn_enabled": {{ 'True' if terminal_summary_front_cdn_enabled | bool else 'False' }},
+    "front_cdn_state": {{ terminal_summary_front_cdn_state | to_json }},
+    "front_cdn_domain": {{ terminal_summary_front_cdn_domain | to_json }},
+    "front_backend_port": {{ terminal_summary_front_backend_port | int | to_json }},
     "entry_user": {{ terminal_summary_entry_user | to_json }},
     "exit_user": {{ terminal_summary_exit_user | to_json }},
     "entry_ssh_port": {{ terminal_summary_entry_ssh_port | int | to_json }},
@@ -302,6 +312,7 @@ def command_panels() -> None:
         "СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ",
         [
             ("kalimera-status", "текущие подключения, DNS, MTU и защита", "INFO"),
+            ("kalimera-test", "полная проверка с учётом роли текущего сервера", "INFO"),
             ("awg-health --strict", "строгая проверка AWG, маршрутов, DNS и UFW", "INFO"),
             ("server-audit", "AWG, диск, systemd, UFW и Fail2Ban", "INFO"),
             ("maintenance", "проверка обновлений и восстановление готовности DKMS", "INFO"),
@@ -377,6 +388,58 @@ def main() -> int:
         ],
     )
 
+    in_boot_grace = boot_uptime() < BOOT_GRACE_SECONDS
+    if CONFIG["role"] == "front":
+        direct_text = (
+            f"{CONFIG['front_origin_domain']}:443/TCP"
+            if CONFIG["front_direct_enabled"]
+            else "не включён"
+        )
+        cdn_text = (
+            f"{CONFIG['front_cdn_domain']}:443/TCP; состояние {CONFIG['front_cdn_state']}"
+            if CONFIG["front_cdn_enabled"]
+            else "не используется"
+        )
+        panel(
+            "ПОДКЛЮЧЕНИЯ FRONT",
+            [
+                ("SSH FRONT", f"{CONFIG['front_user']}@{CONFIG['front_host']}:{CONFIG['front_ssh_port']}", "INFO"),
+                ("Прямой вход", direct_text, "OK" if CONFIG["front_direct_enabled"] else "INFO"),
+                ("Вход через CDN", cdn_text, "OK" if CONFIG["front_cdn_enabled"] else "INFO"),
+                ("Backend ENTRY", f"{CONFIG['entry_host']}:{CONFIG['front_backend_port']}/TCP · VLESS REALITY", "INFO"),
+            ],
+        )
+        panel(
+            "СХЕМА FRONT",
+            [
+                ("Клиент", "VLESS XHTTP с TLS → FRONT", "INFO"),
+                ("Внутренний канал", "FRONT → отдельный VLESS REALITY backend ENTRY", "INFO"),
+                ("Основной маршрут", "ENTRY → EXIT → Интернет", "INFO"),
+                ("RU-маршрут", "ENTRY → SOCKS5/TUN или fail-open → Интернет", "INFO"),
+            ],
+        )
+
+        ufw_active = run(["ufw", "status"], timeout=4)
+        ufw_ok = ufw_active is not None and "Status: active" in ufw_active.stdout
+        fail2ban_ok = service_active("fail2ban.service")
+        ssh_ok = ssh_key_only()
+        no_logs_ok = no_logs_baseline()
+        audit_level, audit_text = audit_state(in_boot_grace)
+        panel(
+            "ЗАЩИТА FRONT",
+            [
+                ("UFW FRONT", f"TCP/{CONFIG['front_ssh_port']} SSH; TCP/80 ACME; TCP/443 VLESS", "INFO"),
+                ("Локальный UFW", "активен" if ufw_ok else "неактивен или недоступен", "OK" if ufw_ok else "FAIL"),
+                ("Доступ SSH", "только по публичному ключу" if ssh_ok else "политика key-only не подтверждена", "OK" if ssh_ok else "WARN"),
+                ("Fail2Ban", "активен" if fail2ban_ok else "неактивен", "OK" if fail2ban_ok else "FAIL"),
+                ("No-logs", "активность не сохраняется на диск" if no_logs_ok else "политика не подтверждена", "OK" if no_logs_ok else "FAIL"),
+                ("Полная проверка", audit_text, audit_level),
+            ],
+        )
+        if with_commands:
+            command_panels()
+        return 0
+
     old_active = service_active(f"awg-quick@{CONFIG['legacy_interface']}.service")
     mobile_active = service_active(f"awg-quick@{CONFIG['mobile_interface']}.service")
     if CONFIG["role"] == "entry":
@@ -402,7 +465,6 @@ def main() -> int:
         if CONFIG["role"] == "entry"
         else CONFIG["exit_transit_interface"]
     )
-    in_boot_grace = boot_uptime() < BOOT_GRACE_SECONDS
     transit_ready = wait_for_transit_startup(local_transit, in_boot_grace)
     transit_active = interface_mtu(local_transit) is not None
     if transit_ready:
