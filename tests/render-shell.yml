@@ -319,6 +319,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "72"
           register: rendered_kalimera_status
           changed_when: false
           failed_when: >-
@@ -330,6 +331,16 @@
             'No-logs' not in rendered_kalimera_status.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status.stdout or
             'VPN-КЛИЕНТЫ' not in rendered_kalimera_status.stdout
+
+        - name: Проверка геометрии таблиц ENTRY в узком терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status.stdout_lines | length > 0
+              - rendered_kalimera_status.stdout_lines | map('length') | min == 70
+              - rendered_kalimera_status.stdout_lines | map('length') | max == 70
+            fail_msg: >-
+              Рамки ENTRY имеют разную ширину или выходят за пределы
+              терминала шириной 72 колонки.
 
         - name: Проверка синтаксиса программы возможностей SOCKS5
           ansible.builtin.command:
@@ -443,6 +454,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "90"
           register: rendered_kalimera_status_exit
           changed_when: false
           failed_when: >-
@@ -453,6 +465,16 @@
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status_exit.stdout or
             'БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_exit.stdout
+
+        - name: Проверка геометрии таблиц EXIT в обычном терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status_exit.stdout_lines | length > 0
+              - rendered_kalimera_status_exit.stdout_lines | map('length') | min == 88
+              - rendered_kalimera_status_exit.stdout_lines | map('length') | max == 88
+            fail_msg: >-
+              Рамки EXIT имеют разную ширину или выходят за пределы
+              терминала шириной 90 колонок.
 
         - name: Формирование health-программы EXIT
           ansible.builtin.template:
@@ -495,6 +517,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "120"
           register: rendered_kalimera_status_front
           changed_when: false
           failed_when: >-
@@ -504,6 +527,16 @@
             'ЗАЩИТА FRONT' not in rendered_kalimera_status_front.stdout or
             'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' in rendered_kalimera_status_front.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_front.stdout
+
+        - name: Проверка геометрии таблиц FRONT в широком терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status_front.stdout_lines | length > 0
+              - rendered_kalimera_status_front.stdout_lines | map('length') | min == 118
+              - rendered_kalimera_status_front.stdout_lines | map('length') | max == 118
+            fail_msg: >-
+              Рамки FRONT имеют разную ширину или выходят за пределы
+              терминала шириной 120 колонок.
 
         - name: Формирование health-программы FRONT
           ansible.builtin.template:
