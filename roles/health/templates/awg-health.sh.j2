@@ -343,7 +343,7 @@ check 'UFW не разрешает межсерверный AWG для всех 
     {{ security_interserver_peer_ipv4 | quote }} \
     {{ security_interserver_listen_port | quote }}
 {% endif %}
-{% if awg_enable_fail2ban | bool %}
+{% if awg_enable_fail2ban | default(true) | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
 check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
 check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile

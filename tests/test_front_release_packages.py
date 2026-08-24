@@ -161,6 +161,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
             "security_admin_command_path | default('/usr/local/libexec/kalimera-admin-command')",
             health,
         )
+        self.assertIn("awg_enable_fail2ban | default(true) | bool", health)
 
     def test_front_ufw_is_only_managed_by_security_role(self) -> None:
         front_tasks = (ROOT / "roles/front/tasks/main.yml").read_text(

@@ -511,6 +511,14 @@
             dest: "{{ rendered_shell_root }}/awg-health-front"
             mode: "0700"
 
+        - name: Проверка автономного формирования health FRONT без defaults common
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-front-standalone"
+            mode: "0700"
+          vars:
+            awg_enable_fail2ban: "{{ undef(hint='defaults роли common намеренно недоступны') }}"
+
         - name: Формирование полной проверки роли FRONT
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
@@ -569,6 +577,7 @@
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/awg-health-front"
+              - "{{ rendered_shell_root }}/awg-health-front-standalone"
               - "{{ rendered_shell_root }}/kalimera-help"
               - "{{ rendered_shell_root }}/kalimera-test"
               - "{{ rendered_shell_root }}/kalimera-test-exit"
