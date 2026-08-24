@@ -257,6 +257,7 @@ def migrate_production_inventory(production: Path) -> bool:
             "front_enabled": True,
             "front_relay_enabled": True,
             "front_active_id": str(front_vars.get("front_active_id", "front-1")),
+            "front_replacement_state": "active",
             "front_access_modes": access_modes,
             "front_cdn_state": "ready" if cdn_ready else "not_configured",
             "front_direct_domain": str(
@@ -266,6 +267,8 @@ def migrate_production_inventory(production: Path) -> bool:
                 front_vars.get("front_cdn_domain", client_domain if cdn_ready else "")
             ),
             "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
             "awg3_transit_enabled": False,
         }
         front_changed = False
@@ -277,6 +280,8 @@ def migrate_production_inventory(production: Path) -> bool:
             "front_enabled": True,
             "front_relay_enabled": True,
             "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
             "awg3_transit_enabled": False,
         }.items():
             if front_vars.get(key) != value:
@@ -640,6 +645,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         "front_enabled": True,
         "front_relay_enabled": True,
         "front_active_id": "front-1",
+        "front_replacement_state": "active",
         "front_access_modes": front_access_modes,
         "front_cdn_state": front_cdn_state,
         "front_direct_domain": front_direct_domain,
@@ -648,6 +654,8 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
             front_cdn_domain if front_access_modes == ["cdn"] else front_direct_domain
         ),
         "front_subscription_enabled": False,
+        "front_vless_encryption_enabled": True,
+        "front_xhttp_disguise_enabled": True,
         "awg3_transit_enabled": False,
         # Дефолт роли ("/api/stream") - общеизвестный путь и лёгкий
         # fingerprint; путь генерируется здесь, потому что он должен быть
@@ -722,6 +730,302 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         f"({front_origin_domain}); он будет применён текущим deploy."
     )
     return True
+
+
+def _front_replacement_state_root() -> Path:
+    return Path.home() / ".local" / "share" / "awg-iac" / "production" / "front-replacement"
+
+
+def _read_front_users_over_ssh(host_vars: dict[str, object]) -> dict[str, object]:
+    host = str(host_vars.get("ansible_host", ""))
+    user = str(host_vars.get("ansible_user", "kalimera"))
+    port = int(host_vars.get("ansible_port", 22))
+    identity = str(
+        host_vars.get(
+            "ansible_ssh_private_key_file",
+            Path.home() / ".ssh" / "awg-iac-production",
+        )
+    )
+    result = subprocess.run(
+        [
+            require_command("ssh"),
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=15",
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=yes",
+            "-i", identity,
+            "-p", str(port),
+            f"{user}@{host}",
+            "sudo -n /usr/local/libexec/kalimera-admin-command vless-user backup",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(
+            "Не удалось получить зашифрованный реестр пользователей со старого "
+            "FRONT. Замена остановлена до изменения inventory."
+        )
+    try:
+        state = json.loads(result.stdout)
+    except ValueError:
+        fail("Старый FRONT вернул некорректный реестр VLESS-пользователей")
+    if (
+        not isinstance(state, dict)
+        or state.get("schema") != 1
+        or not isinstance(state.get("users"), list)
+        or not state["users"]
+    ):
+        fail("Реестр VLESS-пользователей старого FRONT не прошёл проверку")
+    return state
+
+
+def prepare_front_replacement(production: Path, vault_password: Path) -> bool:
+    """Подготовить новый FRONT, сохранив рабочий CDN-путь до commit."""
+    hosts_path = production / "hosts.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not all(path.is_file() for path in (hosts_path, entry_path, front_path, vault_path)):
+        fail("Для замены FRONT нужен полный production inventory")
+
+    hosts_document = load_yaml(hosts_path)
+    front_hosts = (
+        hosts_document.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    if not isinstance(front_hosts, dict) or len(front_hosts) != 1:
+        fail("Безопасная замена требует ровно один действующий FRONT")
+    front_vars = load_yaml(front_path)
+    if front_vars.get("front_replacement_state", "active") != "active":
+        fail("Замена FRONT уже подготовлена; используйте commit или rollback")
+
+    old_name, old_host_vars = next(iter(front_hosts.items()))
+    if not isinstance(old_host_vars, dict):
+        fail("Некорректные параметры действующего FRONT")
+    old_public_ipv4 = resolve_single_public_ipv4(
+        str(old_host_vars.get("ansible_host", "")), "Адрес действующего FRONT"
+    )
+    users_state = _read_front_users_over_ssh(old_host_vars)
+
+    ui_panel(
+        "БЕЗОПАСНАЯ ЗАМЕНА FRONT",
+        [
+            "Старый FRONT и его UFW-доступ сохраняются до отдельного commit.",
+            "Домен CDN, XHTTP path, UUID пользователей и backend ENTRY не меняются.",
+            "Для нового FRONT нужен новый origin-домен с готовой A-записью.",
+        ],
+        "cyan",
+    )
+    new_host = prompt("IP-адрес или DNS-имя нового FRONT")
+    require_public_endpoint(new_host, "Адрес нового FRONT")
+    new_public_ipv4 = resolve_single_public_ipv4(new_host, "Адрес нового FRONT")
+    if new_public_ipv4 == old_public_ipv4:
+        fail("Новый FRONT должен иметь другой публичный IPv4")
+    new_user = prompt("Пользователь SSH нового FRONT", "root")
+    new_port = prompt_port("Текущий SSH-порт нового FRONT", 22)
+    managed_port = prompt_port(
+        "Новый управляемый SSH-порт нового FRONT",
+        int(old_host_vars.get("ssh_listen_port", 56777)),
+    )
+    if managed_port < 1024:
+        fail("Управляемый SSH-порт FRONT должен быть не ниже 1024")
+    password = getpass.getpass("Пароль SSH нового FRONT (ввод скрыт): ")
+    if not password:
+        fail("Начальный пароль нового FRONT не может быть пустым")
+    new_origin = prompt("Новый origin-домен (A-запись уже указывает на новый FRONT)")
+    if not _DOMAIN_RE.match(new_origin or ""):
+        fail("Origin-домен нового FRONT должен быть корректным DNS-именем")
+    certbot_email = prompt(
+        "E-mail Certbot",
+        str(front_vars.get("front_certbot_email", "")),
+    )
+    if not _EMAIL_RE.match(certbot_email or ""):
+        fail("Некорректный e-mail для Certbot")
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    password = bootstrap_key(
+        new_host, new_user, new_port, password, ssh_public, "Новый FRONT сервер"
+    )
+    source_ipv4 = remote_observed_ssh_source_ipv4(
+        new_host, new_user, new_port, ssh_private
+    )
+    if not source_ipv4:
+        fail("Новый FRONT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+
+    backup_root = _front_replacement_state_root()
+    backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup_dir = backup_root / secrets.token_hex(8)
+    backup_dir.mkdir(mode=0o700)
+    for source in (hosts_path, entry_path, front_path, vault_path):
+        target = backup_dir / source.name
+        secure_write(target, source.read_bytes())
+    secure_write(
+        backup_root / "current.json",
+        json.dumps({"backup": str(backup_dir)}, ensure_ascii=False).encode("utf-8"),
+    )
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось открыть Vault для замены FRONT: {type(error).__name__}")
+    if not isinstance(vault_document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    vault_document["vault_front_vless_users"] = users_state
+    if new_user != "root":
+        vault_document["vault_front_become_password"] = password
+    encrypted = vault_lib.encrypt(
+        yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
+    )
+    temporary_vault = vault_path.with_name(
+        f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        secure_write(temporary_vault, encrypted)
+        os.replace(temporary_vault, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary_vault.unlink(missing_ok=True)
+
+    entry_vars = load_yaml(entry_path)
+    entry_vars.update(
+        {
+            "front_public_ipv4": new_public_ipv4,
+            "front_previous_public_ipv4": old_public_ipv4,
+            "front_replacement_state": "prepared",
+        }
+    )
+    yaml_write(entry_path, entry_vars)
+
+    modes = front_vars.get("front_access_modes", ["direct"])
+    front_vars.update(
+        {
+            "front_active_id": f"front-{secrets.token_hex(3)}",
+            "front_replacement_state": "prepared",
+            "front_previous_public_ipv4": old_public_ipv4,
+            "front_previous_origin_domain": front_vars.get("front_origin_domain", ""),
+            "front_origin_domain": new_origin,
+            "front_direct_domain": new_origin,
+            "front_client_domain": (
+                str(front_vars.get("front_cdn_domain", ""))
+                if modes == ["cdn"]
+                else new_origin
+            ),
+            "front_certbot_email": certbot_email,
+        }
+    )
+    yaml_write(front_path, front_vars)
+
+    replacement_host_vars: dict[str, object] = {
+        "ansible_host": new_host,
+        "ansible_user": new_user,
+        "ansible_port": new_port,
+        "ansible_become": True,
+        "ansible_ssh_private_key_file": str(ssh_private),
+        "ssh_listen_port": managed_port,
+        "security_allow_ssh_port_change": new_port != managed_port,
+        "security_automation_source_ipv4": source_ipv4,
+    }
+    if new_user != "root":
+        replacement_host_vars["ansible_become_password"] = "{{ vault_front_become_password }}"
+    hosts_document["all"]["children"]["front"]["hosts"] = {
+        old_name: replacement_host_vars
+    }
+    yaml_write(hosts_path, hosts_document)
+    print(
+        "Новый FRONT подготовлен в inventory. Старый FRONT останется разрешён "
+        "на ENTRY до --commit-front-replacement."
+    )
+    return True
+
+
+def rollback_front_replacement(production: Path) -> bool:
+    marker = _front_replacement_state_root() / "current.json"
+    if not marker.is_file():
+        fail("Резервная копия незавершённой замены FRONT не найдена")
+    try:
+        backup_dir = Path(json.loads(marker.read_text(encoding="utf-8"))["backup"])
+    except (OSError, ValueError, KeyError):
+        fail("Повреждён маркер резервной копии FRONT")
+    mapping = {
+        "hosts.yml": production / "hosts.yml",
+        "entry.yml": production / "group_vars" / "entry.yml",
+        "front.yml": production / "group_vars" / "front.yml",
+        "vault.yml": production / "group_vars" / "all" / "vault.yml",
+    }
+    for name, target in mapping.items():
+        source = backup_dir / name
+        if not source.is_file():
+            fail("Резервная копия FRONT неполна")
+        secure_write(target, source.read_bytes())
+    print(
+        "Inventory прежнего FRONT восстановлен; deploy повторно применит его "
+        "состояние. Маркер отката будет удалён только после успешной проверки."
+    )
+    return True
+
+
+def commit_front_replacement(production: Path) -> None:
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    entry_vars = load_yaml(entry_path)
+    front_vars = load_yaml(front_path)
+    if front_vars.get("front_replacement_state") != "prepared":
+        fail("Подготовленная замена FRONT не найдена")
+    if not prompt_bool(
+        "Новая VLESS-сессия через новый FRONT успешно проверена",
+        False,
+    ):
+        fail("Commit отменён; старый FRONT остаётся разрешён на ENTRY")
+    if "cdn" in front_vars.get("front_access_modes", []):
+        if not prompt_bool(
+            "CDN origin переключён на новый FRONT и клиентская сессия проверена",
+            False,
+        ):
+            fail("Commit отменён; старый FRONT остаётся разрешён на ENTRY")
+    previous = str(entry_vars.get("front_previous_public_ipv4", ""))
+    entry_vars["front_replacement_state"] = "active"
+    front_vars["front_replacement_state"] = "active"
+    yaml_write(entry_path, entry_vars)
+    yaml_write(front_path, front_vars)
+    # Старый адрес пока сохраняется в inventory, чтобы роль security могла
+    # удалить точное временное правило UFW. После успешного deploy поля будут
+    # удалены окончательно.
+    if not previous:
+        fail("В inventory отсутствует IPv4 прежнего FRONT")
+
+
+def finish_front_replacement(production: Path) -> None:
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    entry_vars = load_yaml(entry_path)
+    front_vars = load_yaml(front_path)
+    previous_ipv4 = str(entry_vars.get("front_previous_public_ipv4", "")).strip()
+    previous_origin = str(front_vars.get("front_previous_origin_domain", "")).strip()
+    for document in (entry_vars, front_vars):
+        document.pop("front_previous_public_ipv4", None)
+        document.pop("front_previous_origin_domain", None)
+    yaml_write(entry_path, entry_vars)
+    yaml_write(front_path, front_vars)
+    marker = _front_replacement_state_root() / "current.json"
+    marker.unlink(missing_ok=True)
+    print("Замена FRONT подтверждена; временный доступ прежнего FRONT удалён.")
+    if previous_ipv4:
+        previous_label = previous_ipv4
+        if previous_origin:
+            previous_label = f"{previous_origin} ({previous_ipv4})"
+        print(
+            f"Старый FRONT {previous_label} больше не входит в каскад. "
+            "Выключите или переустановите его после контрольной проверки нового FRONT."
+        )
 
 
 def prompt(label: str, default: str | None = None) -> str:
@@ -950,6 +1254,19 @@ def cleanup_deployment(repo: Path, hosts: Path, vault_password: Path) -> None:
     ansible_playbook = shutil.which("ansible-playbook")
     if not ansible_playbook or not hosts.is_file() or not vault_password.is_file():
         return
+    try:
+        hosts_document = load_yaml(hosts)
+        all_vars_path = hosts.parent / "group_vars" / "all" / "main.yml"
+        all_vars = load_yaml(all_vars_path) if all_vars_path.is_file() else {}
+        recover_saved_admin_access(
+            hosts_document,
+            hosts,
+            str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
+        )
+    except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError):
+        # Cleanup остаётся best-effort даже для частично записанного inventory.
+        pass
     try:
         subprocess.run(
             [
@@ -2162,6 +2479,78 @@ def verify_saved_inventory_access(hosts_document: dict) -> None:
         )
 
 
+def recover_saved_admin_access(
+    hosts_document: dict,
+    hosts_path: Path,
+    admin_user: str = "kalimera",
+    root_login_finalized: bool = False,
+) -> list[str]:
+    """Исправить inventory, если root уже закрыт, а kalimera доступен.
+
+    Финальная SSH-политика может успеть примениться непосредственно перед
+    прерыванием deploy. Тогда новый сеанс root уже запрещён, хотя inventory
+    ещё содержит промежуточного пользователя root. Менять канал можно только
+    после отдельной успешной проверки того же ключа как ``kalimera``.
+    """
+    recovered: list[str] = []
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            private_key_value = variables.get("ansible_ssh_private_key_file")
+            host_value = variables.get("ansible_host")
+            port_value = variables.get("ansible_port")
+            if not private_key_value or not host_value or port_value is None:
+                continue
+            private_key = Path(str(private_key_value))
+            host = str(host_value)
+            current_user = str(variables.get("ansible_user", admin_user))
+            current_port = int(port_value)
+            current_login_expected = not (
+                root_login_finalized and current_user == "root"
+            )
+            if current_login_expected and ssh_connection_works(
+                host, current_user, current_port, private_key
+            ):
+                continue
+
+            candidate_ports = [current_port]
+            managed_port = int(variables.get("ssh_listen_port", current_port))
+            if managed_port not in candidate_ports:
+                candidate_ports.append(managed_port)
+            recovered_port = next(
+                (
+                    port
+                    for port in candidate_ports
+                    if ssh_connection_works(host, admin_user, port, private_key)
+                ),
+                None,
+            )
+            if recovered_port is None:
+                continue
+
+            variables["ansible_user"] = admin_user
+            variables["ansible_port"] = recovered_port
+            variables["ansible_become"] = True
+            variables["ansible_become_method"] = "sudo"
+            variables["ansible_become_password"] = (
+                "{{ vault_" + group + "_kalimera_password }}"
+            )
+            if recovered_port != current_port:
+                variables["security_previous_ssh_port"] = current_port
+                variables["security_allow_ssh_port_change"] = False
+            recovered.append(name)
+
+    if recovered:
+        yaml_write(hosts_path, hosts_document)
+        print(
+            "Production inventory восстановлен через подтверждённый SSH-доступ "
+            f"{admin_user}: " + ", ".join(recovered) + "."
+        )
+    return recovered
+
+
 def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> bool:
     """Актуализировать ``from=`` по уже проверенному управляющему SSH-сеансу."""
     changed = False
@@ -2624,6 +3013,21 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--replace-front",
+        action="store_true",
+        help="при --resume подготовить новый FRONT без отключения прежнего",
+    )
+    parser.add_argument(
+        "--commit-front-replacement",
+        action="store_true",
+        help="подтвердить проверенный новый FRONT и удалить доступ прежнего",
+    )
+    parser.add_argument(
+        "--rollback-front-replacement",
+        action="store_true",
+        help="восстановить inventory прежнего FRONT из защищённой копии",
+    )
+    parser.add_argument(
         "--update-components",
         action="store_true",
         help=(
@@ -2638,14 +3042,38 @@ def main() -> None:
         parser.error("--enable-mobile используется только вместе с --resume")
     if args.enable_front and not args.resume:
         parser.error("--enable-front используется только вместе с --resume")
+    if (args.replace_front or args.commit_front_replacement or args.rollback_front_replacement) and not args.resume:
+        parser.error("операции замены FRONT используются только вместе с --resume")
+    if sum(
+        bool(value)
+        for value in (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ) > 1:
+        parser.error("выберите только одну операцию FRONT")
     if args.update_components and not args.resume:
         parser.error("--update-components используется только вместе с --resume")
+    if args.update_components and any(
+        (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ):
+        parser.error("--update-components нельзя объединять с операциями FRONT")
     if args.terminal_only and (
         args.resume
         or args.summary
         or args.mobile_i1_mode
         or args.enable_mobile
         or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
         or args.update_components
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
@@ -2682,8 +3110,12 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        if args.rollback_front_replacement:
+            rollback_front_replacement(production)
         if args.enable_front:
             enable_front_profile(production, vault_password)
+        if args.replace_front:
+            prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)
         ensure_runtime_secret_material(production, vault_password)
         pending_account_passwords: dict[str, str] = {}
@@ -2715,6 +3147,12 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        recover_saved_admin_access(
+            hosts_document,
+            hosts_path,
+            str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
+        )
         verify_saved_inventory_access(hosts_document)
         refresh_saved_automation_sources(hosts_document, hosts_path)
         if args.update_components:
@@ -2767,6 +3205,39 @@ def main() -> None:
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
             ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+            if args.commit_front_replacement:
+                commit_front_replacement(production)
+                try:
+                    ansible(
+                        repo,
+                        hosts_path,
+                        vault_password,
+                        "playbooks/entry.yml",
+                        final_variables,
+                    )
+                    ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+                except SystemExit:
+                    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+                    front_vars = load_yaml(production / "group_vars" / "front.yml")
+                    entry_vars["front_replacement_state"] = "prepared"
+                    front_vars["front_replacement_state"] = "prepared"
+                    yaml_write(production / "group_vars" / "entry.yml", entry_vars)
+                    yaml_write(production / "group_vars" / "front.yml", front_vars)
+                    try:
+                        ansible(
+                            repo,
+                            hosts_path,
+                            vault_password,
+                            "playbooks/entry.yml",
+                            final_variables,
+                        )
+                    except SystemExit:
+                        pass
+                    fail(
+                        "Commit замены FRONT не прошёл проверку; прежний FRONT "
+                        "повторно разрешён на ENTRY"
+                    )
+                finish_front_replacement(production)
         except SystemExit as update_error:
             if not args.update_components:
                 raise
@@ -2803,8 +3274,19 @@ def main() -> None:
         update_saved_client_configs_mtu(state_root / "clients", mtu_result)
         cleanup_deployment(repo, hosts_path, vault_password)
         atexit.unregister(cleanup_callback)
+        if args.rollback_front_replacement:
+            (_front_replacement_state_root() / "current.json").unlink(missing_ok=True)
+            print("Откат FRONT применён и проверен; маркер восстановления удалён.")
         if args.update_components:
             print("Компоненты каскада обновлены транзакционно и успешно проверены.")
+        elif args.replace_front:
+            print(
+                "Новый FRONT применён. Для каждого direct-пользователя повторно "
+                "выполните 'vless-user export ИМЯ' на новом FRONT и импортируйте "
+                "JSON с новым origin-доменом. Затем проверьте direct/CDN VLESS-сессию, "
+                "переключите CDN origin и выполните "
+                "'kalimera-deploy --resume --commit-front-replacement'."
+            )
         else:
             print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)
@@ -3587,6 +4069,7 @@ def main() -> None:
                 "front_enabled": True,
                 "front_relay_enabled": True,
                 "front_active_id": "front-1",
+                "front_replacement_state": "active",
                 "front_access_modes": front_access_modes,
                 "front_cdn_state": front_cdn_state,
                 "front_origin_domain": front_origin_domain,
@@ -3600,6 +4083,8 @@ def main() -> None:
                 "front_certbot_email": front_certbot_email,
                 "front_xhttp_path": "/" + secrets.token_urlsafe(9),
                 "front_subscription_enabled": False,
+                "front_vless_encryption_enabled": True,
+                "front_xhttp_disguise_enabled": True,
                 "awg3_transit_enabled": False,
                 "runtime_secrets_share_index": 3,
                 "runtime_secrets_peer_inventory_hosts": (

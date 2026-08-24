@@ -1,0 +1,14 @@
+{% if vault_front_vless_users is defined and vault_front_vless_users is mapping %}
+{{ vault_front_vless_users | to_nice_json }}
+{% else %}
+{
+  "schema": 1,
+  "users": [
+    {
+      "name": {{ front_vless_initial_user_name | to_json }},
+      "id": {{ front_entry_reality_client_uuid | to_json }},
+      "mode": {{ ('cdn' if 'cdn' in front_access_modes else 'direct') | to_json }}
+    }
+  ]
+}
+{% endif %}

@@ -9,6 +9,8 @@ front_access_modes:
   - direct
 front_cdn_state: not_configured
 front_active_id: front-1
+front_replacement_state: active
+front_previous_public_ipv4: ""
 front_direct_domain: "{{ front_origin_domain }}"
 front_cdn_domain: ""
 
@@ -16,9 +18,20 @@ front_xray_service_name: xray.service
 front_xray_binary_path: /usr/local/bin/xray
 front_xray_package_cache: /var/cache/ansible/xray.zip
 front_xray_config_path: /usr/local/etc/xray/config.json
+front_xray_base_config_path: /usr/local/etc/xray/config.base.json
+front_systemctl_path: /usr/bin/systemctl
 front_xray_state_dir: /usr/local/etc/xray
 front_xray_user: xray
 front_xray_group: xray
+
+# Реестр пользователей и параметры экспорта находятся в том же зашифрованном
+# runtime-каталоге, что конфигурация Xray. На постоянном диске остаётся только
+# аутентифицированный пакет runtime-secrets.
+front_vless_users_path: "{{ front_xray_state_dir }}/users.json"
+front_vless_client_settings_path: "{{ front_xray_state_dir }}/client-settings.json"
+front_vless_user_command_path: /usr/local/sbin/vless-user
+front_vless_export_dir: /run/kalimera-vless-exports
+front_vless_initial_user_name: initial
 
 # Закреплённые релизы Xray-core (XTLS/Xray-core) с проверенным checksum по
 # архитектуре - тот же паттерн, что entry_sing_box_packages в roles/sing_box.
@@ -89,16 +102,10 @@ front_nginx_site_path: /etc/nginx/sites-available/front-relay.conf
 front_nginx_site_link_path: /etc/nginx/sites-enabled/front-relay.conf
 front_nginx_default_site_link_path: /etc/nginx/sites-enabled/default
 
-# VLESS Encryption - независимый от TLS слой шифрования самого VLESS
-# (ML-KEM-768 + X25519, PFS + anti-replay 0-RTT; XTLS/Xray-core PR #5067,
-# слито 2025-08-28). Проверено на закреплённом бинарнике Xray v26.3.27:
-# `xray vlessenc` реально существует и генерирует пару decryption/
-# encryption. Выключено по умолчанию - фича новая, и, в отличие от REALITY
-# (pbk/sid - стандартные поля vless:// ссылки), значение "encryption"
-# тоже помещается в обычную ссылку без проблем, но само шифрование
-# добавляет заметные накладные расходы на ML-KEM-768 handshake и пока не
-# везде обкатано - включать сознательно, а не по умолчанию.
-front_vless_encryption_enabled: false
+# VLESS Encryption - дополнительный к TLS согласованный слой клиента и FRONT.
+# `xray vlessenc` создаёт серверную decryption и клиентскую encryption одной
+# пары. Автоматизированный FRONT всегда использует вариант ML-KEM-768 + X25519.
+front_vless_encryption_enabled: true
 front_vless_decryption_path: "{{ front_xray_state_dir }}/vless-decryption"
 front_vless_encryption_path: "{{ front_xray_state_dir }}/vless-encryption"
 
@@ -107,11 +114,9 @@ front_vless_encryption_path: "{{ front_xray_state_dir }}/vless-encryption"
 # рекламного cache-buster'а, паддинг под токен. Легенда (PHPESSID/_dc/
 # mc_token) взята из реально работающего конфига стороннего VPN-провайдера
 # и эмпирически проверена на закреплённом бинарнике Xray v26.3.27
-# (`xray run -test` принимает такую конфигурацию). Выключено по
-# умолчанию: ссылка вида vless:// не может выразить вложенный объект
-# "extra" - клиенту нужен полный JSON-конфиг, а не короткая ссылка,
-# это меняет процесс выдачи конфигурации пользователям.
-front_xhttp_disguise_enabled: false
+# (`xray run -test` принимает такую конфигурацию). Выдаётся полный JSON,
+# поэтому вложенный объект extra сохраняется без потери параметров.
+front_xhttp_disguise_enabled: true
 front_xhttp_disguise_session_cookie: PHPESSID
 front_xhttp_disguise_uplink_param: _dc
 front_xhttp_disguise_padding_key: mc_token

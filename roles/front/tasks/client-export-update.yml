@@ -1,0 +1,206 @@
+---
+- name: Проверка роли перед точечным обновлением VLESS JSON
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_node_role == 'front'
+      - front_relay_enabled | default(false) | bool
+      - groups['entry'] | default([]) | length == 1
+    fail_msg: Точечное обновление VLESS разрешено только на активном FRONT.
+
+- name: Включение согласованного профиля VLESS Encryption и XHTTP
+  ansible.builtin.set_fact:
+    front_vless_encryption_enabled: true
+    front_xhttp_disguise_enabled: true
+
+- name: Чтение параметров ENTRY для конфигурации FRONT
+  ansible.builtin.set_fact:
+    front_entry_address: >-
+      {{ hostvars[groups['entry'][0]].entry_public_endpoint
+         | default(hostvars[groups['entry'][0]].ansible_host) }}
+    front_entry_reality_port: "{{ hostvars[groups['entry'][0]].reality_fallback_port }}"
+    front_entry_reality_dest: "{{ hostvars[groups['entry'][0]].reality_fallback_effective_dest }}"
+    front_entry_reality_public_key: "{{ hostvars[groups['entry'][0]].reality_fallback_public_key }}"
+    front_entry_reality_short_id: "{{ hostvars[groups['entry'][0]].reality_fallback_short_id }}"
+    front_entry_reality_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_client_uuid }}"
+    front_entry_reality_front_client_uuid: "{{ hostvars[groups['entry'][0]].reality_fallback_front_client_uuid }}"
+  no_log: true
+
+- name: Проверка файлов пары VLESS Encryption
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  register: front_client_export_encryption_files
+  no_log: true
+
+- name: Удаление неполной пары VLESS Encryption
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  when: >-
+    (front_client_export_encryption_files.results[0].stat.exists | bool) !=
+    (front_client_export_encryption_files.results[1].stat.exists | bool)
+
+- name: Генерация согласованной пары VLESS Encryption ML-KEM-768
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      raw=$(mktemp)
+      decryption=$(mktemp)
+      encryption=$(mktemp)
+      trap 'rm -f "$raw" "$decryption" "$encryption"' EXIT
+      {{ front_xray_binary_path | quote }} vlessenc >"$raw"
+      awk '/ML-KEM-768/{p=1} p' "$raw" |
+        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >"$decryption"
+      awk '/ML-KEM-768/{p=1} p' "$raw" |
+        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >"$encryption"
+      test -s "$decryption"
+      test -s "$encryption"
+      install -o root -g root -m 0600 "$decryption" {{ front_vless_decryption_path | quote }}
+      install -o root -g root -m 0600 "$encryption" {{ front_vless_encryption_path | quote }}
+  args:
+    executable: /bin/bash
+  changed_when: true
+  no_log: true
+  when: >-
+    not (
+      front_client_export_encryption_files.results[0].stat.exists | bool and
+      front_client_export_encryption_files.results[1].stat.exists | bool
+    )
+
+- name: Чтение согласованной пары VLESS Encryption
+  ansible.builtin.slurp:
+    path: "{{ item }}"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  register: front_client_export_encryption_raw
+  no_log: true
+
+- name: Подготовка пары VLESS Encryption
+  ansible.builtin.set_fact:
+    front_vless_decryption: >-
+      {{ front_client_export_encryption_raw.results[0].content | b64decode | trim }}
+    front_vless_encryption: >-
+      {{ front_client_export_encryption_raw.results[1].content | b64decode | trim }}
+  no_log: true
+
+- name: Установка серверной конфигурации VLESS Encryption
+  ansible.builtin.template:
+    src: xray-config.json.j2
+    dest: "{{ front_xray_base_config_path }}"
+    owner: root
+    group: "{{ front_xray_group }}"
+    mode: "0640"
+  notify: Перезапустить Xray-core FRONT
+  no_log: true
+
+- name: Установка параметров полного клиентского VLESS JSON
+  ansible.builtin.template:
+    src: vless-client-settings.json.j2
+    dest: "{{ front_vless_client_settings_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Установка команды vless-user
+  ansible.builtin.template:
+    src: vless-user.py.j2
+    dest: "{{ front_vless_user_command_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Согласование пользователей с серверной конфигурацией Xray
+  ansible.builtin.command:
+    argv: ["{{ front_vless_user_command_path }}", sync, --no-restart]
+  register: front_client_export_sync
+  changed_when: "'changed' in front_client_export_sync.stdout_lines"
+  notify: Перезапустить Xray-core FRONT
+  no_log: true
+
+- name: Проверка серверной конфигурации до перезапуска Xray
+  ansible.builtin.command:
+    argv: ["{{ front_xray_binary_path }}", run, -test, -c, "{{ front_xray_config_path }}"]
+  changed_when: false
+  no_log: true
+
+- name: Применение согласованной серверной конфигурации Xray
+  ansible.builtin.meta: flush_handlers
+
+- name: Получение существующего VLESS-пользователя для проверки экспорта
+  ansible.builtin.command:
+    argv: ["{{ front_vless_user_command_path }}", list]
+  register: front_client_export_users
+  changed_when: false
+  no_log: true
+
+- name: Проверка наличия VLESS-пользователя для контрольного экспорта
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_client_export_users.stdout_lines | length > 0
+    fail_msg: В реестре FRONT отсутствуют VLESS-пользователи для проверки.
+
+- name: Выбор существующего VLESS-пользователя для проверки экспорта
+  ansible.builtin.set_fact:
+    front_client_export_test_name: >-
+      {{ (front_client_export_users.stdout_lines | first).split()[0] }}
+  no_log: true
+
+- name: Формирование обновлённого клиентского JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ front_vless_user_command_path }}"
+      - export
+      - "{{ front_client_export_test_name }}"
+  changed_when: false
+  no_log: true
+
+- name: Проверка наличия ML-KEM-768 в клиентском JSON
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/jq
+      - -e
+      - >-
+        .outbounds[] | select(.tag == "proxy") |
+        .settings.vnext[0].users[0].encryption |
+        startswith("mlkem768x25519plus.native.0rtt.")
+      - "{{ front_vless_export_dir }}/{{ front_client_export_test_name }}.json"
+  changed_when: false
+  no_log: true
+
+- name: Семантическая проверка обновлённого клиентского JSON
+  ansible.builtin.command:
+    argv:
+      - "{{ front_xray_binary_path }}"
+      - run
+      - -test
+      - -c
+      - "{{ front_vless_export_dir }}/{{ front_client_export_test_name }}.json"
+  changed_when: false
+  no_log: true
+
+- name: Сохранение обновлённых параметров в защищённом runtime-хранилище
+  ansible.builtin.command:
+    argv: ["{{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') }}", seal]
+  changed_when: false
+  no_log: true
+  when: runtime_secrets_enabled | default(false) | bool
+
+- name: Обновление контрольных сумм после точечного применения
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/awg-managed-integrity, seal]
+  changed_when: false
+  no_log: true
+
+- name: Строгая проверка FRONT после включения VLESS Encryption
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/awg-health, --strict]
+  changed_when: false

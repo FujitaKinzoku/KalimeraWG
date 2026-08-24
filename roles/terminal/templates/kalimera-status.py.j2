@@ -63,6 +63,9 @@ WHITE = "\033[1;37m"
 DIM = "\033[2m"
 BOOT_GRACE_SECONDS = 120
 STARTUP_WAIT_SECONDS = 10
+TABLE_MAX_WIDTH = 118
+STATUS_LABEL_WIDTH = 22
+COMMAND_LABEL_WIDTH = 46
 
 
 def colour_enabled() -> bool:
@@ -248,6 +251,16 @@ def no_logs_baseline() -> bool:
         return False
 
 
+def vless_user_count() -> int:
+    path = Path({{ front_vless_users_path | default('/usr/local/etc/xray/users.json') | to_json }})
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        users = document.get("users", [])
+        return len(users) if isinstance(users, list) else 0
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
 def state_word(active: bool, available: bool = True) -> str:
     if not available:
         return "не предусмотрен текущей конфигурацией"
@@ -273,29 +286,58 @@ def proxy_route() -> tuple[str, str]:
     return f"VPN-клиент → ENTRY → Интернет ({reason})", "RU DoH настроен, прокси сейчас неактивен"
 
 
-def panel(title: str, rows: list[tuple[str, str, str]]) -> None:
-    terminal_width = shutil.get_terminal_size((88, 24)).columns
-    width = max(44, min(96, terminal_width - 2))
-    inner = width - 2
-    label_width = min(28, max(len(label) for label, _, _ in rows))
-    value_width = max(12, width - label_width - 7)
-    heading = f" {title} "
-    top = "┌" + heading + "─" * max(0, inner - len(heading)) + "┐"
+def wrap_cell(value: str, width: int) -> list[str]:
+    """Переносит ячейку, не позволяя длинному значению сломать рамку."""
+    return textwrap.wrap(
+        value,
+        width=width,
+        replace_whitespace=True,
+        drop_whitespace=True,
+        break_long_words=True,
+        break_on_hyphens=False,
+    ) or [""]
+
+
+def panel(
+    title: str,
+    rows: list[tuple[str, str, str]],
+    *,
+    preferred_label_width: int = STATUS_LABEL_WIDTH,
+) -> None:
+    terminal_width = shutil.get_terminal_size((100, 24)).columns
+    width = max(24, min(TABLE_MAX_WIDTH, terminal_width - 2))
+    usable_width = width - 7
+    minimum_value_width = min(20, max(8, usable_width // 2))
+    label_width = min(
+        preferred_label_width,
+        max(8, usable_width - minimum_value_width),
+    )
+    value_width = usable_width - label_width
+
+    top = "┌" + "─" * (width - 2) + "┐"
     print(paint(top, BLUE))
+    title_width = width - 4
+    for title_line in wrap_cell(title, title_width):
+        print(
+            paint("│ ", BLUE)
+            + paint(f"{title_line:<{title_width}}", CYAN)
+            + paint(" │", BLUE)
+        )
+    print(
+        paint("├" + "─" * (label_width + 2), BLUE)
+        + paint("┬", BLUE)
+        + paint("─" * (value_width + 2) + "┤", BLUE)
+    )
     for label, value, level in rows:
         prefix = "✓ " if level == "OK" else ("! " if level in {"WARN", "FAIL"} else "")
-        wrapped = textwrap.wrap(
-            prefix + value,
-            width=value_width,
-            replace_whitespace=False,
-            drop_whitespace=False,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [""]
-        for index, part in enumerate(wrapped):
-            shown_label = label if index == 0 else ""
-            label_text = f"{shown_label:<{label_width}}"
-            value_text = f"{part:<{value_width}}"
+        label_lines = wrap_cell(label, label_width)
+        value_lines = wrap_cell(prefix + value, value_width)
+        line_count = max(len(label_lines), len(value_lines))
+        for index in range(line_count):
+            label_part = label_lines[index] if index < len(label_lines) else ""
+            value_part = value_lines[index] if index < len(value_lines) else ""
+            label_text = f"{label_part:<{label_width}}"
+            value_text = f"{value_part:<{value_width}}"
             value_colour = GREEN if level == "OK" else (YELLOW if level in {"WARN", "FAIL"} else WHITE)
             print(
                 paint("│ ", BLUE)
@@ -304,7 +346,11 @@ def panel(title: str, rows: list[tuple[str, str, str]]) -> None:
                 + paint(value_text, value_colour)
                 + paint(" │", BLUE)
             )
-    print(paint("└" + "─" * inner + "┘", BLUE))
+    print(
+        paint("└" + "─" * (label_width + 2), BLUE)
+        + paint("┴", BLUE)
+        + paint("─" * (value_width + 2) + "┘", BLUE)
+    )
 
 
 def command_panels() -> None:
@@ -323,6 +369,7 @@ def command_panels() -> None:
                 "INFO",
             ),
         ],
+        preferred_label_width=COMMAND_LABEL_WIDTH,
     )
     if CONFIG["role"] == "entry":
         panel(
@@ -335,6 +382,7 @@ def command_panels() -> None:
                 ("awg-mobile status", "состояние мобильного интерфейса UDP/8443", "INFO"),
                 ("awg-old status", "состояние legacy-интерфейса", "INFO"),
             ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
         )
         panel(
             "DNS И ДОМЕННЫЕ ПОЛИТИКИ",
@@ -346,6 +394,7 @@ def command_panels() -> None:
                 ("se-domain list", "домены принудительного маршрута через EXIT", "INFO"),
                 ("entry-domain list", "домены прямого выхода через ENTRY", "INFO"),
             ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
         )
         panel(
             "RU-ПРОКСИ И МАРШРУТИЗАЦИЯ",
@@ -354,6 +403,28 @@ def command_panels() -> None:
                 ("ru-proxy-set", "замена SOCKS5 с проверкой и автоматическим откатом", "INFO"),
                 ("ru-direct-ports list", "TCP-порты RU, обходящие SOCKS5", "INFO"),
             ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
+        if CONFIG["front_present"]:
+            panel(
+                "УПРАВЛЕНИЕ FRONT",
+                [
+                    ("kalimera-deploy --resume --replace-front", "подготовить новый FRONT с сохранением прежнего", "INFO"),
+                    ("kalimera-deploy --resume --commit-front-replacement", "подтвердить проверенную замену", "INFO"),
+                    ("kalimera-deploy --resume --rollback-front-replacement", "вернуть прежний FRONT до commit", "INFO"),
+                ],
+                preferred_label_width=COMMAND_LABEL_WIDTH,
+            )
+    elif CONFIG["role"] == "front":
+        panel(
+            "VLESS-ПОЛЬЗОВАТЕЛИ",
+            [
+                ("vless-user list", "пользователи и режим direct или CDN", "INFO"),
+                ("vless-user create ИМЯ [direct|cdn]", "создать пользователя и показать JSON", "INFO"),
+                ("vless-user export ИМЯ", "повторно показать JSON для импорта", "INFO"),
+                ("vless-user delete ИМЯ --yes", "отозвать пользователя с безопасным откатом", "INFO"),
+            ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
         )
     panel(
         "БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ",
@@ -364,6 +435,7 @@ def command_panels() -> None:
             ("telegram-test", "безопасная проверка доставки Telegram", "INFO"),
             ("КОМАНДА --help", "точный синтаксис выбранной команды", "INFO"),
         ],
+        preferred_label_width=COMMAND_LABEL_WIDTH,
     )
 
 
@@ -407,6 +479,7 @@ def main() -> int:
                 ("Прямой вход", direct_text, "OK" if CONFIG["front_direct_enabled"] else "INFO"),
                 ("Вход через CDN", cdn_text, "OK" if CONFIG["front_cdn_enabled"] else "INFO"),
                 ("Backend ENTRY", f"{CONFIG['entry_host']}:{CONFIG['front_backend_port']}/TCP · VLESS REALITY", "INFO"),
+                ("VLESS-пользователи", str(vless_user_count()), "OK" if vless_user_count() > 0 else "FAIL"),
             ],
         )
         panel(

@@ -34,6 +34,18 @@ record_warn() {
     fi
 }
 
+record_warn_result() {
+    local success_label="$1"
+    local failure_label="$2"
+    shift 2
+    if "$@" >/dev/null 2>&1; then
+        [[ "$quiet" == true ]] || printf 'OK   %s\n' "$success_label"
+    else
+        [[ "$quiet" == true ]] || printf 'WARN %s\n' "$failure_label"
+        warnings=$((warnings + 1))
+    fi
+}
+
 disk_ok() {
     local used
     used="$(df --output=pcent / | tail -n 1 | tr -dc '0-9')"
@@ -62,8 +74,9 @@ sensitive_modes_ok() {
 /etc/awg-telegram-monitor.env
 /etc/sing-box/config.json
 /etc/sing-box/front-backend.json
-/usr/local/etc/xray/config.json
 {% if awg_node_role == 'front' %}
+{{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
+{{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
 {{ front_origin_key_path | default('/etc/letsencrypt/live/invalid/privkey.pem') }}
 {% endif %}
 EOF
@@ -81,6 +94,30 @@ EOF
         esac
     done
 }
+
+{% if awg_node_role == 'front' %}
+xray_read_only_config_ok() {
+    local file group mode owner target
+    for file in \
+        {{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') | quote }} \
+        {{ front_xray_config_path | default('/usr/local/etc/xray/config.json') | quote }}; do
+        [[ -e "$file" ]] || return 1
+        target="$(readlink -f -- "$file")"
+        [[ -n "$target" && -f "$target" ]] || return 1
+        if [[ "$target" == /run/kalimera-secrets/* ]]; then
+            owner="$(stat -c '%U' "$target")"
+            group="$(stat -c '%G' "$target")"
+            mode="$(stat -c '%a' "$target")"
+            [[ "$owner" == root && "$mode" == 640 ]] || return 1
+            [[ "$group" == root || "$group" == xray ]] || return 1
+        else
+            [[ "$target" == "$file" ]] || return 1
+            [[ "$(stat -c '%U:%G:%a' "$target")" == 'root:xray:640' ]] || return 1
+        fi
+        ! runuser -u xray -- test -w "$target" || return 1
+    done
+}
+{% endif %}
 
 {% if runtime_secrets_enabled | default(false) | bool %}
 runtime_secrets_ok() {
@@ -119,7 +156,7 @@ fail2ban_sshd_policy_ok() {
         grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
-        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+        grep -Fqx {{ ('ignoreip = 127.0.0.1/8 ::1 ' ~ security_automation_source_ipv4) | quote }} "$jail"
 }
 
 {% if security_manage_admin_account | default(false) | bool %}
@@ -175,6 +212,9 @@ known_public_listeners_only() {
     local proto endpoint address port
     local known_tcp='{{ ssh_listen_port | int }} {{ ansible_port | default(22) | int }}'
 {% if awg_node_role == 'entry' %}
+{% if front_backend_enabled | default(false) | bool %}
+    known_tcp="$known_tcp {{ reality_fallback_port | default(8444) | int }}"
+{% endif %}
     local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}'
 {% elif awg_node_role == 'front' %}
     known_tcp="$known_tcp 80 443"
@@ -288,6 +328,9 @@ record 'учёт входов хранится только в RAM' login_accoun
 record 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 record 'постоянные журналы активности отсутствуют' no_persistent_activity_logs
 record 'секретные конфигурации имеют права 0600/0400' sensitive_modes_ok
+{% if awg_node_role == 'front' %}
+record 'Xray имеет только чтение рабочей конфигурации' xray_read_only_config_ok
+{% endif %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 record 'пороговое хранилище runtime-секретов исправно' runtime_secrets_ok
 {% endif %}
@@ -295,15 +338,27 @@ record 'усиленная конфигурация SSH применяется' 
 {% if security_manage_admin_account | default(false) | bool %}
 record 'рабочий администратор kalimera настроен безопасно' managed_admin_ok
 record 'root SSH полностью отключён' root_ssh_policy_ok
-record_warn 'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' root_authorized_keys_clean
+record_warn_result \
+    'root authorized_keys не содержит посторонних ключей' \
+    'root authorized_keys содержит посторонние ключи; выполните ssh-key-audit' \
+    root_authorized_keys_clean
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 record 'PPA AmneziaWG использует отдельный проверенный Signed-By keyring' ppa_key_isolated
 {% endif %}
 record 'целостность управляемых файлов подтверждена' {{ awg_managed_integrity_path | quote }} check
-record_warn 'AppArmor доступен и включён ядром хостинга' apparmor_enabled
-record_warn 'контейнерный runtime не расширяет поверхность атаки' no_container_runtime
-record_warn 'не обнаружены неожиданные внешние слушатели' known_public_listeners_only
+record_warn_result \
+    'AppArmor доступен и включён ядром хостинга' \
+    'AppArmor недоступен или выключен ядром хостинга' \
+    apparmor_enabled
+record_warn_result \
+    'контейнерный runtime не расширяет поверхность атаки' \
+    'обнаружен активный контейнерный runtime' \
+    no_container_runtime
+record_warn_result \
+    'неожиданные внешние слушатели не обнаружены' \
+    'обнаружены неожиданные внешние слушатели' \
+    known_public_listeners_only
 
 [[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then

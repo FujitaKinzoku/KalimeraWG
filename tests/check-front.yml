@@ -98,6 +98,57 @@
                  | first }}
           no_log: true
 
+        - name: Создание тестового runtime-каталога REALITY на ENTRY
+          ansible.builtin.file:
+            path: "{{ front_test_root }}/entry-reality"
+            state: directory
+            mode: "0700"
+
+        - name: Формирование тестовых публичных параметров backend FRONT
+          ansible.builtin.copy:
+            dest: "{{ front_test_root }}/entry-reality/{{ item.name }}"
+            content: "{{ item.value }}\n"
+            mode: "0600"
+          loop:
+            - name: public.key
+              value: "{{ front_test_entry_public_key }}"
+            - name: short_id
+              value: "0011223344556677"
+            - name: client_uuid
+              value: "{{ front_test_entry_client_uuid.stdout | trim }}"
+            - name: front_client_uuid
+              value: "{{ front_test_entry_front_uuid.stdout | trim }}"
+          no_log: true
+
+        - name: Проверка автономного чтения параметров backend FRONT с ENTRY
+          ansible.builtin.include_role:
+            name: sing_box
+            tasks_from: front-export-facts.yml
+          vars:
+            awg_node_role: entry
+            reality_fallback_enabled: true
+            front_backend_enabled: true
+            front_relay_enabled: true
+            reality_fallback_state_dir: "{{ front_test_root }}/entry-reality"
+            reality_fallback_short_id_path: "{{ front_test_root }}/entry-reality/short_id"
+            reality_fallback_client_uuid_path: "{{ front_test_root }}/entry-reality/client_uuid"
+            reality_fallback_front_client_uuid_path: "{{ front_test_root }}/entry-reality/front_client_uuid"
+            sing_box_reality_dest_override_path: "{{ front_test_root }}/missing-reality-override.json"
+            reality_fallback_dest: example.com
+            reality_fallback_dest_port: 443
+            reality_fallback_port: 443
+
+        - name: Подтверждение автономного чтения параметров ENTRY
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - reality_fallback_effective_dest == 'example.com'
+              - reality_fallback_public_key == front_test_entry_public_key
+              - reality_fallback_short_id == '0011223344556677'
+              - reality_fallback_client_uuid == (front_test_entry_client_uuid.stdout | trim)
+              - reality_fallback_front_client_uuid == (front_test_entry_front_uuid.stdout | trim)
+          no_log: true
+
         # xray vlessenc всегда выводит обе пары (X25519 и ML-KEM-768) без
         # флага выбора - тот же разбор по якорной строке, что и в
         # roles/front/tasks/main.yml.
@@ -116,6 +167,19 @@
               {{ front_test_vlessenc.stdout
                  | regex_search('ML-KEM-768[\s\S]*?"decryption": "([^"]+)"', '\1')
                  | first }}
+            front_test_vless_encryption: >-
+              {{ front_test_vlessenc.stdout
+                 | regex_search('ML-KEM-768[\s\S]*?"encryption": "([^"]+)"', '\1')
+                 | first }}
+          no_log: true
+
+        - name: Проверка форматов серверной и клиентской частей ML-KEM-768
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - front_test_vless_decryption is match('^mlkem768x25519plus\.native\.600s\.')
+              - front_test_vless_encryption is match('^mlkem768x25519plus\.native\.0rtt\.')
+            fail_msg: Xray-core изменил формат согласованной пары VLESS Encryption
           no_log: true
 
         # front_entry_* - простые факты (не groups/hostvars, это служебные
@@ -136,6 +200,208 @@
           loop_control:
             loop_var: front_case
             label: "{{ front_case.0 }}/{{ front_case.1 }}/enc={{ front_case.2 }}/dis={{ front_case.3 }}"
+
+        - name: Установка параметров проверки управления VLESS-пользователями
+          ansible.builtin.set_fact:
+            front_xray_binary_path: "{{ front_test_root }}/xray"
+            front_xray_state_dir: "{{ front_test_root }}/state"
+            front_xray_base_config_path: "{{ front_test_root }}/state/config.base.json"
+            front_xray_config_path: "{{ front_test_root }}/state/config.json"
+            front_vless_users_path: "{{ front_test_root }}/state/users.json"
+            front_vless_client_settings_path: "{{ front_test_root }}/state/client-settings.json"
+            front_vless_user_command_path: "{{ front_test_root }}/vless-user"
+            front_vless_export_dir: "{{ front_test_root }}/exports"
+            security_admin_user: root
+            front_xray_user: root
+            front_xray_group: root
+            front_xray_service_name: xray-validation.service
+            front_systemctl_path: "{{ front_test_root }}/systemctl"
+            runtime_secrets_ctl_path: "{{ front_test_root }}/missing-secretctl"
+            front_access_modes: [direct, cdn]
+            front_direct_domain: origin.example.invalid
+            front_cdn_domain: edge.example.invalid
+            front_xhttp_mode: packet-up
+            front_xhttp_path: /verified-allowlist-path
+            front_xhttp_disguise_enabled: true
+            front_vless_encryption_enabled: true
+            front_vless_decryption: "{{ front_test_vless_decryption }}"
+            front_vless_encryption: "{{ front_test_vless_encryption }}"
+            front_vless_initial_user_name: initial
+            front_entry_address: 198.51.100.10
+            front_entry_reality_port: 443
+            front_entry_reality_dest: yandex.ru
+            front_entry_reality_client_uuid: "{{ front_test_entry_client_uuid.stdout | trim }}"
+            front_entry_reality_front_client_uuid: "{{ front_test_entry_front_uuid.stdout | trim }}"
+            front_entry_reality_public_key: "{{ front_test_entry_public_key }}"
+            front_entry_reality_short_id: "0011223344556677"
+
+        - name: Создание каталога проверки VLESS-пользователей
+          ansible.builtin.file:
+            path: "{{ front_xray_state_dir }}"
+            state: directory
+            mode: "0700"
+
+        - name: Формирование изолированного systemctl для проверки менеджера
+          ansible.builtin.copy:
+            dest: "{{ front_systemctl_path }}"
+            mode: "0750"
+            content: |
+              #!/usr/bin/env sh
+              set -eu
+              printf '%s\n' "$*" >>{{ front_test_root }}/systemctl.log
+
+        - name: Рендер файлов управления VLESS-пользователями
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/front/templates/{{ item.src }}"
+            dest: "{{ item.dest }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - {src: xray-config.json.j2, dest: "{{ front_xray_base_config_path }}", mode: "0600"}
+            - {src: vless-client-settings.json.j2, dest: "{{ front_vless_client_settings_path }}", mode: "0600"}
+            - {src: vless-users.json.j2, dest: "{{ front_vless_users_path }}", mode: "0600"}
+            - {src: vless-user.py.j2, dest: "{{ front_vless_user_command_path }}", mode: "0750"}
+          no_log: true
+
+        - name: Синхронизация тестового реестра VLESS-пользователей
+          ansible.builtin.command:
+            argv: ["{{ front_vless_user_command_path }}", sync, --no-restart]
+          register: front_test_vless_sync
+          changed_when: false
+
+        - name: Экспорт тестового CDN JSON
+          ansible.builtin.command:
+            argv: ["{{ front_vless_user_command_path }}", export, initial]
+          register: front_test_vless_export
+          changed_when: false
+          no_log: true
+
+        - name: Семантическая проверка клиентского CDN JSON закреплённым Xray-core
+          ansible.builtin.command:
+            argv:
+              - "{{ front_xray_binary_path }}"
+              - run
+              - -test
+              - -c
+              - "{{ front_vless_export_dir }}/initial.json"
+          changed_when: false
+          no_log: true
+
+        - name: Чтение исходной активной конфигурации Xray
+          ansible.builtin.slurp:
+            src: "{{ front_xray_config_path }}"
+          register: front_test_active_initial
+          no_log: true
+
+        - name: Проверка экспортированного CDN JSON и активной конфигурации
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
+              - (front_test_vless_export.stdout | from_json).dns.queryStrategy == 'UseIP'
+              - (front_test_vless_export.stdout | from_json).dns.servers == ['77.88.8.8', '77.88.8.1']
+              - (front_test_vless_export.stdout | from_json).inbounds | length == 2
+              - (front_test_vless_export.stdout | from_json).inbounds[0].protocol == 'socks'
+              - (front_test_vless_export.stdout | from_json).inbounds[0].settings.auth == 'noauth'
+              - (front_test_vless_export.stdout | from_json).inbounds[0].settings.udp
+              - (front_test_vless_export.stdout | from_json).inbounds[0].tag == 'socks-in'
+              - (front_test_vless_export.stdout | from_json).inbounds[1].protocol == 'http'
+              - (front_test_vless_export.stdout | from_json).inbounds[1].port == 10809
+              - (front_test_vless_export.stdout | from_json).inbounds[1].tag == 'http-in'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.network == 'xhttp'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].flow == ''
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].encryption == front_test_vless_encryption
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].encryption is match('^mlkem768x25519plus\.native\.0rtt\.')
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.alpn == ['h2', 'http/1.1']
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.fingerprint == 'firefox'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.serverName == 'edge.example.invalid'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.mode == 'packet-up'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.uplinkHTTPMethod == 'GET'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.host == 'edge.example.invalid'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.path == '/verified-allowlist-path'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.uplinkHTTPMethod == 'GET'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionIDKey == 'PHPESSID'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionKey == 'PHPESSID'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.xmux.hKeepAlivePeriod == 30
+              - (front_test_vless_export.stdout | from_json).outbounds[1].tag == 'direct'
+              - (front_test_vless_export.stdout | from_json).outbounds[2].tag == 'block'
+              - (front_test_vless_export.stdout | from_json).routing.rules[0].outboundTag == 'proxy'
+              - (front_test_vless_export.stdout | from_json).remarks == 'Kalimera-FRONT-disguiseV2'
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.clients | length == 1
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption == front_test_vless_decryption
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption is match('^mlkem768x25519plus\.native\.600s\.')
+            fail_msg: >-
+              Экспортированный CDN JSON или активный список VLESS-пользователей
+              не соответствует проверяемому профилю
+
+        - name: Создание тестового CDN-пользователя
+          ansible.builtin.command:
+            argv: ["{{ front_vless_user_command_path }}", create, test-cdn, cdn]
+          register: front_test_vless_create
+          changed_when: true
+          no_log: true
+
+        - name: Чтение активной конфигурации после создания пользователя
+          ansible.builtin.slurp:
+            src: "{{ front_xray_config_path }}"
+          register: front_test_active_created
+          no_log: true
+
+        - name: Проверка JSON нового пользователя и двух активных UUID
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - (front_test_vless_create.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
+              - (front_test_active_created.content | b64decode | from_json).inbounds[0].settings.clients | length == 2
+          no_log: true
+
+        - name: Проверка защищённого файла JSON нового пользователя
+          ansible.builtin.stat:
+            path: "{{ front_vless_export_dir }}/test-cdn.json"
+          register: front_test_vless_export_file
+
+        - name: Подтверждение прав защищённого файла JSON
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - front_test_vless_export_file.stat.isreg | default(false)
+              - front_test_vless_export_file.stat.mode == '0600'
+              - front_test_vless_export_file.stat.pw_name == 'root'
+              - "('Файл JSON сохранён: ' ~ front_vless_export_dir ~ '/test-cdn.json') in front_test_vless_create.stderr"
+              - "('Открыть конфигурацию: nano ' ~ front_vless_export_dir ~ '/test-cdn.json') in front_test_vless_create.stderr"
+
+        - name: Удаление тестового CDN-пользователя
+          ansible.builtin.command:
+            argv: ["{{ front_vless_user_command_path }}", delete, test-cdn, --yes]
+          changed_when: true
+          no_log: true
+
+        - name: Чтение итоговой конфигурации и журнала тестового systemctl
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - "{{ front_xray_config_path }}"
+            - "{{ front_test_root }}/systemctl.log"
+          register: front_test_final_files
+          no_log: true
+
+        - name: Проверка удаления временного JSON отозванного пользователя
+          ansible.builtin.stat:
+            path: "{{ front_vless_export_dir }}/test-cdn.json"
+          register: front_test_vless_deleted_export
+
+        - name: Подтверждение удаления временного JSON
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - not (front_test_vless_deleted_export.stat.exists | default(false))
+
+        - name: Проверка возврата к исходному пользователю
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - (front_test_final_files.results[0].content | b64decode | from_json).inbounds[0].settings.clients | length == 1
+              - (front_test_final_files.results[1].content | b64decode).splitlines() | length == 2
+          no_log: true
 
         # front_origin_domain/front_origin_cert_path/front_origin_key_path
         # приходят из set_fact выше. Подписка намеренно отсутствует в модели.

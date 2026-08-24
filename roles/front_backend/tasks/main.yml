@@ -85,6 +85,31 @@
     - Перезапустить backend FRONT
   when: front_backend_enabled | bool
 
+- name: Проверка ранее принятого runtime-дерева backend FRONT
+  ansible.builtin.stat:
+    path: "{{ runtime_secrets_runtime_root }}/sing-box/reality/rules"
+  register: front_backend_runtime_rules
+  when:
+    - front_backend_enabled | bool
+    - runtime_secrets_enabled | default(false) | bool
+
+- name: Восстановление минимального доступа backend FRONT к публичным rule-set
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: sing-box
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ runtime_secrets_runtime_root }}", mode: "0710"}
+    - {path: "{{ runtime_secrets_runtime_root }}/sing-box", mode: "0710"}
+    - {path: "{{ runtime_secrets_runtime_root }}/sing-box/reality", mode: "0710"}
+    - {path: "{{ runtime_secrets_runtime_root }}/sing-box/reality/rules", mode: "0750"}
+  when:
+    - front_backend_enabled | bool
+    - runtime_secrets_enabled | default(false) | bool
+    - front_backend_runtime_rules.stat.isdir | default(false)
+
 - name: Применение обработчиков backend FRONT
   ansible.builtin.meta: flush_handlers
 

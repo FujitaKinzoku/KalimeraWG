@@ -43,5 +43,16 @@
       when: awg_adoption_mode == 'apply'
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
+    - role: runtime_secrets
+      when:
+        - awg_adoption_mode == 'apply'
+        - runtime_secrets_enabled | default(false) | bool
     - role: health
+      when: awg_adoption_mode == 'apply'
+  post_tasks:
+    - name: Фиксация целостности после автономного применения FRONT
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-managed-integrity, seal]
+      changed_when: false
+      no_log: true
       when: awg_adoption_mode == 'apply'

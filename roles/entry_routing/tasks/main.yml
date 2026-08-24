@@ -119,11 +119,31 @@
     path: "{{ entry_ru_zone_cache_path }}"
   register: entry_ru_zone_cache
 
+- name: "Проверка: производный REALITY rule-set содержит полный список RU-сетей"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/jq
+      - -e
+      - --argjson
+      - minimum
+      - "{{ entry_ru_zone_min_networks }}"
+      - "([.rules[]?.ip_cidr[]?] | length) >= $minimum"
+      - "{{ reality_fallback_ru_zone_rule_set_path }}"
+  register: entry_ru_zone_reality_rule_set
+  changed_when: false
+  failed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
 - name: "Первичное заполнение: маршрутизация ENTRY сервера - этап 14"
   ansible.builtin.systemd_service:
     name: "{{ entry_ru_zone_service_name }}"
     state: started
-  when: not entry_ru_zone_cache.stat.exists
+  when: >-
+    not entry_ru_zone_cache.stat.exists or
+    (
+      reality_fallback_enabled | default(false) | bool and
+      (entry_ru_zone_reality_rule_set.rc | default(1) | int) != 0
+    )
 
 - name: "Включение: маршрутизация ENTRY сервера - этап 15"
   ansible.builtin.systemd_service:

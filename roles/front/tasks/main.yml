@@ -22,6 +22,8 @@
       - ('cdn' not in front_access_modes) or front_cdn_state == 'ready'
       - ('cdn' not in front_access_modes) or front_cdn_domain | length > 0
       - ('direct' not in front_access_modes) or front_direct_domain == front_origin_domain
+      - front_replacement_state in ['active', 'prepared']
+      - front_replacement_state != 'prepared' or front_previous_public_ipv4 | length > 0
     fail_msg: >-
       Нужны настоящий origin-домен (A-запись уже указывает на этот сервер),
       e-mail для Certbot, закреплённый пакет Xray-core и ровно один хост в
@@ -304,18 +306,35 @@
   ansible.builtin.file:
     path: "{{ front_xray_state_dir }}"
     state: directory
-    owner: "{{ front_xray_user }}"
+    owner: root
     group: "{{ front_xray_group }}"
-    mode: "0700"
+    mode: "0750"
   when: front_relay_enabled | default(false) | bool
 
 - name: "Проверка: пара VLESS Encryption уже создана"
   ansible.builtin.stat:
-    path: "{{ front_vless_decryption_path }}"
-  register: front_vless_encryption_file
+    path: "{{ item }}"
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  register: front_vless_encryption_files
   when:
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
+
+- name: "Восстановление: удаление неполной пары VLESS Encryption"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ front_vless_decryption_path }}"
+    - "{{ front_vless_encryption_path }}"
+  when:
+    - front_relay_enabled | default(false) | bool
+    - front_vless_encryption_enabled | default(false) | bool
+    - >-
+      (front_vless_encryption_files.results[0].stat.exists | bool) !=
+      (front_vless_encryption_files.results[1].stat.exists | bool)
 
 # "xray vlessenc" всегда выводит две пары - X25519 (не постквантовый) и
 # ML-KEM-768 (постквантовый), выбора флагом нет. Берём именно ML-KEM-768,
@@ -326,18 +345,29 @@
     cmd: |
       set -Eeuo pipefail
       raw=$(mktemp)
+      decryption=$(mktemp)
+      encryption=$(mktemp)
+      trap 'rm -f "$raw" "$decryption" "$encryption"' EXIT
       {{ front_xray_binary_path | quote }} vlessenc >"$raw"
       awk '/ML-KEM-768/{p=1} p' "$raw" |
-        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >{{ front_vless_decryption_path | quote }}
+        sed -n 's/^"decryption": "\(.*\)"$/\1/p' >"$decryption"
       awk '/ML-KEM-768/{p=1} p' "$raw" |
-        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >{{ front_vless_encryption_path | quote }}
-      rm -f "$raw"
+        sed -n 's/^"encryption": "\(.*\)"$/\1/p' >"$encryption"
+      test -s "$decryption"
+      test -s "$encryption"
+      install -o root -g root -m 0600 "$decryption" {{ front_vless_decryption_path | quote }}
+      install -o root -g root -m 0600 "$encryption" {{ front_vless_encryption_path | quote }}
     executable: /bin/bash
   changed_when: true
+  no_log: true
   when:
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
-    - not front_vless_encryption_file.stat.exists
+    - >-
+      not (
+        front_vless_encryption_files.results[0].stat.exists | bool and
+        front_vless_encryption_files.results[1].stat.exists | bool
+      )
 
 - name: "Ограничение прав: файлы VLESS Encryption"
   ansible.builtin.file:
@@ -373,14 +403,64 @@
     - front_relay_enabled | default(false) | bool
     - front_vless_encryption_enabled | default(false) | bool
 
-- name: "Установка: конфигурация Xray-core FRONT"
+- name: "Установка: базовая конфигурация Xray-core FRONT"
   ansible.builtin.template:
     src: xray-config.json.j2
-    dest: "{{ front_xray_config_path }}"
-    owner: "{{ front_xray_user }}"
+    dest: "{{ front_xray_base_config_path }}"
+    owner: root
     group: "{{ front_xray_group }}"
+    mode: "0640"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Установка: параметры защищённого экспорта VLESS JSON"
+  ansible.builtin.template:
+    src: vless-client-settings.json.j2
+    dest: "{{ front_vless_client_settings_path }}"
+    owner: root
+    group: root
     mode: "0600"
+  no_log: true
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Инициализация: реестр VLESS-пользователей"
+  ansible.builtin.template:
+    src: vless-users.json.j2
+    dest: "{{ front_vless_users_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+  no_log: true
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Создание: временный каталог клиентских VLESS JSON"
+  ansible.builtin.file:
+    path: "{{ front_vless_export_dir }}"
+    state: directory
+    owner: "{{ security_admin_user | default('kalimera') }}"
+    group: "{{ security_admin_user | default('kalimera') }}"
+    mode: "0700"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Установка: управление VLESS-пользователями"
+  ansible.builtin.template:
+    src: vless-user.py.j2
+    dest: "{{ front_vless_user_command_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: front_relay_enabled | default(false) | bool
+
+- name: "Синхронизация: пользователей с конфигурацией Xray-core"
+  ansible.builtin.command:
+    argv:
+      - "{{ front_vless_user_command_path }}"
+      - sync
+      - --no-restart
+  register: front_vless_user_sync
+  changed_when: "'changed' in front_vless_user_sync.stdout_lines"
   notify: Перезапустить Xray-core FRONT
+  no_log: true
   when: front_relay_enabled | default(false) | bool
 
 - name: "Проверка конфигурации Xray-core перед применением"
@@ -438,14 +518,6 @@
     name: nginx.service
     enabled: true
     state: started
-  when: front_relay_enabled | default(false) | bool
-
-- name: "Разрешение: UFW для FRONT-релея (80/tcp, 443/tcp)"
-  community.general.ufw:
-    rule: allow
-    port: "{{ item }}"
-    proto: tcp
-  loop: ["80", "443"]
   when: front_relay_enabled | default(false) | bool
 
 - name: "Применение: конфигурация FRONT-релея"

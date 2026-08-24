@@ -85,7 +85,10 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
 > релиз и не гарантия одинаковой доступности у всех операторов.
 
 <p align="center">
-  <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-ru-mobile.svg">
+    <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="760">
+  </picture>
 </p>
 
 Основной AWG идёт прямо на ENTRY. VLESS всегда завершается на FRONT: клиент
@@ -142,7 +145,10 @@ SSH-ключ, режим RU-маршрута, DNS, необязательные 
 ## Как устроен каскад
 
 <p align="center">
-  <img src="assets/cascade-ru.svg" alt="Схема маршрутизации KalimeraWG" width="100%">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/cascade-ru-mobile.svg">
+    <img src="assets/cascade-ru.svg" alt="Схема маршрутизации KalimeraWG" width="760">
+  </picture>
 </p>
 
 | Сегмент | Назначение | Состояние по умолчанию |
@@ -271,6 +277,8 @@ vpn-user delete phone
 | RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
 | REALITY | `reality-dest-switch status\|list`; смена dest управляемого FRONT выполняется через inventory и deploy |
 | FRONT-релей | `./deploy --resume --enable-front`, затем `kalimera-test`; [docs/front-relay.md](docs/front-relay.md) |
+| VLESS-пользователи | на FRONT: `vless-user create ИМЯ cdn`, `list`, `export`, `delete` |
+| Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 

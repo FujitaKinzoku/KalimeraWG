@@ -49,11 +49,13 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function maintenance { _kalimera_admin maintenance "$@"; }
     function update-all { _kalimera_admin update-all "$@"; }
     function vpn-user { _kalimera_admin vpn-user "$@"; }
+    function vless-user { _kalimera_admin vless-user "$@"; }
     function awg-mobile { _kalimera_admin awg-mobile "$@"; }
     function awg-old { _kalimera_admin awg-old "$@"; }
     function dns-status { _kalimera_admin dns-status "$@"; }
     function dot-switch { _kalimera_admin dot-switch "$@"; }
     function doh-switch { _kalimera_admin doh-switch "$@"; }
+    function reality-dest-switch { _kalimera_admin reality-dest-switch "$@"; }
     function ru-domain { _kalimera_admin ru-domain "$@"; }
     function se-domain { _kalimera_admin se-domain "$@"; }
     function entry-domain { _kalimera_admin entry-domain "$@"; }

@@ -34,6 +34,11 @@ case "${1:-status}" in
     [[ $# -le 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }
     printf 'sing-box: %s\n' "$(systemctl is-active sing-box.service 2>/dev/null || true)"
     printf 'watchdog: %s\n' "$(systemctl is-active {{ entry_ru_proxy_watch_timer_name | quote }} 2>/dev/null || true)"
+{% if not entry_ru_proxy_enabled | bool %}
+    echo 'Маршрутизация через RU-прокси: НЕ НАСТРОЕНА'
+    echo 'Российские назначения идут напрямую через ENTRY сервер.'
+    echo 'Источник настроек: RU-прокси не был выбран во время deploy'
+{% else %}
     if [[ -e "$flag" || -e "$manual_flag" ]]; then
         echo 'Маршрутизация через RU-прокси: ВЫКЛЮЧЕНА (напрямую через ENTRY)'
         [[ ! -e "$manual_flag" ]] || echo 'Причина: ручное отключение'
@@ -42,6 +47,7 @@ case "${1:-status}" in
         echo 'Маршрутизация через RU-прокси: ВКЛЮЧЕНА'
     fi
     [[ -e {{ sing_box_runtime_override_path | quote }} ]] && echo 'Источник настроек: локальное переопределение ru-proxy-set' || echo 'Источник настроек: зашифрованный inventory'
+{% endif %}
     ;;
   off)
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }

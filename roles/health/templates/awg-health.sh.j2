@@ -104,7 +104,7 @@ fail2ban_sshd_policy_is_strict() {
         grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
-        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+        grep -Fqx {{ ('ignoreip = 127.0.0.1/8 ::1 ' ~ security_automation_source_ipv4) | quote }} "$jail"
 }
 
 ufw_logging_is_disabled() {
@@ -118,7 +118,7 @@ managed_admin_is_ready() {
         passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
         passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
         test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
-        test -x {{ security_admin_command_path | quote }} &&
+        test -x {{ security_admin_command_path | default('/usr/local/libexec/kalimera-admin-command') | quote }} &&
         visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
         ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
 }
@@ -190,7 +190,7 @@ ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
 
-{% if awg_node_role | default('') in ['entry', 'exit'] %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
@@ -343,7 +343,7 @@ check 'UFW не разрешает межсерверный AWG для всех 
     {{ security_interserver_peer_ipv4 | quote }} \
     {{ security_interserver_listen_port | quote }}
 {% endif %}
-{% if awg_enable_fail2ban | bool %}
+{% if awg_enable_fail2ban | default(true) | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
 check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
 check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
@@ -567,6 +567,11 @@ check 'UFW ограничивает REALITY адресом FRONT-релея' \
 check 'UFW не разрешает REALITY для всех адресов' \
     ufw_interserver_has_no_broad_allow \
     {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% if front_replacement_state | default('active') == 'prepared' %}
+check 'прежний FRONT сохранён до подтверждения замены' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_previous_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% endif %}
 {% endif %}
 {% endif %}
 {% elif awg_node_role == 'exit' %}
@@ -626,12 +631,67 @@ front_entry_reality_reachable() {
         'exec 3<>/dev/tcp/{{ front_entry_address }}/{{ front_entry_reality_port }}'
 }
 
+front_vless_users_are_consistent() {
+    local state_ids active_ids
+    state_ids="$(jq -r '.users[].id' {{ front_vless_users_path | quote }} | sort)" || return 1
+    active_ids="$(jq -r '.inbounds[0].settings.clients[].id' {{ front_xray_config_path | quote }} | sort)" || return 1
+    [[ -n "$state_ids" && "$state_ids" == "$active_ids" ]] &&
+        {{ front_vless_user_command_path | quote }} list >/dev/null
+}
+
+front_vless_encryption_is_enabled() {
+    jq -e '
+        .inbounds[0].settings.decryption |
+        type == "string" and
+        startswith("mlkem768x25519plus.native.600s.")
+    ' {{ front_xray_config_path | quote }} >/dev/null 2>&1 &&
+        jq -e '
+            .encryption |
+            type == "string" and
+            startswith("mlkem768x25519plus.native.0rtt.")
+        ' {{ front_vless_client_settings_path | quote }} >/dev/null 2>&1
+}
+
+front_xray_permissions_are_restricted() {
+    local state_dir resolved mode numeric_mode
+    state_dir={{ front_xray_state_dir | quote }}
+    resolved="$(readlink -f -- "$state_dir")" || return 1
+    [[ -d "$resolved" ]] || return 1
+{% if runtime_secrets_enabled | default(false) | bool %}
+    [[ "$resolved" == {{ (runtime_secrets_runtime_root ~ '/xray') | quote }} ]] || return 1
+{% endif %}
+    [[ "$(stat -Lc %U -- "$state_dir")" == root ]] || return 1
+    mode="$(stat -Lc %a -- "$state_dir")" || return 1
+    numeric_mode=$((8#$mode))
+    (( (numeric_mode & 0022) == 0 )) &&
+        ! systemctl cat {{ front_xray_service_name | quote }} |
+            grep -Fq 'ReadWritePaths='
+}
+
+front_tls_endpoint_ready() {
+    local domain="$1"
+    getent ahostsv4 "$domain" >/dev/null 2>&1 &&
+        printf '' | timeout 10 openssl s_client \
+            -connect "${domain}:443" -servername "$domain" \
+            -verify_return_error >/dev/null 2>&1
+}
+
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
 check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'реестр VLESS-пользователей согласован с Xray' front_vless_users_are_consistent
+check 'VLESS Encryption ML-KEM-768 включён на FRONT и в клиентских JSON' \
+    front_vless_encryption_is_enabled
+check 'Xray не может изменять каталог конфигурации' front_xray_permissions_are_restricted
 check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
 check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if 'direct' in front_access_modes %}
+check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_ready {{ front_direct_domain | quote }}
+{% endif %}
+{% if 'cdn' in front_access_modes %}
+check 'TLS endpoint CDN доступен' front_tls_endpoint_ready {{ front_cdn_domain | quote }}
+{% endif %}
 {% if front_entry_reality_stopped | default(false) | bool %}
 printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
 {% else %}

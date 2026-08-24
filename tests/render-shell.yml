@@ -319,6 +319,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "72"
           register: rendered_kalimera_status
           changed_when: false
           failed_when: >-
@@ -330,6 +331,16 @@
             'No-logs' not in rendered_kalimera_status.stdout or
             'СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ' not in rendered_kalimera_status.stdout or
             'VPN-КЛИЕНТЫ' not in rendered_kalimera_status.stdout
+
+        - name: Проверка геометрии таблиц ENTRY в узком терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status.stdout_lines | length > 0
+              - rendered_kalimera_status.stdout_lines | map('length') | min == 70
+              - rendered_kalimera_status.stdout_lines | map('length') | max == 70
+            fail_msg: >-
+              Рамки ENTRY имеют разную ширину или выходят за пределы
+              терминала шириной 72 колонки.
 
         - name: Проверка синтаксиса программы возможностей SOCKS5
           ansible.builtin.command:
@@ -386,6 +397,25 @@
             dest: "{{ rendered_shell_root }}/awg-ru-proxy-watch.service"
             mode: "0600"
 
+        - name: Формирование модуля атомарного обновления RU rule-set
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/entry_routing/templates/awg-ru-zone-update.service.j2"
+            dest: "{{ rendered_shell_root }}/awg-ru-zone-update.service"
+            mode: "0600"
+
+        - name: Проверка точного доступа службы только к каталогу rule-set
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            unit={{ (rendered_shell_root ~ '/awg-ru-zone-update.service') | quote }}
+            grep -Fxq 'ProtectSystem=strict' "$unit"
+            grep -Fxq 'ReadWritePaths={{ entry_ru_zone_state_dir }} /run {{ reality_fallback_rule_set_dir }}' "$unit"
+            grep -Fxq 'ProtectClock=true' "$unit"
+            ! grep -Fq 'rulesProtectClock=' "$unit"
+            ! grep -Fq 'ReadWritePaths={{ reality_fallback_state_dir }}' "$unit"
+          args:
+            executable: /bin/bash
+          changed_when: false
+
         - name: Формирование модуля systemd credentials для awg-quick@
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/runtime_secrets/templates/awg-quick-credential.conf.j2"
@@ -424,6 +454,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "90"
           register: rendered_kalimera_status_exit
           changed_when: false
           failed_when: >-
@@ -435,15 +466,42 @@
             'БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ' not in rendered_kalimera_status_exit.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_exit.stdout
 
+        - name: Проверка геометрии таблиц EXIT в обычном терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status_exit.stdout_lines | length > 0
+              - rendered_kalimera_status_exit.stdout_lines | map('length') | min == 88
+              - rendered_kalimera_status_exit.stdout_lines | map('length') | max == 88
+            fail_msg: >-
+              Рамки EXIT имеют разную ширину или выходят за пределы
+              терминала шириной 90 колонок.
+
         - name: Формирование health-программы EXIT
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
             dest: "{{ rendered_shell_root }}/awg-health-exit"
             mode: "0700"
 
+        - name: Формирование полной проверки роли EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-test-exit"
+            mode: "0700"
+
+        - name: Загрузка defaults и безопасных переменных FRONT
+          ansible.builtin.include_vars:
+            file: "{{ playbook_dir }}/../{{ item }}"
+          loop:
+            - roles/front/defaults/main.yml
+            - inventory/example/group_vars/front.yml
+
         - name: Выбор ветви terminal-шаблона FRONT
           ansible.builtin.set_fact:
             awg_node_role: front
+            front_relay_enabled: true
+            front_entry_address: 192.0.2.10
+            front_entry_reality_port: 443
+            front_entry_reality_stopped: false
 
         - name: Формирование сводки текущей конфигурации FRONT
           ansible.builtin.template:
@@ -459,6 +517,7 @@
               - --with-commands
           environment:
             NO_COLOR: "1"
+            COLUMNS: "120"
           register: rendered_kalimera_status_front
           changed_when: false
           failed_when: >-
@@ -468,6 +527,47 @@
             'ЗАЩИТА FRONT' not in rendered_kalimera_status_front.stdout or
             'АВТОМАТИЧЕСКИ СОГЛАСОВАННЫЙ MTU' in rendered_kalimera_status_front.stdout or
             'VPN-КЛИЕНТЫ' in rendered_kalimera_status_front.stdout
+
+        - name: Проверка геометрии таблиц FRONT в широком терминале
+          ansible.builtin.assert:
+            that:
+              - rendered_kalimera_status_front.stdout_lines | length > 0
+              - rendered_kalimera_status_front.stdout_lines | map('length') | min == 118
+              - rendered_kalimera_status_front.stdout_lines | map('length') | max == 118
+            fail_msg: >-
+              Рамки FRONT имеют разную ширину или выходят за пределы
+              терминала шириной 120 колонок.
+
+        - name: Формирование health-программы FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-front"
+            mode: "0700"
+
+        - name: Проверка автономного формирования health FRONT без defaults common
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-front-standalone"
+            mode: "0700"
+          vars:
+            awg_enable_fail2ban: "{{ undef(hint='defaults роли common намеренно недоступны') }}"
+
+        - name: Формирование полной проверки роли FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-test-front"
+            mode: "0700"
+
+        - name: Проверка выбранных ролей в сформированных программах
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fxq 'readonly role=exit' {{ rendered_shell_root }}/kalimera-test-exit
+            grep -Fxq 'readonly role=front' {{ rendered_shell_root }}/kalimera-test-front
+            grep -Fq 'Xray не может изменять каталог конфигурации' \
+              {{ rendered_shell_root }}/awg-health-front
+          args:
+            executable: /bin/bash
+          changed_when: false
 
         - name: Проверка сформированных программ через ShellCheck
           ansible.builtin.command:
@@ -509,8 +609,12 @@
               - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"
               - "{{ rendered_shell_root }}/awg-health-exit"
+              - "{{ rendered_shell_root }}/awg-health-front"
+              - "{{ rendered_shell_root }}/awg-health-front-standalone"
               - "{{ rendered_shell_root }}/kalimera-help"
               - "{{ rendered_shell_root }}/kalimera-test"
+              - "{{ rendered_shell_root }}/kalimera-test-exit"
+              - "{{ rendered_shell_root }}/kalimera-test-front"
           changed_when: false
 
       always:

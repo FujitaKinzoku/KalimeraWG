@@ -24,7 +24,6 @@
 {% set mappings = [
   {'source': '/etc/amnezia/amneziawg', 'target': 'amneziawg'},
   {'source': '/etc/amnezia/amneziawg-v3', 'target': 'amneziawg-v3'},
-  {'source': '/etc/sing-box', 'target': 'sing-box'},
   {'source': '/usr/local/etc/xray', 'target': 'xray'},
   {'source': '/etc/letsencrypt', 'target': 'letsencrypt'},
   {'source': '/etc/awg', 'target': 'awg'},
@@ -32,6 +31,15 @@
   {'source': '/root/config-backups', 'target': 'backups'},
   {'source': '/etc/awg-telegram-monitor.env', 'target': 'telegram/monitor.env'}
 ] %}
+{% set sing_box_mapping = {'source': '/etc/sing-box', 'target': 'sing-box'} %}
+{% if front_backend_enabled | default(false) | bool %}
+{% set _ = sing_box_mapping.update({
+  'access_group': 'sing-box',
+  'traverse_paths': ['.', 'reality'],
+  'read_paths': ['reality/rules']
+}) %}
+{% endif %}
+{% set _ = mappings.insert(2, sing_box_mapping) %}
 {% if runtime_secrets_controller_vault_password_path | default('') | length > 0 %}
 {% set _ = mappings.append({'source': runtime_secrets_controller_vault_password_path, 'target': 'controller/production-vault.pass'}) %}
 {% endif %}
