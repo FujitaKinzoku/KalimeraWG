@@ -643,7 +643,7 @@ front_vless_encryption_is_enabled() {
     jq -e '
         .inbounds[0].settings.decryption |
         type == "string" and
-        startswith("mlkem768x25519plus.native.0rtt.")
+        startswith("mlkem768x25519plus.native.600s.")
     ' {{ front_xray_config_path | quote }} >/dev/null 2>&1 &&
         jq -e '
             .encryption |

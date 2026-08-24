@@ -173,6 +173,15 @@
                  | first }}
           no_log: true
 
+        - name: Проверка форматов серверной и клиентской частей ML-KEM-768
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - front_test_vless_decryption is match('^mlkem768x25519plus\.native\.600s\.')
+              - front_test_vless_encryption is match('^mlkem768x25519plus\.native\.0rtt\.')
+            fail_msg: Xray-core изменил формат согласованной пары VLESS Encryption
+          no_log: true
+
         # front_entry_* - простые факты (не groups/hostvars, это служебные
         # переменные Ansible, их нельзя подменить через vars: в задаче) -
         # тот же набор, что roles/front/tasks/main.yml вычисляет один раз
@@ -300,6 +309,8 @@
               - (front_test_vless_export.stdout | from_json).inbounds[1].tag == 'http-in'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.network == 'xhttp'
               - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].flow == ''
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].encryption == front_test_vless_encryption
+              - (front_test_vless_export.stdout | from_json).outbounds[0].settings.vnext[0].users[0].encryption is match('^mlkem768x25519plus\.native\.0rtt\.')
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.alpn == ['h2', 'http/1.1']
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.fingerprint == 'firefox'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.tlsSettings.serverName == 'edge.example.invalid'
@@ -315,6 +326,8 @@
               - (front_test_vless_export.stdout | from_json).routing.rules[0].outboundTag == 'proxy'
               - (front_test_vless_export.stdout | from_json).remarks == 'Kalimera-FRONT-disguiseV2'
               - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.clients | length == 1
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption == front_test_vless_decryption
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption is match('^mlkem768x25519plus\.native\.600s\.')
             fail_msg: >-
               Экспортированный CDN JSON или активный список VLESS-пользователей
               не соответствует проверяемому профилю

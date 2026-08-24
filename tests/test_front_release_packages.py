@@ -155,6 +155,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn('resolved="$(readlink -f -- "$state_dir")"', health)
         self.assertIn('stat -Lc %U -- "$state_dir"', health)
         self.assertIn("front_vless_encryption_is_enabled", health)
+        self.assertIn("mlkem768x25519plus.native.600s.", health)
         self.assertIn("mlkem768x25519plus.native.0rtt.", health)
         self.assertIn("VLESS Encryption ML-KEM-768 включён", health)
         self.assertIn(

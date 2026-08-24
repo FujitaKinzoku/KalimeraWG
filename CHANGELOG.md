@@ -2,6 +2,14 @@
 
 ## [Unreleased] - фиксация тестового этапа
 
+- Исправлена обязательная проверка VLESS Encryption на FRONT. Xray-core
+  использует разные форматы согласованной ML-KEM-768 пары: серверный
+  `decryption` начинается с `mlkem768x25519plus.native.600s.`, а клиентский
+  `encryption` с `mlkem768x25519plus.native.0rtt.`. Прежняя проверка ошибочно
+  требовала клиентский формат от обеих сторон и блокировала корректные чистые
+  установки и `--resume`. Интеграционный тест теперь получает пару настоящим
+  закреплённым Xray-core и отдельно проверяет серверную конфигурацию и полный
+  клиентский JSON.
 - Экспорт `vless-user` для режима CDN приведён к подтверждённому формату
   полного JSON-профиля HAPP: SOCKS и HTTP inbounds, sniffing, DNS, VLESS
   Encryption, TLS ALPN/fingerprint, полный XHTTP camouflage, routing и
