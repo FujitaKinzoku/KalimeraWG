@@ -3219,7 +3219,39 @@ def main() -> None:
         if transition_completed:
             final_variables.update({"awg_prepare_apt": False, "awg_restore_apt": True})
         try:
-            ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
+            try:
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
+            except SystemExit:
+                # Финальный прогон site.yml включает и отключение root
+                # (security_finalize_admin_access), и более поздние задачи,
+                # которым снова нужен SSH (например, Shamir-play). Если один
+                # из хостов успел перейти на kalimera именно в этом прогоне,
+                # а inventory на диске ещё содержит устаревший root, задача
+                # падает с "Permission denied (publickey)" даже при полностью
+                # исправном состоянии серверов. Проверяем это по-настоящему
+                # (реальное SSH-подключение внутри recover_saved_admin_access),
+                # а не считаем совпадением - и повторяем прогон один раз, если
+                # восстановление действительно что-то исправило.
+                hosts_document = load_yaml(hosts_path)
+                all_vars_current = load_yaml(all_vars_path)
+                recovered = recover_saved_admin_access(
+                    hosts_document,
+                    hosts_path,
+                    str(all_vars_current.get("security_admin_user", "kalimera")),
+                    bool(all_vars_current.get("security_finalize_admin_access", False)),
+                )
+                if not recovered:
+                    raise
+                print(
+                    "SSH-доступ подтверждён по kalimera после перехода: "
+                    + ", ".join(recovered)
+                    + ". Повторяю финальный прогон без вмешательства оператора."
+                )
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
             if awg_package_lock.is_file():
                 pin_resolved_awg_packages(all_vars_path, awg_package_lock)
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")

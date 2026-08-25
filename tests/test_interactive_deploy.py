@@ -882,6 +882,236 @@ class InteractiveDeployTests(unittest.TestCase):
                 ansible_run.call_args_list[0].args[4]["awg_package_transaction_id"],
             )
 
+    def test_final_deploy_retries_once_after_recovering_stale_ssh_access(self) -> None:
+        """root может отключиться на хосте прямо во время финального site.yml -
+        та же самая гонка, что чинит recover_saved_admin_access для --resume,
+        только на этот раз она бьёт по самому финальному прогону, а не по
+        входу в него. Ожидается один автоматический повтор без участия
+        оператора, если восстановление реально нашло рабочий kalimera."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            home = root / "home"
+            production = repo / "inventory" / "production"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            vault_path = production / "group_vars" / "all" / "vault.yml"
+            hosts_path = production / "hosts.yml"
+            (production / "group_vars").mkdir(parents=True)
+            # security_finalize_admin_access ещё False на входе в прогон -
+            # то же самое сочетание, что и в реальности: complete_ssh_transition
+            # (замокан ниже) ничего не поменял, а root на самом деле отключается
+            # только внутри самого мокнутого site.yml - предварительная проверка
+            # recover_saved_admin_access перед complete_ssh_transition должна
+            # честно увидеть рабочий root и ничего не трогать, чтобы гонку
+            # действительно ловил именно новый код повтора, а не она сама.
+            MODULE.yaml_write(
+                all_vars_path,
+                {
+                    "security_admin_authorized_keys": ["ssh-ed25519 fixture"],
+                    "security_require_admin_authorized_key": True,
+                    "security_admin_user": "kalimera",
+                    "security_finalize_admin_access": False,
+                },
+            )
+            MODULE.yaml_write(
+                hosts_path,
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {
+                                        "ansible_host": "198.51.100.20",
+                                        "ansible_user": "root",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                        "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            vault_path.write_text("$ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
+            vault_password = home / ".config" / "awg-iac" / "production-vault.pass"
+            vault_password.parent.mkdir(parents=True)
+            vault_password.write_text("fixture\n", encoding="utf-8")
+
+            state = {"root_finalized": False}
+
+            def connection_works(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                if user == "root":
+                    return not state["root_finalized"]
+                return user == "kalimera"
+
+            def ansible_side_effect(
+                repo_arg: Path,
+                inventory_arg: Path,
+                vault_arg: Path,
+                playbook: str,
+                extra_vars: dict[str, object] | None = None,
+            ) -> None:
+                if playbook == "playbooks/site.yml" and not state["root_finalized"]:
+                    # Имитирует security-роль, которая внутри этого же прогона
+                    # финализирует отключение root, после чего более поздняя
+                    # задача того же прогона (например, чтение SSH host key
+                    # для Shamir-play) падает по устаревшим данным подключения.
+                    state["root_finalized"] = True
+                    raise SystemExit(
+                        "exit-managed: Permission denied (publickey)"
+                    )
+                return None
+
+            with (
+                mock.patch.object(Path, "home", return_value=home),
+                mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_mobile_awg3_vault_material"),
+                mock.patch.object(MODULE, "show_front_deploy_state"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "update_saved_client_configs_cps"),
+                mock.patch.object(MODULE, "update_saved_client_configs_mtu"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
+                mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
+                mock.patch.object(
+                    MODULE, "ssh_connection_works", side_effect=connection_works
+                ),
+                mock.patch.object(
+                    MODULE, "ansible", side_effect=ansible_side_effect
+                ) as ansible_run,
+                mock.patch.object(MODULE, "cleanup_deployment"),
+                mock.patch.object(MODULE, "show_deployment_summary"),
+                mock.patch.object(MODULE.atexit, "register"),
+                mock.patch.object(MODULE.atexit, "unregister"),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["interactive_deploy.py", "--repo-root", str(repo), "--resume"],
+                ),
+            ):
+                MODULE.main()
+
+            site_yml_calls = [
+                call
+                for call in ansible_run.call_args_list
+                if call.args[3] == "playbooks/site.yml"
+            ]
+            self.assertEqual(len(site_yml_calls), 2)
+            updated = MODULE.load_yaml(hosts_path)["all"]["children"]["exit"][
+                "hosts"
+            ]["exit-managed"]
+            self.assertEqual(updated["ansible_user"], "kalimera")
+
+    def test_final_deploy_does_not_mask_unrelated_ssh_failure(self) -> None:
+        """Если recover_saved_admin_access ничего не восстановила (проблема
+        не в этой конкретной гонке root/kalimera), повтор не выполняется и
+        оригинальная ошибка доходит до оператора как есть - иначе можно было
+        бы случайно замаскировать по-настоящему сломанный сервер под "просто
+        повторить"."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            home = root / "home"
+            production = repo / "inventory" / "production"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            vault_path = production / "group_vars" / "all" / "vault.yml"
+            hosts_path = production / "hosts.yml"
+            (production / "group_vars").mkdir(parents=True)
+            MODULE.yaml_write(
+                all_vars_path,
+                {
+                    "security_admin_authorized_keys": ["ssh-ed25519 fixture"],
+                    "security_require_admin_authorized_key": True,
+                    "security_admin_user": "kalimera",
+                    "security_finalize_admin_access": True,
+                },
+            )
+            MODULE.yaml_write(
+                hosts_path,
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {
+                                        "ansible_host": "198.51.100.20",
+                                        "ansible_user": "root",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                        "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            vault_path.write_text("$ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
+            vault_password = home / ".config" / "awg-iac" / "production-vault.pass"
+            vault_password.parent.mkdir(parents=True)
+            vault_password.write_text("fixture\n", encoding="utf-8")
+
+            def connection_never_recovers(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                return False
+
+            with (
+                mock.patch.object(Path, "home", return_value=home),
+                mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_mobile_awg3_vault_material"),
+                mock.patch.object(MODULE, "show_front_deploy_state"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "update_saved_client_configs_cps"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
+                mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
+                mock.patch.object(
+                    MODULE, "ssh_connection_works", side_effect=connection_never_recovers
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "ansible",
+                    side_effect=SystemExit("exit-managed: Permission denied (publickey)"),
+                ) as ansible_run,
+                mock.patch.object(MODULE, "cleanup_deployment"),
+                mock.patch.object(MODULE.atexit, "register"),
+                mock.patch.object(MODULE.atexit, "unregister"),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["interactive_deploy.py", "--repo-root", str(repo), "--resume"],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit, "Permission denied"
+                ):
+                    MODULE.main()
+
+            # Без подтверждённого kalimera-доступа повтор не выполняется -
+            # ошибка не маскируется, если проблема не в этой конкретной гонке.
+            site_yml_calls = [
+                call
+                for call in ansible_run.call_args_list
+                if call.args[3] == "playbooks/site.yml"
+            ]
+            self.assertEqual(len(site_yml_calls), 1)
+
     def test_terminal_only_updates_role_without_full_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
