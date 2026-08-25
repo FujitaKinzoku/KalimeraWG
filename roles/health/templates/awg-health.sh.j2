@@ -151,10 +151,12 @@ runtime_secret_dependencies_are_loaded() {
             grep -Fq 'LoadCredential=front-backend.json:'
 {% elif awg_node_role == 'entry' %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
-        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
-            grep -Fq 'LoadCredential=awg3.conf:'{% if entry_mobile_client_available | default(false) | bool %} &&
+{% if entry_mobile_client_available | default(false) | bool %}
         systemctl cat {{ awg3_mobile_service_name | default('awg3-mobile.service') | quote }} |
-            grep -Fq 'LoadCredential=awg-mobile.conf:'{% endif %}
+            grep -Fq 'LoadCredential=awg-mobile.conf:' &&
+{% endif %}
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:'
 {% else %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
