@@ -665,9 +665,13 @@ class InteractiveDeployTests(unittest.TestCase):
             entry_vars_path = production / "group_vars" / "entry.yml"
             stable_entry_path = example / "group_vars" / "entry.yml"
             awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+            awg3_mobile_defaults_path = (
+                repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+            )
             all_vars_path.parent.mkdir(parents=True)
             stable_entry_path.parent.mkdir(parents=True)
             awg3_defaults_path.parent.mkdir(parents=True)
+            awg3_mobile_defaults_path.parent.mkdir(parents=True)
             MODULE.yaml_write(
                 all_vars_path,
                 {
@@ -702,6 +706,19 @@ class InteractiveDeployTests(unittest.TestCase):
                     "awg3_tools_source_commit": "b" * 40,
                 },
             )
+            MODULE.yaml_write(
+                awg3_mobile_defaults_path,
+                {
+                    "awg3_mobile_go_version": "1.25.12",
+                    "awg3_mobile_go_archives": {
+                        "x86_64": {"checksum": "sha256:mobile-go"}
+                    },
+                    "awg3_mobile_go_source_version": "v3.1",
+                    "awg3_mobile_go_source_commit": "c" * 40,
+                    "awg3_mobile_tools_source_version": "v3.1",
+                    "awg3_mobile_tools_source_commit": "d" * 40,
+                },
+            )
 
             MODULE.prepare_component_update(repo, production)
 
@@ -712,6 +729,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
             self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
             self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
+            self.assertEqual(all_vars["awg3_mobile_go_source_commit"], "c" * 40)
 
     def test_failed_component_update_restores_inventory_and_runs_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -729,7 +747,11 @@ class InteractiveDeployTests(unittest.TestCase):
             awg3_defaults_path = (
                 repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
             )
+            awg3_mobile_defaults_path = (
+                repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+            )
             awg3_defaults_path.parent.mkdir(parents=True)
+            awg3_mobile_defaults_path.parent.mkdir(parents=True)
             stable_entry_path.parent.mkdir(parents=True)
             original_all = {
                 "awg_package_version_mode": "pinned",
@@ -763,6 +785,19 @@ class InteractiveDeployTests(unittest.TestCase):
                 "awg3_tools_source_commit": "b" * 40,
             }
             MODULE.yaml_write(awg3_defaults_path, awg3_manifest)
+            MODULE.yaml_write(
+                awg3_mobile_defaults_path,
+                {
+                    "awg3_mobile_go_version": "1.25.12",
+                    "awg3_mobile_go_archives": {
+                        "x86_64": {"checksum": "sha256:mobile-go"}
+                    },
+                    "awg3_mobile_go_source_version": "v3.1",
+                    "awg3_mobile_go_source_commit": "c" * 40,
+                    "awg3_mobile_tools_source_version": "v3.1",
+                    "awg3_mobile_tools_source_commit": "d" * 40,
+                },
+            )
             MODULE.yaml_write(
                 hosts_path,
                 {
@@ -1102,7 +1137,11 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(migrated["entry_mobile_client_listen_port"], 8443)
             self.assertEqual(migrated["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(migrated["entry_mobile_legacy_internal_port"], 39746)
-            self.assertEqual(migrated["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", migrated)
+            self.assertEqual(migrated["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(migrated["entry_mobile_service_name"], "awg3-mobile.service")
+            for index in range(1, 6):
+                self.assertTrue(migrated["entry_mobile_awg_obfuscation"][f"i{index}"])
             self.assertNotIn("entry_mobile_client_public_port", migrated)
             self.assertNotIn("entry_mobile_client_internal_port", migrated)
             self.assertEqual(
@@ -1157,12 +1196,17 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry["entry_mobile_client_subnet"], "10.68.0.0/24")
             self.assertEqual(entry["entry_mobile_client_address"], "10.68.0.1/24")
             self.assertEqual(entry["entry_mobile_client_listen_port"], 8443)
-            self.assertEqual(entry["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", entry)
+            self.assertEqual(entry["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(entry["entry_mobile_service_name"], "awg3-mobile.service")
             self.assertIn("entry_mobile_awg_obfuscation", entry)
+            for index in range(1, 6):
+                self.assertTrue(entry["entry_mobile_awg_obfuscation"][f"i{index}"])
 
             decrypted = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
             mobile_private = decrypted["vault_awg_entry_mobile_private_key"]
             self.assertTrue(mobile_private)
+            self.assertTrue(decrypted["vault_awg_entry_mobile_header_protection_key"])
             self.assertEqual(decrypted["vault_entry_mobile_client_peers"], [])
             self.assertEqual(entry_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(vault_path.stat().st_mode & 0o777, 0o600)
@@ -1174,6 +1218,27 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(
                 repeated["vault_awg_entry_mobile_private_key"], mobile_private
             )
+
+    def test_resume_repairs_partial_mobile_awg31_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            production = Path(directory) / "production"
+            entry_path = production / "group_vars" / "entry.yml"
+            entry_path.parent.mkdir(parents=True)
+            entry_path.write_text(
+                "entry_mobile_client_available: true\n"
+                "entry_mobile_profile_generation: awg3.1\n"
+                "entry_mobile_service_name: awg3-mobile.service\n"
+                "entry_mobile_awg_obfuscation:\n"
+                "  s1: 8\n"
+                "  i1: '<b 0x01>'\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(MODULE.migrate_production_inventory(production))
+            migrated = yaml.safe_load(entry_path.read_text(encoding="utf-8"))
+            profile = migrated["entry_mobile_awg_obfuscation"]
+            self.assertTrue(MODULE.awg_mobile_awg3_profile_is_complete(profile))
+            self.assertFalse(MODULE.migrate_production_inventory(production))
 
     def test_resume_migrates_saved_client_cps_without_exposing_other_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1443,10 +1508,10 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('export_user_config "$2"', vpn_user)
         self.assertIn('cat -- "$output"', vpn_user)
         self.assertIn('export_user_config "$name"', vpn_user)
-        self.assertIn('awg set "$iface" peer "$public_key" remove', vpn_user)
+        self.assertIn('"$tool" set "$iface" peer "$public_key" remove', vpn_user)
         self.assertIn("config-backups/entry/clients/deleted", vpn_user)
         self.assertIn("управляется зашифрованным inventory", vpn_user)
-        self.assertIn('"$client_ip" "$profile" >"$peer_file"', vpn_user)
+        self.assertIn('"$client_ip" "$profile_label" >"$peer_file"', vpn_user)
         self.assertIn("#_Profile", vpn_user)
 
         self.assertIn("restore_state", domains)
@@ -1809,8 +1874,7 @@ class InteractiveDeployTests(unittest.TestCase):
         profiles = (
             MODULE.awg_server_obfuscation(),
             MODULE.awg_legacy_server_obfuscation(),
-            MODULE.awg_mobile_dns_obfuscation(),
-            MODULE.awg_mobile_quic_obfuscation(),
+            MODULE.awg_mobile_awg3_obfuscation(),
             MODULE.awg3_transit_obfuscation(),
         )
         for profile in profiles:
@@ -1870,79 +1934,14 @@ class InteractiveDeployTests(unittest.TestCase):
         for index in range(1, 6):
             self.assertEqual(client[f"i{index}"], "")
 
-    def test_mobile_profile_matches_confirmed_ios_dns_signature(self) -> None:
-        server = MODULE.awg_mobile_dns_obfuscation()
-        client = MODULE.awg_client_obfuscation("mobile", server)
-        self.assertEqual((client["jc"], client["jmin"], client["jmax"]), (5, 10, 50))
-        self.assertEqual(client["s4"], 0)
-        self.assertTrue(str(client["i1"]).startswith("<r 2><b 0x8580"))
-        self.assertIn("69636c6f756403636f6d", str(client["i1"]))
-        for index in range(2, 6):
-            self.assertEqual(client[f"i{index}"], "")
-
-    def test_mobile_quic_test_changes_only_i1(self) -> None:
-        dns_profile = MODULE.awg_mobile_dns_obfuscation()
-        with mock.patch.object(MODULE, "random_between", side_effect=[4, 8, 8]):
-            quic_profile = MODULE.awg_mobile_quic_obfuscation()
-
-        for key in (
-            "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
-            "h1", "h2", "h3", "h4", "i2", "i3", "i4", "i5",
-        ):
-            self.assertEqual(quic_profile[key], dns_profile[key])
-        self.assertEqual(
-            quic_profile["i1"],
-            "<b 0xc30000000108><r 8><b 0x08><r 8>"
-            "<b 0x004496><r 1000><r 174>",
-        )
-
-    def test_mobile_i1_mode_is_stable_and_reversible(self) -> None:
-        dns_profile = MODULE.awg_mobile_dns_obfuscation()
-        with tempfile.TemporaryDirectory() as temporary:
-            production = Path(temporary)
-            entry_path = production / "group_vars" / "entry.yml"
-            entry_path.parent.mkdir(parents=True)
-            MODULE.yaml_write(
-                entry_path,
-                {
-                    "entry_mobile_i1_mode": "dns-ios",
-                    "entry_mobile_awg_obfuscation": dns_profile,
-                },
-            )
-            with mock.patch.object(MODULE, "random_between", side_effect=[4, 8, 8]):
-                self.assertTrue(
-                    MODULE.set_mobile_i1_mode(production, "quic-ios")
-                )
-            first_quic = MODULE.load_yaml(entry_path)[
-                "entry_mobile_awg_obfuscation"
-            ]["i1"]
-
-            with mock.patch.object(
-                MODULE,
-                "awg_quic_initial_signature",
-                side_effect=AssertionError("I1 не должен ротироваться при resume"),
-            ):
-                self.assertFalse(
-                    MODULE.set_mobile_i1_mode(production, "quic-ios")
-                )
-            self.assertEqual(
-                MODULE.load_yaml(entry_path)["entry_mobile_awg_obfuscation"]["i1"],
-                first_quic,
-            )
-
-            self.assertTrue(MODULE.set_mobile_i1_mode(production, "dns-ios"))
-            restored = MODULE.load_yaml(entry_path)
-            self.assertEqual(restored["entry_mobile_i1_mode"], "dns-ios")
-            self.assertEqual(
-                restored["entry_mobile_awg_obfuscation"]["i1"],
-                dns_profile["i1"],
-            )
-
-    def test_mobile_interface_uses_direct_8443_and_cleans_legacy_dns_redirect(self) -> None:
+    def test_mobile_awg3_profile_uses_direct_8443_and_full_field_set(self) -> None:
         root = MODULE_PATH.parents[2]
-        config = (root / "roles/entry/templates/awg-mobile.conf.j2").read_text(
+        config = (root / "roles/awg3_mobile/templates/mobile.conf.j2").read_text(
             encoding="utf-8"
         )
+        service = (
+            root / "roles/awg3_mobile/templates/awg3-mobile.service.j2"
+        ).read_text(encoding="utf-8")
         firewall = (
             root / "roles/entry/templates/awg-mobile-firewall.sh.j2"
         ).read_text(encoding="utf-8")
@@ -1952,14 +1951,25 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("ListenPort = {{ entry_mobile_client_listen_port }}", config)
         self.assertIn("vault_entry_mobile_client_peers", config)
         self.assertIn("I1 = {{ entry_mobile_awg_obfuscation.i1 }}", config)
-        self.assertNotIn("I2 =", config)
+        for field in (
+            "I2", "I3", "I4", "I5", "HeaderProtectionKey",
+            "ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout",
+            "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts",
+            "RandomTrailers", "DisableCookies",
+        ):
+            self.assertIn(f"{field} =", config)
+        self.assertIn("{{ awg3_mobile_binary_path }}", service)
+        self.assertNotIn("AdvancedSecurity", config)
         self.assertIn("readonly comment=awg-mobile-public-quic", firewall)
         self.assertIn("--dport \"$listen_port\"", firewall)
         self.assertIn("-j ACCEPT", firewall)
         self.assertIn("remove_legacy_redirect", firewall)
         self.assertIn("check-dns-clean", firewall)
         self.assertNotIn("-A PREROUTING", firewall)
-        self.assertIn("vpn-user NAME [performance|balanced|masking|mobile|old]", user)
+        self.assertIn("vpn-user NAME [performance|balanced|masking|mobile/AWG3+|old]", user)
+        self.assertIn("mobile/AWG3+", user)
+        self.assertIn("mobile-awg3|mobile/awg3+", user)
+        self.assertIn("HeaderProtectionKey =", user)
         self.assertIn("./deploy --resume --enable-mobile", user)
 
     def test_optional_interfaces_refresh_routes_without_dns_or_policy_reset(self) -> None:
@@ -2596,7 +2606,9 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertTrue(entry_vars["entry_mobile_client_available"])
             self.assertFalse(entry_vars["entry_mobile_client_enabled"])
             self.assertEqual(entry_vars["entry_mobile_client_listen_port"], 8443)
-            self.assertEqual(entry_vars["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", entry_vars)
+            self.assertEqual(entry_vars["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg3-mobile.service")
             self.assertEqual(entry_vars["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(entry_vars["entry_mobile_legacy_internal_port"], 39746)
             self.assertEqual(entry_vars["entry_awg0_listen_port"], 443)

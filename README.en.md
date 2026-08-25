@@ -116,7 +116,7 @@ threat model for the new mechanisms in
 | Segment | Purpose | Default state |
 |---|---|---|
 | `awg0`, UDP/443 | modern clients | enabled |
-| `awg-mobile`, UDP/8443 | iOS/mobile QUIC-like profile | enabled on first mobile peer |
+| `awg-mobile`, UDP/8443 | dedicated userspace mobile/AWG3+ with the full AWG 3.1 profile | enabled on first mobile peer |
 | `awg-old` | KeeneticOS 4.3.x compatibility | enabled on first old peer |
 | `awg3`, EXIT UDP/443 | independent userspace ENTRY–EXIT transit | enabled |
 
@@ -129,7 +129,7 @@ and transit segments use separate interfaces, keys, and parameters.
 |---|---|
 | General-purpose cascade | `balanced` |
 | Highest supported obfuscation | `masking` + AWG 3+ transit |
-| Official AmneziaWG client on iOS | `mobile` on UDP/8443 |
+| AmneziaWG 5.0.1.5 or newer | `mobile/AWG3+` on UDP/8443 |
 | KeeneticOS 4.3.x | `old` on the compatibility interface |
 | Highest client performance | `performance` |
 | Russian residential/mobile egress | SOAX or another SOCKS5 provider |
@@ -140,7 +140,7 @@ and transit segments use separate interfaces, keys, and parameters.
 |---|---|
 | Ubuntu 24.04 LTS | repeated clean deployments across different VPS providers, reboot, and strict audit |
 | ENTRY–EXIT | fresh AWG 3+ handshake, coordinated MTU, and post-reboot recovery |
-| iOS | `mobile` profile on the dedicated UDP/8443 interface in the official AmneziaWG client |
+| mobile/AWG3+ | full AWG 3.1 profile implemented; clean VPS and 5.0.1.5+ client acceptance is required for this test branch |
 | KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
 | RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
 | Mobile allowlist | feature branch established a new session via compatible cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
@@ -151,6 +151,7 @@ identical behavior across every carrier, hosting provider, and client version.
 ```bash
 vpn-user phone balanced
 vpn-user iphone mobile
+vpn-user tablet mobile/awg3+
 vpn-user list
 vpn-user delete phone
 ```

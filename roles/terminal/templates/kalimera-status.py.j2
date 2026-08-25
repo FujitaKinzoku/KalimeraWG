@@ -45,6 +45,7 @@ CONFIG = {
     "entry_transit_interface": {{ terminal_summary_entry_transit_interface | to_json }},
     "legacy_interface": {{ terminal_summary_legacy_interface | to_json }},
     "mobile_interface": {{ terminal_summary_mobile_interface | to_json }},
+    "mobile_service": {{ terminal_summary_mobile_service | to_json }},
     "exit_transit_interface": {{ terminal_summary_exit_transit_interface | to_json }},
     "proxy_disabled_flag": {{ entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled') | to_json }},
     "proxy_manual_flag": {{ entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off') | to_json }},
@@ -376,10 +377,10 @@ def command_panels() -> None:
             "VPN-КЛИЕНТЫ",
             [
                 ("vpn-user list", "пользователи и последний handshake", "INFO"),
-                ("vpn-user ИМЯ ПРОФИЛЬ", "создать performance, balanced, masking, mobile или old", "INFO"),
+                ("vpn-user ИМЯ ПРОФИЛЬ", "создать performance, balanced, masking, mobile/AWG3+ или old", "INFO"),
                 ("vpn-user export ИМЯ", "показать защищённый конфиг для копирования", "INFO"),
                 ("vpn-user delete ИМЯ", "отозвать peer и удалить рабочий конфиг", "INFO"),
-                ("awg-mobile status", "состояние мобильного интерфейса UDP/8443", "INFO"),
+                ("awg-mobile status", "состояние mobile/AWG3+ на UDP/8443", "INFO"),
                 ("awg-old status", "состояние legacy-интерфейса", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
@@ -514,10 +515,10 @@ def main() -> int:
         return 0
 
     old_active = service_active(f"awg-quick@{CONFIG['legacy_interface']}.service")
-    mobile_active = service_active(f"awg-quick@{CONFIG['mobile_interface']}.service")
+    mobile_active = service_active(CONFIG["mobile_service"])
     if CONFIG["role"] == "entry":
         old_text = state_word(old_active, CONFIG["legacy_available"])
-        mobile_text = f"QUIC-профиль; {state_word(mobile_active, CONFIG['mobile_available'])}"
+        mobile_text = f"AWG 3.1, полный профиль; {state_word(mobile_active, CONFIG['mobile_available'])}"
         old_level = "OK" if old_active else "INFO"
         mobile_level = "OK" if mobile_active else "INFO"
     else:
@@ -527,7 +528,7 @@ def main() -> int:
             else "не предусмотрен текущей конфигурацией"
         )
         mobile_text = (
-            "QUIC-профиль предусмотрен; фактическое состояние проверяется на ENTRY"
+            "mobile/AWG3+ предусмотрен; фактическое состояние проверяется на ENTRY"
             if CONFIG["mobile_available"]
             else "не предусмотрен текущей конфигурацией"
         )
@@ -610,7 +611,7 @@ def main() -> int:
     audit_level, audit_text = audit_state(in_boot_grace)
     entry_policy = (
         f"TCP/{CONFIG['entry_ssh_port']} SSH; UDP/{CONFIG['client_port']} клиенты; "
-        f"UDP/{CONFIG['mobile_port']} mobile при включении; UDP/{CONFIG['entry_transit_port']} "
+        f"UDP/{CONFIG['mobile_port']} mobile/AWG3+ при включении; UDP/{CONFIG['entry_transit_port']} "
         f"только от {CONFIG['exit_host']}"
     )
     exit_policy = (

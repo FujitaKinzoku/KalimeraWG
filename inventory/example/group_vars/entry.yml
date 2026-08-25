@@ -42,6 +42,7 @@ entry_mobile_client_listen_port: 8443
 entry_mobile_legacy_public_port: 53
 entry_mobile_legacy_internal_port: 39746
 entry_mobile_client_mtu: 1380
+entry_mobile_service_name: awg3-mobile.service
 
 entry_awg0_obfuscation:
   jc: 6
@@ -63,20 +64,23 @@ entry_awg0_obfuscation:
 
 entry_awg1_obfuscation: "{{ entry_awg0_obfuscation }}"
 
-entry_mobile_i1_mode: quic-ios
 entry_mobile_awg_obfuscation:
   jc: 5
   jmin: 10
   jmax: 50
-  s1: 134
-  s2: 79
-  s3: 17
-  s4: 0
-  h1: "1134731367-1758702570"
-  h2: "1999989254-2027383437"
-  h3: "2041897377-2054735816"
-  h4: "2083840314-2084318622"
+  s1: 32
+  s2: 48
+  s3: 24
+  s4: 16
+  h1: "100000001-250000000"
+  h2: "600000001-750000000"
+  h3: "1100000001-1250000000"
+  h4: "1600000001-1750000000"
   i1: "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1000><r 174>"
+  i2: "<b 0x40><r 127>"
+  i3: "<b 0x41><r 95>"
+  i4: "<b 0x42><r 63>"
+  i5: "<b 0x43><r 47>"
 
 entry_exit_mark: "0x1"
 entry_exit_table: 100
