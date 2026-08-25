@@ -425,6 +425,8 @@
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit
       when: awg_adoption_mode == 'apply'
+    - role: awg3_mobile
+      when: awg_adoption_mode == 'apply'
     - role: sing_box
       when: awg_adoption_mode == 'apply'
     - role: entry_routing

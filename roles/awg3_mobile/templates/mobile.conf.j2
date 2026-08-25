@@ -1,9 +1,6 @@
 [Interface]
 PrivateKey = {{ vault_awg_entry_mobile_private_key }}
-Address = {{ entry_mobile_client_address }}
 ListenPort = {{ entry_mobile_client_listen_port }}
-MTU = {{ entry_mobile_client_mtu }}
-Table = off
 Jc = {{ entry_mobile_awg_obfuscation.jc }}
 Jmin = {{ entry_mobile_awg_obfuscation.jmin }}
 Jmax = {{ entry_mobile_awg_obfuscation.jmax }}
@@ -16,17 +13,26 @@ H2 = {{ entry_mobile_awg_obfuscation.h2 }}
 H3 = {{ entry_mobile_awg_obfuscation.h3 }}
 H4 = {{ entry_mobile_awg_obfuscation.h4 }}
 I1 = {{ entry_mobile_awg_obfuscation.i1 }}
-PostUp = {{ entry_mobile_firewall_path }} apply
-PreDown = {{ entry_mobile_firewall_path }} remove
+I2 = {{ entry_mobile_awg_obfuscation.i2 }}
+I3 = {{ entry_mobile_awg_obfuscation.i3 }}
+I4 = {{ entry_mobile_awg_obfuscation.i4 }}
+I5 = {{ entry_mobile_awg_obfuscation.i5 }}
+HeaderProtectionKey = {{ vault_awg_entry_mobile_header_protection_key }}
+ContentPaddingAddition = {{ awg3_mobile_content_padding_addition }}
+RekeyAfterTime = {{ awg3_mobile_rekey_after_time }}
+RekeyTimeout = {{ awg3_mobile_rekey_timeout }}
+RejectAfterTime = {{ awg3_mobile_reject_after_time }}
+KeepaliveTimeout = {{ awg3_mobile_keepalive_timeout }}
+MaxHandshakeAttempts = {{ awg3_mobile_max_handshake_attempts }}
+RandomTrailers = {{ 'on' if awg3_mobile_random_trailers | bool else 'off' }}
+DisableCookies = {{ 'on' if awg3_mobile_disable_cookies | bool else 'off' }}
 
 {% for peer in vault_entry_mobile_client_peers | default([]) %}
-[Peer]
 #_Name = {{ peer.name }}
-#_Profile = mobile
+#_Profile = mobile/AWG3+
+[Peer]
 PublicKey = {{ peer.public_key }}
-{% if peer.preshared_key | default('') | length > 0 %}
 PresharedKey = {{ peer.preshared_key }}
-{% endif %}
 AllowedIPs = {{ peer.allowed_ips | join(', ') }}
 
 {% endfor %}

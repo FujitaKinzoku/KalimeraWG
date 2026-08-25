@@ -39,6 +39,9 @@ managed_files() {
 /etc/systemd/system/{{ runtime_secrets_service_name }}
 /etc/systemd/system/awg-quick@.service.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/{{ awg3_transit_service_name | default('awg3-transit.service') }}.d/90-kalimerawg-runtime-secrets.conf
+{% if awg_node_role == 'entry' and entry_mobile_client_available | default(false) | bool %}
+/etc/systemd/system/{{ awg3_mobile_service_name | default('awg3-mobile.service') }}.d/90-kalimerawg-runtime-secrets.conf
+{% endif %}
 /etc/systemd/system/sing-box.service.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/{{ front_backend_service_name | default('kalimera-front-backend.service') }}.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/{{ front_xray_service_name | default('xray.service') }}.d/90-kalimerawg-runtime-secrets.conf
@@ -56,6 +59,11 @@ managed_files() {
 /usr/local/sbin/awg-local-peer-apply
 /etc/systemd/system/awg-entry-routing.service
 /etc/systemd/system/awg-local-peer-apply.service
+{% if entry_mobile_client_available | default(false) | bool %}
+{{ awg3_mobile_setup_path | default('/usr/local/sbin/awg3-mobile-setup') }}
+{{ awg3_mobile_validate_path | default('/usr/local/sbin/awg3-mobile-validate') }}
+/etc/systemd/system/{{ awg3_mobile_service_name | default('awg3-mobile.service') }}
+{% endif %}
 {% if front_backend_enabled | default(false) | bool %}
 /etc/systemd/system/{{ front_backend_service_name | default('kalimera-front-backend.service') }}
 {{ front_backend_config_path | default('/etc/sing-box/front-backend.json') }}

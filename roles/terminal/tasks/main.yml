@@ -65,6 +65,8 @@
       {{ hostvars[groups['entry'][0]].entry_legacy_client_interface | default('awg-old') }}
     terminal_summary_mobile_interface: >-
       {{ hostvars[groups['entry'][0]].entry_mobile_client_interface | default('awg-mobile') }}
+    terminal_summary_mobile_service: >-
+      {{ hostvars[groups['entry'][0]].awg3_mobile_service_name | default('awg3-mobile.service') }}
     terminal_summary_exit_transit_interface: >-
       {{ hostvars[groups['exit'][0]].exit_awg_interface | default('awg3') }}
   when: terminal_enabled | bool

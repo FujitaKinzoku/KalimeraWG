@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+mode="${1:-up}"
+iface={{ entry_mobile_client_interface | quote }}
+config={{ awg3_mobile_config_path | quote }}
+socket="/var/run/amneziawg/${iface}.sock"
+firewall={{ entry_mobile_firewall_path | quote }}
+routing={{ entry_routing_script_path | default('/usr/local/sbin/awg-entry-routing') | quote }}
+reconcile={{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') | quote }}
+
+if [[ -n "${CREDENTIALS_DIRECTORY:-}" &&
+      -r "${CREDENTIALS_DIRECTORY}/awg-mobile.conf" ]]; then
+    config="${CREDENTIALS_DIRECTORY}/awg-mobile.conf"
+fi
+
+cleanup_interface() {
+    ip link delete dev "$iface" >/dev/null 2>&1 || true
+    for _ in {1..50}; do
+        ip link show "$iface" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
+    if ip link show "$iface" >/dev/null 2>&1; then
+        echo "Интерфейс ${iface} не освободился после остановки предыдущего процесса." >&2
+        return 1
+    fi
+    rm -f -- "$socket"
+}
+
+refresh_routing() {
+    if [[ -x "$reconcile" ]]; then
+        "$reconcile"
+    elif [[ -x "$routing" ]]; then
+        "$routing" apply
+    fi
+}
+
+case "$mode" in
+    prepare)
+        cleanup_interface
+        ;;
+    up)
+        for _ in {1..50}; do
+            ip link show "$iface" >/dev/null 2>&1 && break
+            sleep 0.1
+        done
+        ip link show "$iface" >/dev/null
+        {{ awg3_mobile_tools_binary_path | quote }} setconf "$iface" "$config"
+        ip address replace {{ entry_mobile_client_address | quote }} dev "$iface"
+        ip link set mtu {{ entry_mobile_client_mtu | int }} up dev "$iface"
+        "$firewall" apply
+        refresh_routing
+        systemctl --no-block try-restart awg-local-peer-apply.service >/dev/null 2>&1 || true
+        ;;
+    down)
+        "$firewall" remove >/dev/null 2>&1 || true
+        cleanup_interface
+        refresh_routing || true
+        ;;
+    *)
+        echo 'Использование: awg3-mobile-setup {prepare|up|down}' >&2
+        exit 2
+        ;;
+esac

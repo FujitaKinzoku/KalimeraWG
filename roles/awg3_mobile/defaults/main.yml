@@ -1,0 +1,43 @@
+---
+awg3_mobile_enabled: "{{ entry_mobile_client_available | default(false) | bool }}"
+awg3_mobile_service_name: awg3-mobile.service
+awg3_mobile_config_dir: /etc/amnezia/amneziawg-v3
+awg3_mobile_config_path: "{{ awg3_mobile_config_dir }}/{{ entry_mobile_client_interface }}.conf"
+awg3_mobile_candidate_path: "/run/{{ entry_mobile_client_interface }}.awg31-candidate.conf"
+awg3_mobile_backup_dir: /root/config-backups/entry/awg3-mobile
+awg3_mobile_setup_path: /usr/local/sbin/awg3-mobile-setup
+awg3_mobile_validate_path: /usr/local/sbin/awg3-mobile-validate
+awg3_mobile_binary_path: /usr/local/sbin/amneziawg-go-mobile-v3.1
+awg3_mobile_tools_binary_path: /usr/local/sbin/awg-mobile-v3.1
+
+# Mobile AWG 3.1 is intentionally built and installed separately from the
+# verified AWG 3.0 ENTRY-EXIT channel.
+awg3_mobile_go_version: "1.25.12"
+awg3_mobile_go_archives:
+  x86_64:
+    filename: go1.25.12.linux-amd64.tar.gz
+    checksum: sha256:234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1
+  aarch64:
+    filename: go1.25.12.linux-arm64.tar.gz
+    checksum: sha256:8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2
+awg3_mobile_go_source_version: v3.1.20260814
+awg3_mobile_go_source_commit: 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1
+awg3_mobile_tools_source_version: v3.1.20260812
+awg3_mobile_tools_source_commit: ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
+awg3_mobile_build_root: /usr/local/src/awg-iac/awg3-mobile
+awg3_mobile_cache_root: /var/cache/awg-iac/awg3-mobile
+awg3_mobile_go_install_root: "/opt/awg-iac/go-{{ awg3_mobile_go_version }}"
+awg3_mobile_go_cached_binary: >-
+  {{ awg3_mobile_cache_root }}/amneziawg-go-{{ awg3_mobile_go_source_commit }}-{{ ansible_architecture }}
+awg3_mobile_tools_cached_binary: >-
+  {{ awg3_mobile_cache_root }}/awg-{{ awg3_mobile_tools_source_commit }}-{{ ansible_architecture }}
+
+awg3_mobile_content_padding_addition: "8-32"
+awg3_mobile_rekey_after_time: "120-180"
+awg3_mobile_rekey_timeout: "5-8"
+awg3_mobile_reject_after_time: "180-240"
+awg3_mobile_keepalive_timeout: "10-15"
+awg3_mobile_max_handshake_attempts: "18-24"
+awg3_mobile_persistent_keepalive: "22-30"
+awg3_mobile_random_trailers: true
+awg3_mobile_disable_cookies: false

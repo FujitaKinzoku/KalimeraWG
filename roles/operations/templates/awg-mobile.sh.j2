@@ -4,7 +4,7 @@ set -Eeuo pipefail
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
 
 readonly iface={{ entry_mobile_client_interface | quote }}
-readonly service="awg-quick@${iface}.service"
+readonly service={{ awg3_mobile_service_name | quote }}
 readonly peer_dir={{ awg_mobile_local_peer_dir | quote }}
 readonly routing={{ entry_routing_script_path | quote }}
 readonly firewall={{ entry_mobile_firewall_path | quote }}
@@ -28,7 +28,7 @@ case "${1:-status}" in
             state=OFF
             access=OFF
         fi
-        printf 'Мобильный интерфейс %s: %s; прямой внешний UDP/%s; доступ: %s; клиентов: %s\n' \
+        printf 'Мобильный интерфейс %s (AWG 3.1): %s; прямой внешний UDP/%s; доступ: %s; клиентов: %s\n' \
             "$iface" "$state" "$listen_port" "$access" "$(peer_count)"
         ;;
     on)

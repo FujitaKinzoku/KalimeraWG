@@ -33,6 +33,7 @@
         - roles/health/defaults/main.yml
         - roles/operations/defaults/main.yml
         - roles/awg3_transit/defaults/main.yml
+        - roles/awg3_mobile/defaults/main.yml
         - roles/runtime_secrets/defaults/main.yml
         - roles/security/defaults/main.yml
 
@@ -55,6 +56,7 @@
         runtime_secrets_peer_inventory_hosts:
           - exit.example.invalid
         vault_runtime_secret_key_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        vault_awg_entry_mobile_header_protection_key: fixture-header-key
         awg_node_role: entry
         ansible_port: 56777
         terminal_summary_entry_host: 192.0.2.10
@@ -85,6 +87,7 @@
         terminal_summary_entry_transit_interface: awg3
         terminal_summary_legacy_interface: awg-old
         terminal_summary_mobile_interface: awg-mobile
+        terminal_summary_mobile_service: awg3-mobile.service
         terminal_summary_exit_transit_interface: awg3
 
     - name: Пересоздание временного каталога шаблонов
@@ -261,6 +264,10 @@
               dest: awg3-transit-restart
             - src: roles/awg3_transit/templates/validate-config.sh.j2
               dest: awg3-validate-config
+            - src: roles/awg3_mobile/templates/mobile-setup.sh.j2
+              dest: awg3-mobile-setup
+            - src: roles/awg3_mobile/templates/validate-config.sh.j2
+              dest: awg3-mobile-validate-config
             - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
               dest: kalimera-secrets-unlock
             - src: roles/front/templates/certbot-deploy-hook.sh.j2
@@ -605,6 +612,8 @@
               - "{{ rendered_shell_root }}/awg3-transit-setup"
               - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
+              - "{{ rendered_shell_root }}/awg3-mobile-setup"
+              - "{{ rendered_shell_root }}/awg3-mobile-validate-config"
               - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"

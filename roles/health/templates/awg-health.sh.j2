@@ -143,13 +143,37 @@ runtime_secret_dependencies_are_loaded() {
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:' &&
+{% if entry_mobile_client_available | default(false) | bool %}
+        systemctl cat {{ awg3_mobile_service_name | default('awg3-mobile.service') | quote }} |
+            grep -Fq 'LoadCredential=awg-mobile.conf:' &&
+{% endif %}
         systemctl cat {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} |
             grep -Fq 'LoadCredential=front-backend.json:'
+{% elif awg_node_role == 'entry' %}
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+{% if entry_mobile_client_available | default(false) | bool %}
+        systemctl cat {{ awg3_mobile_service_name | default('awg3-mobile.service') | quote }} |
+            grep -Fq 'LoadCredential=awg-mobile.conf:' &&
+{% endif %}
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:'
 {% else %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:'
 {% endif %}
+}
+{% endif %}
+
+{% if awg_node_role == 'entry' and entry_mobile_client_available | default(false) | bool %}
+mobile_awg31_profile_is_complete() {
+    local config
+    config="$({{ awg3_mobile_tools_binary_path | quote }} showconf {{ entry_mobile_client_interface | quote }} 2>/dev/null)" || return 1
+    for field in HeaderProtectionKey ContentPaddingAddition RekeyAfterTime \
+        RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts \
+        RandomTrailers DisableCookies I1 I2 I3 I4 I5; do
+        grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
+    done
 }
 {% endif %}
 
@@ -392,13 +416,14 @@ else
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
-    check 'служба мобильного AWG' systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service
-    check 'мобильный интерфейс AWG' ip link show {{ entry_mobile_client_interface | quote }}
-    check 'состояние мобильного AWG доступно' awg show {{ entry_mobile_client_interface | quote }}
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
+    check 'служба mobile/AWG3+' systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}
+    check 'мобильный интерфейс AWG 3.1' ip link show {{ entry_mobile_client_interface | quote }}
+    check 'состояние mobile/AWG3+ доступно' {{ awg3_mobile_tools_binary_path | quote }} show {{ entry_mobile_client_interface | quote }}
+    check 'полный профиль AWG 3.1 применён' mobile_awg31_profile_is_complete
     check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu | int }}
     check 'внешний UDP/8443 мобильного AWG открыт напрямую' {{ entry_mobile_firewall_path | quote }} check
-elif systemctl is-failed --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+elif systemctl is-failed --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'служба мобильного AWG не завершилась с ошибкой' false
 else
     printf 'OK   мобильный интерфейс AWG намеренно неактивен\n'
@@ -436,7 +461,7 @@ if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.ser
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'DNS мобильных клиентов по UDP' dig +time=3 +tries=1 @{{ entry_mobile_client_listen_address }} example.com A
 fi
 {% endif %}
@@ -466,7 +491,7 @@ check 'обычные и legacy-клиенты взаимно изолирова
     {{ entry_legacy_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'цепочка маршрутизации мобильного интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -j AWG_RU_PROXY
     check 'принудительный DNS мобильного интерфейса' iptables -w 10 -t nat -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_mobile_client_listen_address ~ ':53') | quote }}
 fi

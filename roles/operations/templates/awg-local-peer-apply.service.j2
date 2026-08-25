@@ -5,7 +5,7 @@ After=awg-quick@{{ entry_client_interface }}.service
 After=awg-quick@{{ entry_legacy_client_interface }}.service
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-After=awg-quick@{{ entry_mobile_client_interface }}.service
+After={{ awg3_mobile_service_name }}
 {% endif %}
 Requires=awg-quick@{{ entry_client_interface }}.service
 [Service]

@@ -1,0 +1,410 @@
+---
+- name: Проверка прежней службы mobile AWG
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, is-active, --quiet, "awg-quick@{{ entry_mobile_client_interface }}.service"]
+  register: awg3_mobile_legacy_active
+  changed_when: false
+  failed_when: false
+
+- name: Проверка действующей службы mobile AWG 3.1
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, is-active, --quiet, "{{ awg3_mobile_service_name }}"]
+  register: awg3_mobile_active_before
+  changed_when: false
+  failed_when: false
+
+- name: Остановка прежней службы mobile AWG
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ entry_mobile_client_interface }}.service"
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Проверка параметров mobile AWG 3.1
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - ansible_architecture in awg3_mobile_go_archives
+      - vault_awg_entry_mobile_private_key is defined
+      - vault_awg_entry_mobile_header_protection_key is defined
+      - vault_awg_entry_mobile_header_protection_key | length == 44
+      - vault_entry_mobile_client_peers is defined
+      - entry_mobile_client_address | ansible.utils.ipv4
+      - entry_mobile_client_listen_port | int >= 1
+      - entry_mobile_client_listen_port | int <= 65535
+      - entry_mobile_awg_obfuscation.s1 | int >= 12
+      - entry_mobile_awg_obfuscation.s2 | int >= 12
+      - entry_mobile_awg_obfuscation.s3 | int >= 12
+      - entry_mobile_awg_obfuscation.s4 | int >= 12
+      - entry_mobile_awg_obfuscation.i1 | length > 0
+      - entry_mobile_awg_obfuscation.i2 | length > 0
+      - entry_mobile_awg_obfuscation.i3 | length > 0
+      - entry_mobile_awg_obfuscation.i4 | length > 0
+      - entry_mobile_awg_obfuscation.i5 | length > 0
+    fail_msg: >-
+      Mobile/AWG3+ требует отдельный HeaderProtectionKey, полный профиль I1-I5
+      и S1-S4 не меньше 12.
+  no_log: true
+  when: awg3_mobile_enabled | bool
+
+- name: Установка зависимостей mobile AWG 3.1
+  ansible.builtin.apt:
+    name: [build-essential, ca-certificates, git, pkg-config]
+    state: present
+    lock_timeout: 600
+  when: awg3_mobile_enabled | bool
+
+- name: Создание каталогов mobile AWG 3.1
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ awg3_mobile_build_root }}", mode: "0755"}
+    - {path: "{{ awg3_mobile_cache_root }}", mode: "0755"}
+    - {path: "{{ awg3_mobile_config_dir }}", mode: "0700"}
+    - {path: /opt/awg-iac, mode: "0755"}
+    - {path: "{{ awg3_mobile_go_install_root }}", mode: "0755"}
+  when: awg3_mobile_enabled | bool
+
+- name: Загрузка закреплённого компилятора Go для mobile AWG 3.1
+  ansible.builtin.get_url:
+    url: "https://go.dev/dl/{{ awg3_mobile_go_archives[ansible_architecture].filename }}"
+    dest: "{{ awg3_mobile_cache_root }}/{{ awg3_mobile_go_archives[ansible_architecture].filename }}"
+    checksum: "{{ awg3_mobile_go_archives[ansible_architecture].checksum }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg3_mobile_enabled | bool
+
+- name: Распаковка закреплённого компилятора Go для mobile AWG 3.1
+  ansible.builtin.unarchive:
+    src: "{{ awg3_mobile_cache_root }}/{{ awg3_mobile_go_archives[ansible_architecture].filename }}"
+    dest: "{{ awg3_mobile_go_install_root }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "{{ awg3_mobile_go_install_root }}/bin/go"
+  when: awg3_mobile_enabled | bool
+
+- name: Получение исходного кода движка mobile AWG 3.1
+  ansible.builtin.git:
+    repo: https://github.com/amnezia-vpn/amneziawg-go.git
+    dest: "{{ awg3_mobile_build_root }}/amneziawg-go"
+    version: "{{ awg3_mobile_go_source_version }}"
+    depth: 1
+    force: false
+  when: awg3_mobile_enabled | bool
+
+- name: Получение исходного кода tools mobile AWG 3.1
+  ansible.builtin.git:
+    repo: https://github.com/amnezia-vpn/amneziawg-tools.git
+    dest: "{{ awg3_mobile_build_root }}/amneziawg-tools"
+    version: "{{ awg3_mobile_tools_source_version }}"
+    depth: 1
+    force: false
+  when: awg3_mobile_enabled | bool
+
+- name: Проверка ревизий исходного кода mobile AWG 3.1
+  ansible.builtin.command:
+    argv: [/usr/bin/git, -C, "{{ item.path }}", rev-parse, HEAD]
+  loop:
+    - path: "{{ awg3_mobile_build_root }}/amneziawg-go"
+      commit: "{{ awg3_mobile_go_source_commit }}"
+    - path: "{{ awg3_mobile_build_root }}/amneziawg-tools"
+      commit: "{{ awg3_mobile_tools_source_commit }}"
+  register: awg3_mobile_source_revisions
+  changed_when: false
+  failed_when: awg3_mobile_source_revisions.stdout | trim != item.commit
+  when: awg3_mobile_enabled | bool
+
+- name: Проверка кэшированного движка mobile AWG 3.1
+  ansible.builtin.stat:
+    path: "{{ awg3_mobile_go_cached_binary }}"
+  register: awg3_mobile_go_cached
+  when: awg3_mobile_enabled | bool
+
+- name: Сборка закреплённого движка mobile AWG 3.1
+  ansible.builtin.command:
+    argv:
+      - "{{ awg3_mobile_go_install_root }}/bin/go"
+      - build
+      - -trimpath
+      - -ldflags=-s -w -X main.Version={{ awg3_mobile_go_source_version }}
+      - -o
+      - "{{ awg3_mobile_go_cached_binary }}"
+      - .
+    chdir: "{{ awg3_mobile_build_root }}/amneziawg-go"
+  environment:
+    GOROOT: "{{ awg3_mobile_go_install_root }}"
+    GOPATH: "{{ awg3_mobile_cache_root }}/gopath"
+    CGO_ENABLED: "0"
+  when:
+    - awg3_mobile_enabled | bool
+    - not awg3_mobile_go_cached.stat.exists
+
+- name: Установка движка mobile AWG 3.1
+  ansible.builtin.copy:
+    src: "{{ awg3_mobile_go_cached_binary }}"
+    dest: "{{ awg3_mobile_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Перезапустить мобильный AWG 3.1
+  when: awg3_mobile_enabled | bool
+
+- name: Проверка кэшированного tools mobile AWG 3.1
+  ansible.builtin.stat:
+    path: "{{ awg3_mobile_tools_cached_binary }}"
+  register: awg3_mobile_tools_cached
+  when: awg3_mobile_enabled | bool
+
+- name: Сборка закреплённого tools mobile AWG 3.1
+  ansible.builtin.command:
+    argv: [/usr/bin/make, -C, src, wg]
+    chdir: "{{ awg3_mobile_build_root }}/amneziawg-tools"
+  when:
+    - awg3_mobile_enabled | bool
+    - not awg3_mobile_tools_cached.stat.exists
+
+- name: Сохранение tools mobile AWG 3.1 в кэше
+  ansible.builtin.copy:
+    src: "{{ awg3_mobile_build_root }}/amneziawg-tools/src/wg"
+    dest: "{{ awg3_mobile_tools_cached_binary }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - awg3_mobile_enabled | bool
+    - not awg3_mobile_tools_cached.stat.exists
+
+- name: Установка tools mobile AWG 3.1
+  ansible.builtin.copy:
+    src: "{{ awg3_mobile_tools_cached_binary }}"
+    dest: "{{ awg3_mobile_tools_binary_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Перезапустить мобильный AWG 3.1
+  when: awg3_mobile_enabled | bool
+
+- name: Установка валидатора mobile AWG 3.1
+  ansible.builtin.template:
+    src: validate-config.sh.j2
+    dest: "{{ awg3_mobile_validate_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  when: awg3_mobile_enabled | bool
+
+- name: Проверка действующей конфигурации mobile AWG 3.1
+  ansible.builtin.stat:
+    path: "{{ awg3_mobile_config_path }}"
+  register: awg3_mobile_live_config
+  no_log: true
+  when: awg3_mobile_enabled | bool
+
+- name: Безопасное применение конфигурации mobile AWG 3.1
+  when: awg3_mobile_enabled | bool
+  block:
+    - name: Формирование кандидата mobile AWG 3.1
+      ansible.builtin.template:
+        src: mobile.conf.j2
+        dest: "{{ awg3_mobile_candidate_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      changed_when: false
+      no_log: true
+
+    - name: Сравнение кандидата с конфигурацией mobile AWG 3.1
+      ansible.builtin.command:
+        argv: [/usr/bin/cmp, --silent, "{{ awg3_mobile_config_path }}", "{{ awg3_mobile_candidate_path }}"]
+      register: awg3_mobile_compare
+      changed_when: false
+      failed_when: awg3_mobile_compare.rc not in [0, 1]
+      when: awg3_mobile_live_config.stat.exists
+      no_log: true
+
+    - name: Проверка кандидата движком mobile AWG 3.1
+      ansible.builtin.command:
+        argv: ["{{ awg3_mobile_validate_path }}", "{{ awg3_mobile_candidate_path }}"]
+      changed_when: false
+      no_log: true
+
+    - name: Определение необходимости установки mobile AWG 3.1
+      ansible.builtin.set_fact:
+        awg3_mobile_requires_install: >-
+          {{ (not awg3_mobile_live_config.stat.exists) or
+             (awg3_mobile_compare.rc | default(1) == 1) }}
+      no_log: true
+
+    - name: Создание каталога резервных копий mobile AWG 3.1
+      ansible.builtin.file:
+        path: "{{ awg3_mobile_backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when:
+        - awg3_mobile_live_config.stat.exists
+        - awg3_mobile_requires_install | bool
+
+    - name: Резервное копирование конфигурации mobile AWG 3.1
+      ansible.builtin.copy:
+        src: "{{ awg3_mobile_config_path }}"
+        dest: "{{ awg3_mobile_backup_dir }}/{{ entry_mobile_client_interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - awg3_mobile_live_config.stat.exists
+        - awg3_mobile_requires_install | bool
+      no_log: true
+
+    - name: Установка конфигурации mobile AWG 3.1
+      ansible.builtin.copy:
+        src: "{{ awg3_mobile_candidate_path }}"
+        dest: "{{ awg3_mobile_config_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: awg3_mobile_requires_install | bool
+      notify: Перезапустить мобильный AWG 3.1
+      no_log: true
+  always:
+    - name: Удаление кандидата mobile AWG 3.1
+      ansible.builtin.file:
+        path: "{{ awg3_mobile_candidate_path }}"
+        state: absent
+      changed_when: false
+      no_log: true
+
+- name: Установка управляющего скрипта mobile AWG 3.1
+  ansible.builtin.template:
+    src: mobile-setup.sh.j2
+    dest: "{{ awg3_mobile_setup_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Перезапустить мобильный AWG 3.1
+  when: awg3_mobile_enabled | bool
+
+- name: Установка systemd-службы mobile AWG 3.1
+  ansible.builtin.template:
+    src: awg3-mobile.service.j2
+    dest: "/etc/systemd/system/{{ awg3_mobile_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезапустить мобильный AWG 3.1
+  when: awg3_mobile_enabled | bool
+
+- name: Удаление прежней конфигурации mobile AWG 2
+  ansible.builtin.file:
+    path: "/etc/amnezia/amneziawg/{{ entry_mobile_client_interface }}.conf"
+    state: absent
+  no_log: true
+  when: awg3_mobile_enabled | bool
+
+- name: Выбор состояния mobile AWG 3.1
+  ansible.builtin.set_fact:
+    awg3_mobile_should_start: >-
+      {{ entry_mobile_client_enabled | bool or
+         awg3_mobile_active_before.rc == 0 or
+         awg3_mobile_legacy_active.rc == 0 }}
+  when: awg3_mobile_enabled | bool
+
+- name: Применение состояния mobile AWG 3.1
+  when: awg3_mobile_enabled | bool
+  block:
+    - name: Запуск или остановка службы mobile AWG 3.1
+      ansible.builtin.systemd_service:
+        name: "{{ awg3_mobile_service_name }}"
+        enabled: "{{ awg3_mobile_should_start | bool }}"
+        state: "{{ 'started' if awg3_mobile_should_start | bool else 'stopped' }}"
+        daemon_reload: true
+      register: awg3_mobile_state_result
+      until: awg3_mobile_state_result is succeeded
+      retries: 3
+      delay: 5
+
+  rescue:
+    - name: Сбор безопасной диагностики запуска mobile AWG 3.1
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {
+            printf '%s\n' '--- systemd ---'
+            systemctl show "{{ awg3_mobile_service_name }}" \
+              -p ActiveState \
+              -p SubState \
+              -p Result \
+              -p ExecMainCode \
+              -p ExecMainStatus \
+              -p ExecStart \
+              -p ExecStartPost || true
+
+            printf '%s\n' '--- журнал запуска ---'
+            journalctl -u "{{ awg3_mobile_service_name }}" \
+              -n 80 --no-pager --output=cat || true
+
+            printf '%s\n' '--- интерфейс {{ entry_mobile_client_interface }} ---'
+            ip -brief link show "{{ entry_mobile_client_interface }}" || true
+            ip -brief address show "{{ entry_mobile_client_interface }}" || true
+
+            printf '%s\n' '--- UDP/{{ entry_mobile_client_listen_port }} ---'
+            ss -H -lunp | grep -E \
+              '(^|[[:space:]])[^[:space:]]*:{{ entry_mobile_client_listen_port }}([[:space:]]|$)' || \
+              echo 'порт не прослушивается'
+
+            printf '%s\n' '--- файлы и TUN ---'
+            stat -c '%A %U:%G %n' \
+              "{{ awg3_mobile_binary_path }}" \
+              "{{ awg3_mobile_tools_binary_path }}" \
+              "{{ awg3_mobile_setup_path }}" \
+              "{{ awg3_mobile_config_path }}" 2>&1 || true
+            test -c /dev/net/tun \
+              && echo '/dev/net/tun: OK' \
+              || echo '/dev/net/tun: отсутствует'
+          } 2>&1 | sed -E \
+            -e 's/((PrivateKey|PresharedKey|HeaderProtectionKey)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1[СКРЫТО]/Ig' \
+            -e 's/[A-Za-z0-9+\/]{42}[A-Za-z0-9+\/=]{2,}/[КЛЮЧ СКРЫТ]/g'
+        executable: /bin/bash
+      register: awg3_mobile_start_diagnostics
+      changed_when: false
+      failed_when: false
+
+    - name: Остановка неуспешно запущенной службы mobile AWG 3.1
+      ansible.builtin.systemd_service:
+        name: "{{ awg3_mobile_service_name }}"
+        state: stopped
+      failed_when: false
+
+    - name: Сброс состояния отказа службы mobile AWG 3.1
+      ansible.builtin.command:
+        argv: [/bin/systemctl, reset-failed, "{{ awg3_mobile_service_name }}"]
+      changed_when: false
+      failed_when: false
+
+    - name: Остановка установки с безопасной диагностикой mobile AWG 3.1
+      ansible.builtin.fail:
+        msg: |-
+          Не удалось применить состояние mobile AWG 3.1.
+          Конфигурация и ключевой материал не выводились.
+          {{ awg3_mobile_start_diagnostics.stdout | default('Диагностика недоступна.') }}
+
+- name: Отключение невыбранного mobile AWG 3.1
+  ansible.builtin.systemd_service:
+    name: "{{ awg3_mobile_service_name }}"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  failed_when: false
+  when: not (awg3_mobile_enabled | bool)

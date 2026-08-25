@@ -129,6 +129,15 @@ AWG3_COMPONENT_KEYS = (
     "awg3_tools_source_commit",
 )
 
+AWG3_MOBILE_COMPONENT_KEYS = (
+    "awg3_mobile_go_version",
+    "awg3_mobile_go_archives",
+    "awg3_mobile_go_source_version",
+    "awg3_mobile_go_source_commit",
+    "awg3_mobile_tools_source_version",
+    "awg3_mobile_tools_source_commit",
+)
+
 
 def color_output_enabled() -> bool:
     """Использовать цвет только в настоящем совместимом терминале."""
@@ -321,6 +330,22 @@ def migrate_production_inventory(production: Path) -> bool:
                 "Production inventory обновлён: текущая проверенная сборка AWG3 "
                 "закреплена для воспроизводимых повторных deploy."
             )
+    awg3_mobile_defaults_path = (
+        production.parents[1] / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+    )
+    if all_path.is_file() and awg3_mobile_defaults_path.is_file():
+        awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
+        mobile_components_changed = False
+        for key in AWG3_MOBILE_COMPONENT_KEYS:
+            if key not in all_vars and key in awg3_mobile_defaults:
+                all_vars[key] = awg3_mobile_defaults[key]
+                all_changed = True
+                mobile_components_changed = True
+        if mobile_components_changed:
+            print(
+                "Production inventory обновлён: отдельная сборка mobile AWG 3.1 "
+                "закреплена без изменения межсерверного AWG 3.0."
+            )
     if (
         entry_vars.get("entry_ru_tun_stack") == "mixed"
         and entry_vars.get("entry_ru_endpoint_independent_nat") is False
@@ -332,6 +357,9 @@ def migrate_production_inventory(production: Path) -> bool:
 
     old_mobile_public_port = entry_vars.pop("entry_mobile_client_public_port", None)
     old_mobile_internal_port = entry_vars.pop("entry_mobile_client_internal_port", None)
+    old_mobile_i1_mode = entry_vars.pop("entry_mobile_i1_mode", None)
+    if old_mobile_i1_mode is not None:
+        changed = True
     if old_mobile_public_port is not None or old_mobile_internal_port is not None:
         entry_vars["entry_mobile_legacy_public_port"] = int(
             old_mobile_public_port if old_mobile_public_port is not None else 53
@@ -352,10 +380,28 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars["entry_mobile_client_listen_port"] = 8443
         changed = True
 
-    if entry_vars.get("entry_mobile_i1_mode") == "quic-ios-test":
-        entry_vars["entry_mobile_i1_mode"] = "quic-ios"
+    if (
+        entry_vars.get("entry_mobile_client_available", False)
+        and (
+            entry_vars.get("entry_mobile_profile_generation") != "awg3.1"
+            or entry_vars.get("entry_mobile_service_name") != "awg3-mobile.service"
+            or not awg_mobile_awg3_profile_is_complete(
+                entry_vars.get("entry_mobile_awg_obfuscation")
+            )
+        )
+    ):
+        entry_vars.update(
+            {
+                "entry_mobile_profile_generation": "awg3.1",
+                "entry_mobile_service_name": "awg3-mobile.service",
+                "entry_mobile_awg_obfuscation": awg_mobile_awg3_obfuscation(),
+            }
+        )
         changed = True
-        print("Production inventory обновлён: проверенный QUIC-профиль iOS закреплён как основной.")
+        print(
+            "Production inventory обновлён: профиль mobile заменён на mobile/AWG3+. "
+            "Ранее выданные mobile-конфиги нужно выпустить заново."
+        )
 
     cps_changed = False
     for document, profile_names in (
@@ -400,7 +446,7 @@ def migrate_production_inventory(production: Path) -> bool:
 
 
 def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
-    """Добавить отсутствующий mobile-профиль в существующий production inventory."""
+    """Добавить отсутствующий mobile/AWG3+-профиль в production inventory."""
     entry_path = production / "group_vars" / "entry.yml"
     vault_path = production / "group_vars" / "all" / "vault.yml"
     if not entry_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
@@ -469,7 +515,8 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
         "entry_mobile_legacy_public_port": 53,
         "entry_mobile_legacy_internal_port": 39746,
         "entry_mobile_client_mtu": 1380,
-        "entry_mobile_i1_mode": "quic-ios",
+        "entry_mobile_service_name": "awg3-mobile.service",
+        "entry_mobile_profile_generation": "awg3.1",
     }
     mobile_network_keys = {
         "entry_mobile_client_address",
@@ -486,7 +533,7 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
                 entry_vars[key] = value
                 entry_changed = True
     if not isinstance(entry_vars.get("entry_mobile_awg_obfuscation"), dict):
-        entry_vars["entry_mobile_awg_obfuscation"] = awg_mobile_quic_obfuscation()
+        entry_vars["entry_mobile_awg_obfuscation"] = awg_mobile_awg3_obfuscation()
         entry_changed = True
 
     vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
@@ -503,6 +550,9 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
     vault_changed = False
     if not vault_document.get("vault_awg_entry_mobile_private_key"):
         vault_document["vault_awg_entry_mobile_private_key"] = awg_private_key()
+        vault_changed = True
+    if not vault_document.get("vault_awg_entry_mobile_header_protection_key"):
+        vault_document["vault_awg_entry_mobile_header_protection_key"] = awg_private_key()
         vault_changed = True
     if not isinstance(vault_document.get("vault_entry_mobile_client_peers"), list):
         vault_document["vault_entry_mobile_client_peers"] = []
@@ -526,10 +576,46 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
 
     if entry_changed or vault_changed:
         print(
-            "Production inventory обновлён: добавлен отдельный mobile AWG "
+            "Production inventory обновлён: добавлен отдельный mobile/AWG3+ "
             f"{mobile_network} на UDP/8443; интерфейс пока выключен."
         )
     return entry_changed or vault_changed
+
+
+def ensure_mobile_awg3_vault_material(
+    production: Path, vault_password: Path
+) -> bool:
+    """Добавить отдельный HeaderProtectionKey при переходе на mobile/AWG3+."""
+    entry_path = production / "group_vars" / "entry.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not entry_path.is_file() or not vault_path.is_file():
+        return False
+    entry_vars = load_yaml(entry_path)
+    if not entry_vars.get("entry_mobile_client_available", False):
+        return False
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    if not vault_secret:
+        fail("Файл пароля Ansible Vault пуст")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    if document.get("vault_awg_entry_mobile_header_protection_key"):
+        return False
+    document["vault_awg_entry_mobile_header_protection_key"] = awg_private_key()
+    encrypted = vault_lib.encrypt(yaml.safe_dump(document, sort_keys=False).encode())
+    temporary = vault_path.with_name(f".{vault_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        secure_write(temporary, encrypted)
+        os.replace(temporary, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print("Production Vault обновлён: создан отдельный HeaderProtectionKey mobile/AWG3+.")
+    return True
 
 
 _DOMAIN_RE = re.compile(
@@ -1803,6 +1889,18 @@ AWG_CLIENT_PROFILES = {
     },
 }
 
+AWG3_MOBILE_FEATURE_DEFAULTS = {
+    "content_padding_addition": "8-32",
+    "rekey_after_time": "120-180",
+    "rekey_timeout": "5-8",
+    "reject_after_time": "180-240",
+    "keepalive_timeout": "10-15",
+    "max_handshake_attempts": "18-24",
+    "persistent_keepalive": "22-30",
+    "random_trailers": True,
+    "disable_cookies": False,
+}
+
 AWG_QUIC_INITIAL_SIZE = 1200
 AWG_CPS_RANDOM_TAG_MAX = 1000
 AWG_MINIMUM_OUTER_PMTU = 1280
@@ -2011,106 +2109,34 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
     return result
 
 
-def awg_mobile_dns_obfuscation() -> dict[str, object]:
-    """Профиль, подтверждённый официальным AmneziaWG 2.0.2 для iOS.
-
-    I1 имеет форму DNS-ответа: два случайных байта ID, затем ответ A для
-    icloud.com. I2-I5 намеренно пусты: текущие мобильные клиенты принимают эти
-    поля не одинаково, а сервер и клиент обязаны иметь идентичный профиль.
-    """
-    result = {
-        "jc": 5,
-        "jmin": 10,
-        "jmax": 50,
-        "s1": 134,
-        "s2": 79,
-        "s3": 17,
-        "s4": 0,
-        "h1": "1134731367-1758702570",
-        "h2": "1999989254-2027383437",
-        "h3": "2041897377-2054735816",
-        "h4": "2083840314-2084318622",
-        "i1": (
-            "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001"
-            "c00c000100010000105a00044d583737>"
-        ),
-        "i2": "",
-        "i3": "",
-        "i4": "",
-        "i5": "",
-    }
+def awg_mobile_awg3_obfuscation() -> dict[str, object]:
+    """Создать полный профиль маскировки mobile/AWG3+ для AWG 3.1."""
+    result = awg_server_obfuscation()
+    result.update({"jc": 5, "jmin": 10, "jmax": 50})
     validate_awg_obfuscation(result)
+    if any(int(result[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
+        fail("Mobile/AWG3+ требует S1-S4 не меньше 12")
+    if any(not str(result[f"i{index}"]) for index in range(1, 6)):
+        fail("Mobile/AWG3+ требует полный набор I1-I5")
     return result
 
 
-def awg_mobile_quic_obfuscation() -> dict[str, object]:
-    """Создать экспериментальный iOS-профиль с QUIC Initial-подобным I1.
-
-    Проверенные iOS-параметры J/S/H сохраняются без изменений. Меняется только
-    I1; I2-I5 остаются пустыми, чтобы испытание проверяло одну переменную.
-    Итоговый пакет занимает ровно 1200 байт и не превышает mobile MTU.
-    """
-    result = awg_mobile_dns_obfuscation()
-    result["i1"] = awg_quic_initial_signature()
-    validate_awg_obfuscation(result)
-    return result
-
-
-def set_mobile_i1_mode(production: Path, mode: str) -> bool:
-    """Переключить I1 mobile-интерфейса без изменения порта, ключей и пиров."""
-    entry_path = production / "group_vars" / "entry.yml"
-    if not entry_path.is_file():
-        fail("Не найдены переменные ENTRY сервера production inventory")
-    entry_vars = load_yaml(entry_path)
-    profile = entry_vars.get("entry_mobile_awg_obfuscation")
-    if not isinstance(profile, dict):
-        fail("В production inventory отсутствует профиль mobile AWG")
-
-    if mode == "quic-ios-test":
-        mode = "quic-ios"
-    current_mode_raw = str(entry_vars.get("entry_mobile_i1_mode", "dns-ios"))
-    current_mode = "quic-ios" if current_mode_raw == "quic-ios-test" else current_mode_raw
-    if mode == "quic-ios":
-        # Повторный --resume не должен незаметно менять I1 и ломать уже
-        # выданный конфиг. Новая сигнатура создаётся только при фактическом
-        # переходе в QUIC-режим.
-        if current_mode == mode and isinstance(profile.get("i1"), str):
-            if current_mode_raw != mode:
-                entry_vars["entry_mobile_i1_mode"] = mode
-                yaml_write(entry_path, entry_vars)
-                return True
+def awg_mobile_awg3_profile_is_complete(value: object) -> bool:
+    """Проверить полноту сохранённого профиля без вывода его значений."""
+    if not isinstance(value, dict):
+        return False
+    required = (
+        "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+        "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
+    )
+    if any(key not in value for key in required):
+        return False
+    try:
+        if any(int(value[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
             return False
-        new_profile = awg_mobile_quic_obfuscation()
-        message = (
-            "Mobile I1 переключён в подтверждённый QUIC Initial-подобный режим. "
-            "UDP-порт и ключи не изменены."
-        )
-    elif mode == "dns-ios":
-        new_profile = awg_mobile_dns_obfuscation()
-        message = "Mobile I1 возвращён в подтверждённый DNS-подобный режим iOS."
-    else:
-        fail(f"Неизвестный режим mobile I1: {mode}")
-
-    changed = current_mode_raw != mode
-    for key in ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4"):
-        # Для эксперимента J/S/H должны оставаться ровно такими, какими они
-        # уже были согласованы между сервером и существующими клиентами.
-        new_profile[key] = profile[key]
-    for index in range(1, 6):
-        key = f"i{index}"
-        value = new_profile[key]
-        if profile.get(key) != value:
-            profile[key] = value
-            changed = True
-    entry_vars["entry_mobile_i1_mode"] = mode
-    if changed:
-        yaml_write(entry_path, entry_vars)
-        print(message)
-        print(
-            "Создайте новый тестовый конфиг командой "
-            "'vpn-user ИМЯ mobile': ранее выданные mobile-конфиги имеют другой I1."
-        )
-    return changed
+    except (TypeError, ValueError):
+        return False
+    return all(str(value[f"i{index}"]).strip() for index in range(1, 6))
 
 
 def awg3_transit_obfuscation() -> dict[str, object]:
@@ -2247,10 +2273,12 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     entry_vars_path = production / "group_vars" / "entry.yml"
     stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
     awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+    awg3_mobile_defaults_path = repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
     variables = load_yaml(all_vars_path)
     entry_variables = load_yaml(entry_vars_path)
     stable_entry = load_yaml(stable_entry_path)
     awg3_defaults = load_yaml(awg3_defaults_path)
+    awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
 
     variables["awg_package_version_mode"] = "candidate"
     variables.pop("awg_package_versions", None)
@@ -2262,6 +2290,10 @@ def prepare_component_update(repo: Path, production: Path) -> None:
         if key not in awg3_defaults:
             fail(f"Проверенный manifest AWG3 не содержит {key}")
         variables[key] = awg3_defaults[key]
+    for key in AWG3_MOBILE_COMPONENT_KEYS:
+        if key not in awg3_mobile_defaults:
+            fail(f"Проверенный manifest mobile AWG 3.1 не содержит {key}")
+        variables[key] = awg3_mobile_defaults[key]
     yaml_write(all_vars_path, variables)
     yaml_write(entry_vars_path, entry_variables)
 
@@ -2711,7 +2743,7 @@ def show_deployment_summary(production: Path) -> None:
             (
                 "Мобильные клиенты",
                 f"{entry_public}:{entry_vars.get('entry_mobile_client_listen_port')}/UDP; "
-                f"QUIC-профиль; {mobile_state}",
+                f"AWG 3.1, полный профиль; {mobile_state}",
             )
         )
 
@@ -2760,7 +2792,7 @@ def show_deployment_summary(production: Path) -> None:
             "UFW ENTRY",
             f"TCP/{entry['ansible_port']} SSH; "
             f"UDP/{entry_vars.get('entry_awg0_listen_port')} клиенты; "
-            f"UDP/{entry_vars.get('entry_mobile_client_listen_port')} mobile при включении; "
+            f"UDP/{entry_vars.get('entry_mobile_client_listen_port')} mobile/AWG3+ при включении; "
             f"UDP/{entry_vars.get('security_interserver_listen_port')} только от "
             f"{entry_vars.get('security_interserver_peer_ipv4')}",
         ),
@@ -2992,14 +3024,6 @@ def main() -> None:
         help="обновить только оформление терминала и справку без изменения каскада",
     )
     parser.add_argument(
-        "--mobile-i1-mode",
-        choices=("dns-ios", "quic-ios", "quic-ios-test"),
-        help=(
-            "при --resume переключить только I1 mobile-интерфейса: "
-            "quic-ios или совместимый прежний dns-ios"
-        ),
-    )
-    parser.add_argument(
         "--enable-mobile",
         action="store_true",
         help="при --resume безопасно добавить отсутствующий mobile AWG UDP/8443",
@@ -3036,8 +3060,6 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    if args.mobile_i1_mode and not args.resume:
-        parser.error("--mobile-i1-mode используется только вместе с --resume")
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
     if args.enable_front and not args.resume:
@@ -3068,7 +3090,6 @@ def main() -> None:
     if args.terminal_only and (
         args.resume
         or args.summary
-        or args.mobile_i1_mode
         or args.enable_mobile
         or args.enable_front
         or args.replace_front
@@ -3110,6 +3131,7 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        ensure_mobile_awg3_vault_material(production, vault_password)
         if args.rollback_front_replacement:
             rollback_front_replacement(production)
         if args.enable_front:
@@ -3128,8 +3150,6 @@ def main() -> None:
         )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
-        if args.mobile_i1_mode:
-            set_mobile_i1_mode(production, args.mobile_i1_mode)
         update_saved_client_configs_cps(state_root / "clients")
         all_vars = load_yaml(all_vars_path)
         if (
@@ -3199,7 +3219,39 @@ def main() -> None:
         if transition_completed:
             final_variables.update({"awg_prepare_apt": False, "awg_restore_apt": True})
         try:
-            ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
+            try:
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
+            except SystemExit:
+                # Финальный прогон site.yml включает и отключение root
+                # (security_finalize_admin_access), и более поздние задачи,
+                # которым снова нужен SSH (например, Shamir-play). Если один
+                # из хостов успел перейти на kalimera именно в этом прогоне,
+                # а inventory на диске ещё содержит устаревший root, задача
+                # падает с "Permission denied (publickey)" даже при полностью
+                # исправном состоянии серверов. Проверяем это по-настоящему
+                # (реальное SSH-подключение внутри recover_saved_admin_access),
+                # а не считаем совпадением - и повторяем прогон один раз, если
+                # восстановление действительно что-то исправило.
+                hosts_document = load_yaml(hosts_path)
+                all_vars_current = load_yaml(all_vars_path)
+                recovered = recover_saved_admin_access(
+                    hosts_document,
+                    hosts_path,
+                    str(all_vars_current.get("security_admin_user", "kalimera")),
+                    bool(all_vars_current.get("security_finalize_admin_access", False)),
+                )
+                if not recovered:
+                    raise
+                print(
+                    "SSH-доступ подтверждён по kalimera после перехода: "
+                    + ", ".join(recovered)
+                    + ". Повторяю финальный прогон без вмешательства оператора."
+                )
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
             if awg_package_lock.is_file():
                 pin_resolved_awg_packages(all_vars_path, awg_package_lock)
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
@@ -3375,7 +3427,7 @@ def main() -> None:
         39744,
     )
     mobile_awg_port = prompt_port(
-        "UDP-порт мобильного AWG с QUIC-маскировкой",
+        "UDP-порт мобильного AWG 3.1",
         8443,
     )
     if client_awg_port == legacy_awg_port:
@@ -3695,7 +3747,7 @@ def main() -> None:
             "1 · максимальная производительность",
             "2 · сбалансированный",
             "3 · максимальная маскировка",
-            "4 · мобильный QUIC-профиль: отдельный интерфейс и UDP/8443",
+            "4 · mobile/AWG3+: полный профиль AWG 3.1 и отдельный UDP/8443",
             "5 · KeeneticOS 4.3.x: базовый ASC и отдельный интерфейс",
         ],
         "magenta",
@@ -3713,7 +3765,7 @@ def main() -> None:
         "Подсеть старых AWG-клиентов KeeneticOS 4.3.x", "10.67.0.0/24"
     )
     mobile_client_subnet_text = prompt(
-        "Подсеть мобильных AWG-клиентов с QUIC-маскировкой", "10.68.0.0/24"
+        "Подсеть клиентов mobile/AWG3+", "10.68.0.0/24"
     )
     transit_subnet_text = prompt("Подсеть AWG между ENTRY сервером и EXIT сервером", "10.77.0.0/24")
     try:
@@ -3886,7 +3938,7 @@ def main() -> None:
     )
     client_server_obfuscation = awg_server_obfuscation()
     legacy_server_obfuscation = awg_legacy_server_obfuscation()
-    mobile_server_obfuscation = awg_mobile_quic_obfuscation()
+    mobile_server_obfuscation = awg_mobile_awg3_obfuscation()
     initial_server_obfuscation = (
         legacy_server_obfuscation if client_mode == "legacy"
         else mobile_server_obfuscation if client_mode == "mobile"
@@ -3982,7 +4034,17 @@ def main() -> None:
             "entry_mobile_legacy_internal_port": 39746,
             "entry_mobile_client_mtu": 1380,
             "entry_mobile_awg_obfuscation": mobile_server_obfuscation,
-            "entry_mobile_i1_mode": "quic-ios",
+            "entry_mobile_service_name": "awg3-mobile.service",
+            "entry_mobile_profile_generation": "awg3.1",
+            "awg3_mobile_content_padding_addition": AWG3_MOBILE_FEATURE_DEFAULTS["content_padding_addition"],
+            "awg3_mobile_rekey_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_after_time"],
+            "awg3_mobile_rekey_timeout": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_timeout"],
+            "awg3_mobile_reject_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["reject_after_time"],
+            "awg3_mobile_keepalive_timeout": AWG3_MOBILE_FEATURE_DEFAULTS["keepalive_timeout"],
+            "awg3_mobile_max_handshake_attempts": AWG3_MOBILE_FEATURE_DEFAULTS["max_handshake_attempts"],
+            "awg3_mobile_persistent_keepalive": AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"],
+            "awg3_mobile_random_trailers": AWG3_MOBILE_FEATURE_DEFAULTS["random_trailers"],
+            "awg3_mobile_disable_cookies": AWG3_MOBILE_FEATURE_DEFAULTS["disable_cookies"],
             "awg3_transit_enabled": True,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": entry_transit_listen_port,
@@ -4166,6 +4228,7 @@ def main() -> None:
     entry_private = awg_private_key()
     legacy_entry_private = awg_private_key()
     mobile_entry_private = awg_private_key()
+    mobile_header_protection_key = awg_private_key()
     transit_private = awg_private_key()
     exit_private = awg_private_key()
     transit_psk = awg_psk()
@@ -4189,6 +4252,7 @@ def main() -> None:
         "vault_awg_entry_private_key": entry_private,
         "vault_awg_entry_legacy_private_key": legacy_entry_private,
         "vault_awg_entry_mobile_private_key": mobile_entry_private,
+        "vault_awg_entry_mobile_header_protection_key": mobile_header_protection_key,
         "vault_awg_entry_exit_private_key": transit_private,
         "vault_awg_entry_exit_peer_public_key": awg_public_key(exit_private),
         "vault_awg_exit_private_key": exit_private,
@@ -4305,7 +4369,30 @@ def main() -> None:
             f"I5 = {obfuscation['i5']}\n"
         )
     elif client_mode == "mobile":
-        modern_signatures = f"I1 = {obfuscation['i1']}\n"
+        modern_signatures = (
+            f"I1 = {obfuscation['i1']}\nI2 = {obfuscation['i2']}\n"
+            f"I3 = {obfuscation['i3']}\nI4 = {obfuscation['i4']}\n"
+            f"I5 = {obfuscation['i5']}\n"
+        )
+    mobile_awg3_fields = ""
+    persistent_keepalive = "25"
+    if client_mode == "mobile":
+        mobile_awg3_fields = (
+            f"HeaderProtectionKey = {mobile_header_protection_key}\n"
+            f"ContentPaddingAddition = {AWG3_MOBILE_FEATURE_DEFAULTS['content_padding_addition']}\n"
+            f"RekeyAfterTime = {AWG3_MOBILE_FEATURE_DEFAULTS['rekey_after_time']}\n"
+            f"RekeyTimeout = {AWG3_MOBILE_FEATURE_DEFAULTS['rekey_timeout']}\n"
+            f"RejectAfterTime = {AWG3_MOBILE_FEATURE_DEFAULTS['reject_after_time']}\n"
+            f"KeepaliveTimeout = {AWG3_MOBILE_FEATURE_DEFAULTS['keepalive_timeout']}\n"
+            f"MaxHandshakeAttempts = {AWG3_MOBILE_FEATURE_DEFAULTS['max_handshake_attempts']}\n"
+            "RandomTrailers = "
+            f"{'on' if AWG3_MOBILE_FEATURE_DEFAULTS['random_trailers'] else 'off'}\n"
+            "DisableCookies = "
+            f"{'on' if AWG3_MOBILE_FEATURE_DEFAULTS['disable_cookies'] else 'off'}\n"
+        )
+        persistent_keepalive = str(
+            AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"]
+        )
     client_config_text = (
         "[Interface]\n"
         f"PrivateKey = {client_private}\n"
@@ -4316,13 +4403,14 @@ def main() -> None:
         f"S1 = {obfuscation['s1']}\nS2 = {obfuscation['s2']}\n"
         f"{modern_padding}"
         f"H1 = {obfuscation['h1']}\nH2 = {obfuscation['h2']}\nH3 = {obfuscation['h3']}\nH4 = {obfuscation['h4']}\n"
-        f"{modern_signatures}\n"
+        f"{modern_signatures}"
+        f"{mobile_awg3_fields}\n"
         "[Peer]\n"
         f"PublicKey = {awg_public_key(client_server_private)}\n"
         f"PresharedKey = {client_psk}\n"
         f"Endpoint = {entry_public_endpoint}:{client_endpoint_port}\n"
         "AllowedIPs = 0.0.0.0/0, ::/0\n"
-        "PersistentKeepalive = 25\n"
+        f"PersistentKeepalive = {persistent_keepalive}\n"
     )
     secure_write(config_staging, client_config_text.encode())
 

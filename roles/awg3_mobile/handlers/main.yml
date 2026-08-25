@@ -1,0 +1,6 @@
+---
+- name: Перезапустить мобильный AWG 3.1
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, try-restart, "{{ awg3_mobile_service_name }}"]
+  changed_when: true
+  when: awg3_mobile_enabled | bool
