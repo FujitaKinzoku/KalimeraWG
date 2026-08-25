@@ -1240,6 +1240,64 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertTrue(MODULE.awg_mobile_awg3_profile_is_complete(profile))
             self.assertFalse(MODULE.migrate_production_inventory(production))
 
+    def test_mobile_awg31_obfuscation_profile_is_pinned(self) -> None:
+        # Значения сверены напрямую с исходником закреплённых версий (не по
+        # пересказу документации): amneziawg-go v3.1.20260814, commit
+        # 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1 (device/uapi.go,
+        # device/noise-types.go, device/obf.go, device/obf_rand.go,
+        # device/obf_bytes.go) и amneziawg-tools v3.1.20260812, commit
+        # ee0f0a9aa34ff0a0da4b3433b9512781cfe02843 (src/config.c). Jc/Jmin/Jmax
+        # и S1-S4 не имеют протокольного предела кроме uint32/uint16,
+        # HeaderProtectionKey требует S1-S4 >= HeaderCipherNonceSize (12),
+        # H1-H4 не пересекаются, I1-I5 - валидная цепочка тегов <b 0xHEX>/<r N>.
+        # Любое отклонение от этих чисел должно быть осознанным изменением с
+        # повторной сверкой протокола, а не случайным дрейфом.
+        defaults = yaml.safe_load(
+            (
+                MODULE_PATH.parents[2] / "roles" / "entry" / "defaults" / "main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        profile = defaults["entry_mobile_awg_obfuscation"]
+        self.assertEqual(
+            profile,
+            {
+                "jc": 5,
+                "jmin": 10,
+                "jmax": 50,
+                "s1": 32,
+                "s2": 48,
+                "s3": 24,
+                "s4": 16,
+                "h1": "100000001-250000000",
+                "h2": "600000001-750000000",
+                "h3": "1100000001-1250000000",
+                "h4": "1600000001-1750000000",
+                "i1": "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1000><r 174>",
+                "i2": "<b 0x40><r 127>",
+                "i3": "<b 0x41><r 95>",
+                "i4": "<b 0x42><r 63>",
+                "i5": "<b 0x43><r 47>",
+            },
+        )
+        for key in ("s1", "s2", "s3", "s4"):
+            self.assertGreaterEqual(
+                profile[key],
+                12,
+                f"{key} должен быть >= HeaderCipherNonceSize (12) для HeaderProtectionKey",
+            )
+        ranges = {
+            key: tuple(int(part) for part in profile[key].split("-"))
+            for key in ("h1", "h2", "h3", "h4")
+        }
+        for key, (lo, hi) in ranges.items():
+            self.assertLessEqual(lo, hi, f"{key}: диапазон задан задом наперёд")
+        for left_key, (left_lo, left_hi) in ranges.items():
+            for right_key, (right_lo, right_hi) in ranges.items():
+                if left_key >= right_key:
+                    continue
+                overlap = left_lo <= right_hi and right_lo <= left_hi
+                self.assertFalse(overlap, f"{left_key} и {right_key} пересекаются")
+
     def test_resume_migrates_saved_client_cps_without_exposing_other_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             clients = Path(directory) / "clients"
