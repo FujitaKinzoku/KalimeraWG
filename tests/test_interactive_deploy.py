@@ -2260,6 +2260,74 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("HeaderProtectionKey =", user)
         self.assertIn("./deploy --resume --enable-mobile", user)
 
+    def test_awg3_transit_profile_pinned_to_v31_with_full_field_set(self) -> None:
+        # Сверено напрямую с исходником закреплённых версий (тот же коммит,
+        # что уже проверен для mobile/AWG3+ - см.
+        # test_mobile_awg31_obfuscation_profile_is_pinned): amneziawg-go
+        # v3.1.20260814, commit 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1;
+        # amneziawg-tools v3.1.20260812, commit
+        # ee0f0a9aa34ff0a0da4b3433b9512781cfe02843. Любое отклонение должно
+        # быть осознанным обновлением с повторной сверкой протокола, а не
+        # случайным дрейфом.
+        root = MODULE_PATH.parents[2]
+        defaults = yaml.safe_load(
+            (root / "roles" / "awg3_transit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(defaults["awg3_go_source_version"], "v3.1.20260814")
+        self.assertEqual(
+            defaults["awg3_go_source_commit"],
+            "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1",
+        )
+        self.assertEqual(defaults["awg3_tools_source_version"], "v3.1.20260812")
+        self.assertEqual(
+            defaults["awg3_tools_source_commit"],
+            "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
+        )
+        self.assertTrue(defaults["awg3_random_trailers"])
+        self.assertFalse(defaults["awg3_disable_cookies"])
+
+        # inventory/example - это то, что копируется в production при первой
+        # установке (см. prepare_production_directory); roles/awg3_transit -
+        # то, что --update-components подтягивает в уже развёрнутый
+        # inventory (см. prepare_component_update/AWG3_COMPONENT_KEYS). Обе
+        # копии должны совпадать, иначе новая установка и обновление
+        # существующей закрепят разные версии.
+        example = yaml.safe_load(
+            (
+                root / "inventory" / "example" / "group_vars" / "all" / "main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        for key in (
+            "awg3_go_source_version",
+            "awg3_go_source_commit",
+            "awg3_tools_source_version",
+            "awg3_tools_source_commit",
+        ):
+            self.assertEqual(
+                example[key],
+                defaults[key],
+                f"{key}: пример inventory разошёлся с ролевыми defaults",
+            )
+
+        config = (
+            root / "roles" / "awg3_transit" / "templates" / "transit.conf.j2"
+        ).read_text(encoding="utf-8")
+        for field in (
+            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5",
+            "HeaderProtectionKey", "ContentPaddingAddition", "RekeyAfterTime",
+            "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout",
+            "MaxHandshakeAttempts", "RandomTrailers", "DisableCookies",
+        ):
+            self.assertIn(f"{field} =", config)
+
+        health = (
+            root / "roles" / "health" / "templates" / "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("awg3_transit_profile_is_complete", health)
+
     def test_optional_interfaces_refresh_routes_without_dns_or_policy_reset(self) -> None:
         root = MODULE_PATH.parents[2]
         routing = (
