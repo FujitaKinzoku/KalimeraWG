@@ -686,6 +686,10 @@ class InteractiveDeployTests(unittest.TestCase):
                     "entry_sing_box_version": "1.0.0",
                     "entry_sing_box_packages": {"x86_64": {"url": "old"}},
                     "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_awg0_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_awg1_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_legacy_awg_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_mobile_awg_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
                 },
             )
             MODULE.yaml_write(
@@ -745,16 +749,33 @@ class InteractiveDeployTests(unittest.TestCase):
             # первичной установки, см. awg3_transit_obfuscation()) и должен
             # обновиться при --update-components точно так же, как версии
             # пакетов выше, иначе уже развёрнутый каскад никогда не получит
-            # улучшения профиля. Старое значение jc/jmin/jmax=1/1/1 в обоих
-            # файлах-фикстурах подтверждает, что оно было реально заменено,
-            # а не просто оставлено как было.
-            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jc"], 12)
-            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jmin"], 64)
-            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jmax"], 512)
-            self.assertEqual(
-                entry_vars["awg3_transit_obfuscation"],
-                exit_vars["awg3_transit_obfuscation"],
-            )
+            # улучшения профиля. Jc/Jmin/Jmax - диапазон (сама структура
+            # генерации вариативна, не только значения), поэтому проверяем
+            # границы, а не точное число. Старое значение jc/jmin/jmax=1/1/1
+            # во всех файлах-фикстурах подтверждает, что оно было реально
+            # заменено, а не просто оставлено как было.
+            transit = entry_vars["awg3_transit_obfuscation"]
+            self.assertTrue(8 <= transit["jc"] <= 16)
+            self.assertTrue(48 <= transit["jmin"] <= 80)
+            self.assertTrue(384 <= transit["jmax"] <= 640)
+            self.assertEqual(transit, exit_vars["awg3_transit_obfuscation"])
+            # Остальные четыре профиля (общий/Keenetic 5.1.x, запасной awg1,
+            # легаси-Keenetic, mobile/AWG3+) живут только на ENTRY, но тоже
+            # должны обновиться - тот же класс проблемы, что был у transit
+            # до этой сессии.
+            for key in (
+                "entry_awg0_obfuscation",
+                "entry_legacy_awg_obfuscation",
+                "entry_mobile_awg_obfuscation",
+            ):
+                self.assertNotEqual(
+                    entry_vars[key],
+                    {"jc": 1, "jmin": 1, "jmax": 1},
+                    f"{key} не был перегенерирован",
+                )
+            # awg1 - тот же объект, что и transit (запасной kernel-канал
+            # использует тот же согласованный профиль, что и userspace AWG3+).
+            self.assertEqual(entry_vars["entry_awg1_obfuscation"], transit)
             self.assertEqual(exit_vars["exit_awg_subnet"], "10.77.1.0/24")
 
     def test_failed_component_update_restores_inventory_and_runs_rollback(self) -> None:
@@ -2357,61 +2378,67 @@ class InteractiveDeployTests(unittest.TestCase):
         )
 
         # Jc/Jmin/Jmax и I1-I5 генерируются awg3_transit_obfuscation() заново
-        # на каждом деплое (см. awg_server_obfuscation()), но сама функция
-        # намеренно переопределяет их относительно общего профиля - это
-        # единственная не-случайная часть словаря (Jc/Jmin/Jmax - точные
-        # числа; I1 - точный целевой размер 1240, детерминированный по
-        # построению; I2-I5 - границы диапазона размера, не сам размер) и
-        # осознанное решение (обоснование: near-zero cost для длинного
-        # высоконагруженного туннеля без клиентского MTU-ограничения, см.
-        # docs/awg3.md), поэтому их тоже стоит закрепить. Содержимое каждого
-        # I-поля (случайные DCID/SCID/паддинг) и S1-S4/H1-H4 намеренно НЕ
-        # закрепляются буквально - они каждый раз разные по дизайну; их
-        # протокольные инварианты уже закреплены отдельно в
+        # на каждом вызове (не только один раз при деплое) - раньше Jc/Jmin/
+        # Jmax и целевой размер I1 были фиксированными числами; теперь это
+        # тоже диапазоны, чтобы сама СТРУКТУРА профиля не была одинаковой
+        # на каждой установке этого (публичного) репозитория, а не только
+        # значения внутри неё (обоснование и разбор потолка Keenetic - в
+        # docs/awg3.md). I2-I5 по-прежнему переопределены шире, чем у
+        # общего профиля - transit не ограничен клиентским MTU. Содержимое
+        # каждого I-поля и S1-S4/H1-H4 по-прежнему не закрепляются буквально
+        # - протокольные инварианты закреплены отдельно в
         # test_awg3_profile_meets_header_protection_padding_requirement и
         # test_profile_validator_accepts_all_generated_profiles.
-        transit_profile = MODULE.awg3_transit_obfuscation()
-        self.assertEqual(
-            {key: transit_profile[key] for key in ("jc", "jmin", "jmax")},
-            {"jc": 12, "jmin": 64, "jmax": 512},
-        )
-        # Свободный запас до защитного предела `+28 <= 1280` в
-        # validate_awg_obfuscation (её MTU-независимый дефолт, а не
-        # фактический согласованный MTU канала) - если это когда-нибудь
-        # нарушится, validate_awg_obfuscation() выше уже упадёт первой, но
-        # явная проверка здесь фиксирует зазор как осознанный, а не
-        # случайно оставшийся впритык.
-        self.assertLessEqual(transit_profile["jmax"] + 28, 1280)
+        jc_seen, jmin_seen, jmax_seen = set(), set(), set()
         i1_sizes = set()
         i2_sizes, i3_sizes, i4_sizes, i5_sizes = [], [], [], []
         for _ in range(20):
             profile = MODULE.awg3_transit_obfuscation()
+            self.assertTrue(8 <= profile["jc"] <= 16)
+            self.assertTrue(48 <= profile["jmin"] <= 80)
+            self.assertTrue(384 <= profile["jmax"] <= 640)
+            self.assertLessEqual(profile["jmax"] + 28, 1280)
+            jc_seen.add(profile["jc"])
+            jmin_seen.add(profile["jmin"])
+            jmax_seen.add(profile["jmax"])
             i1_sizes.add(MODULE.awg_cps_signature_size(profile["i1"]))
             i2_sizes.append(MODULE.awg_cps_signature_size(profile["i2"]))
             i3_sizes.append(MODULE.awg_cps_signature_size(profile["i3"]))
             i4_sizes.append(MODULE.awg_cps_signature_size(profile["i4"]))
             i5_sizes.append(MODULE.awg_cps_signature_size(profile["i5"]))
-        self.assertEqual(i1_sizes, {1240})
-        self.assertLessEqual(1240 + 28, 1280)
+        for seen in (jc_seen, jmin_seen, jmax_seen):
+            self.assertGreater(len(seen), 1, "Jc/Jmin/Jmax должны меняться между вызовами")
+        # I1 больше не переопределяется отдельно для transit - наследуется
+        # от awg_server_obfuscation(), у которой размер I1 теперь тоже
+        # диапазон (1200-1252), а не фиксированное значение.
+        self.assertTrue(all(1200 <= size <= 1252 for size in i1_sizes))
+        self.assertGreater(len(i1_sizes), 1, "I1 должен меняться между вызовами")
         for sizes, bounds in (
-            (i2_sizes, (96, 384)),
-            (i3_sizes, (64, 320)),
-            (i4_sizes, (48, 256)),
-            (i5_sizes, (32, 192)),
+            (i2_sizes, (80, 430)),
+            (i3_sizes, (50, 360)),
+            (i4_sizes, (38, 290)),
+            (i5_sizes, (25, 220)),
         ):
             self.assertTrue(all(bounds[0] <= size <= bounds[1] for size in sizes))
-        # Изоляция от общего профиля: KeeneticOS/mobile не переопределяют
-        # I1-I5, поэтому I1 у них должен остаться на прежних 1200 байт даже
-        # после этого изменения - иначе транзитный профиль случайно потянул
-        # бы за собой общую функцию awg_server_obfuscation().
-        self.assertEqual(
-            MODULE.awg_cps_signature_size(MODULE.awg_server_obfuscation()["i1"]),
-            1200,
+        # Общий профиль (KeeneticOS/mobile) наследует тот же диапазон I1
+        # (1200-1252), что и transit, но НЕ получает расширенные границы
+        # I2-I5 - те остаются transit-специфичными.
+        self.assertTrue(
+            1200 <= MODULE.awg_cps_signature_size(MODULE.awg_server_obfuscation()["i1"]) <= 1252
         )
-        self.assertEqual(
-            MODULE.awg_cps_signature_size(MODULE.awg_mobile_awg3_obfuscation()["i1"]),
-            1200,
+        self.assertTrue(
+            1200
+            <= MODULE.awg_cps_signature_size(MODULE.awg_mobile_awg3_obfuscation()["i1"])
+            <= 1252
         )
+        # Легаси-профиль KeeneticOS <5.1 не строится на awg_server_obfuscation()
+        # и не должен получить I1-I5/S3-S4 ни при каких обстоятельствах -
+        # прошивка их не примет (см. docs/awg3.md, проверено против реальной
+        # команды `wireguard asc`).
+        legacy_profile = MODULE.awg_legacy_server_obfuscation()
+        self.assertEqual(legacy_profile["s3"], 0)
+        self.assertEqual(legacy_profile["s4"], 0)
+        self.assertTrue(all(legacy_profile[f"i{i}"] == "" for i in range(1, 6)))
 
         # inventory/example - это то, что копируется в production при первой
         # установке (см. prepare_production_directory); roles/awg3_transit -

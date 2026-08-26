@@ -2054,20 +2054,43 @@ def awg_message_padding() -> tuple[int, int, int]:
     return s1, s2, s3
 
 
+def awg_random_header_ranges() -> list[str]:
+    """Создать 4 непересекающихся диапазона H1-H4 со случайной шириной сетки.
+
+    Раньше сетка была всегда одна и та же: ровно 4 диапазона по ровно
+    500 000 000 каждый, с одних и тех же стартовых смещений при абсолютно
+    любом вызове - сама эта структура (не только числа внутри неё)
+    одинакова для любой установки этого (публичного) репозитория. Здесь
+    ширина каждого слота выбирается заново при каждом вызове. Непересечение
+    гарантируется тем, что курсор продвигается на всю зарезервированную
+    ширину слота, а не только на использованную его часть - поэтому не
+    может нарушиться независимо от того, какая ширина выпала. Худший случай
+    (стартовый отступ 100 000 000 + 4 слота по 400 000 000) даёт максимум
+    около 1.7 млрд - с явным запасом внутри допустимых для H1-H4
+    [1, 2 147 483 647].
+    """
+    cursor = 1 + secrets.randbelow(100_000_000)
+    ranges = []
+    for _ in range(4):
+        width = random_between((150_000_000, 400_000_000))
+        offset = secrets.randbelow(int(width * 0.4) + 1)
+        span = random_between((max(1, int(width * 0.1)), int(width * 0.4)))
+        start = cursor + offset
+        end = start + span
+        ranges.append(f"{start}-{end}")
+        cursor += width
+    secrets.SystemRandom().shuffle(ranges)
+    return ranges
+
+
 def awg_server_obfuscation() -> dict[str, object]:
     """Создать постоянный профиль AWG2 для KeeneticOS 5.1.x."""
-    header_ranges = []
-    for bucket in range(4):
-        bucket_start = 1 + bucket * 500_000_000
-        start = bucket_start + secrets.randbelow(200_000_001)
-        end = start + random_between((50_000_000, 200_000_000))
-        header_ranges.append(f"{start}-{end}")
-    secrets.SystemRandom().shuffle(header_ranges)
+    header_ranges = awg_random_header_ranges()
     s1, s2, s3 = awg_message_padding()
     result = {
-        "jc": 6,
-        "jmin": 64,
-        "jmax": 192,
+        "jc": random_between((4, 8)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((150, 230)),
         "s1": s1,
         "s2": s2,
         "s3": s3,
@@ -2079,11 +2102,19 @@ def awg_server_obfuscation() -> dict[str, object]:
         "h2": header_ranges[1],
         "h3": header_ranges[2],
         "h4": header_ranges[3],
-        "i1": awg_quic_initial_signature(),
-        "i2": awg_quic_short_signature((96, 192)),
-        "i3": awg_quic_short_signature((64, 160)),
-        "i4": awg_quic_short_signature((48, 128)),
-        "i5": awg_quic_short_signature((32, 96)),
+        "i1": awg_quic_initial_signature(random_between((1200, 1252))),
+        "i2": awg_quic_short_signature(
+            (random_between((80, 110)), random_between((170, 220)))
+        ),
+        "i3": awg_quic_short_signature(
+            (random_between((50, 75)), random_between((140, 180)))
+        ),
+        "i4": awg_quic_short_signature(
+            (random_between((35, 55)), random_between((110, 145)))
+        ),
+        "i5": awg_quic_short_signature(
+            (random_between((22, 40)), random_between((80, 110)))
+        ),
     }
     validate_awg_obfuscation(result)
     return result
@@ -2094,9 +2125,9 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
     headers = secrets.SystemRandom().sample(range(5, 2_147_483_648), 4)
     s1, s2, _ = awg_message_padding()
     result = {
-        "jc": 4,
-        "jmin": 64,
-        "jmax": 96,
+        "jc": random_between((3, 6)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((90, 130)),
         "s1": s1,
         "s2": s2,
         "s3": 0,
@@ -2118,7 +2149,11 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
 def awg_mobile_awg3_obfuscation() -> dict[str, object]:
     """Создать полный профиль маскировки mobile/AWG3+ для AWG 3.1."""
     result = awg_server_obfuscation()
-    result.update({"jc": 5, "jmin": 10, "jmax": 50})
+    result.update({
+        "jc": random_between((3, 7)),
+        "jmin": random_between((6, 14)),
+        "jmax": random_between((35, 70)),
+    })
     validate_awg_obfuscation(result)
     if any(int(result[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
         fail("Mobile/AWG3+ требует S1-S4 не меньше 12")
@@ -2148,28 +2183,36 @@ def awg_mobile_awg3_profile_is_complete(value: object) -> bool:
 def awg3_transit_obfuscation() -> dict[str, object]:
     """Создать профиль обфускации межсерверного AWG3+ (ENTRY-EXIT).
 
-    Jc/Jmin/Jmax и I1-I5 переопределены относительно общего
+    Jc/Jmin/Jmax и границы I2-I5 переопределены относительно общего
     `awg_server_obfuscation()` в сторону большей энтропии/размера: это
     длинный высоконагруженный туннель без клиентского MTU-ограничения
     (в отличие от KeeneticOS/mobile), а сами эти поля - junk и
     handshake-смежные пакеты, а не поле, применяемое к каждому
     транспортному пакету, поэтому увеличение почти не стоит пропускной
-    способности (см. docs/awg3.md). Значения оставлены с явным запасом
-    от защитного предела `+28 <= 1280` в `validate_awg_obfuscation`
-    (используется её MTU-независимый дефолт, а не фактический
-    согласованный MTU канала - профиль должен оставаться безопасным даже
-    при самом низком допустимом MTU).
+    способности (см. docs/awg3.md). I1 не переопределяется - у него уже
+    нет своего "потолка на профиль", он и так тянется к общему защитному
+    пределу `+28 <= 1280` в `validate_awg_obfuscation` (используется её
+    MTU-независимый дефолт, а не фактический согласованный MTU канала -
+    профиль должен оставаться безопасным даже при самом низком допустимом
+    MTU), поэтому отдельное значение для transit не добавило бы запаса.
     """
     result = awg_server_obfuscation()
     result.update({
-        "jc": 12,
-        "jmin": 64,
-        "jmax": 512,
-        "i1": awg_quic_initial_signature(1240),
-        "i2": awg_quic_short_signature((96, 384)),
-        "i3": awg_quic_short_signature((64, 320)),
-        "i4": awg_quic_short_signature((48, 256)),
-        "i5": awg_quic_short_signature((32, 192)),
+        "jc": random_between((8, 16)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((384, 640)),
+        "i2": awg_quic_short_signature(
+            (random_between((80, 112)), random_between((340, 430)))
+        ),
+        "i3": awg_quic_short_signature(
+            (random_between((50, 78)), random_between((280, 360)))
+        ),
+        "i4": awg_quic_short_signature(
+            (random_between((38, 58)), random_between((220, 290)))
+        ),
+        "i5": awg_quic_short_signature(
+            (random_between((25, 40)), random_between((160, 220)))
+        ),
     })
     validate_awg_obfuscation(result)
     return result
@@ -2334,6 +2377,16 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     transit_obfuscation = awg3_transit_obfuscation()
     entry_variables["awg3_transit_obfuscation"] = transit_obfuscation
     exit_variables["awg3_transit_obfuscation"] = transit_obfuscation
+    # Остальные четыре профиля обфускации (общий/Keenetic 5.1.x, запасной
+    # awg1 - тот же transit_obfuscation, что и выше, используется только
+    # когда userspace AWG3+ выключен, легаси-Keenetic до 5.1, mobile/AWG3+)
+    # живут только на ENTRY и тоже никогда не обновлялись после первой
+    # установки - тот же класс проблемы, что уже был у transit до этой
+    # сессии, чинится тем же способом.
+    entry_variables["entry_awg0_obfuscation"] = awg_server_obfuscation()
+    entry_variables["entry_awg1_obfuscation"] = transit_obfuscation
+    entry_variables["entry_legacy_awg_obfuscation"] = awg_legacy_server_obfuscation()
+    entry_variables["entry_mobile_awg_obfuscation"] = awg_mobile_awg3_obfuscation()
     yaml_write(all_vars_path, variables)
     yaml_write(entry_vars_path, entry_variables)
     yaml_write(exit_vars_path, exit_variables)
