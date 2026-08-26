@@ -663,6 +663,7 @@ class InteractiveDeployTests(unittest.TestCase):
             example = repo / "inventory" / "example"
             all_vars_path = production / "group_vars" / "all" / "main.yml"
             entry_vars_path = production / "group_vars" / "entry.yml"
+            exit_vars_path = production / "group_vars" / "exit.yml"
             stable_entry_path = example / "group_vars" / "entry.yml"
             awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
             awg3_mobile_defaults_path = (
@@ -684,6 +685,14 @@ class InteractiveDeployTests(unittest.TestCase):
                 {
                     "entry_sing_box_version": "1.0.0",
                     "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+                    "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                },
+            )
+            MODULE.yaml_write(
+                exit_vars_path,
+                {
+                    "exit_awg_subnet": "10.77.1.0/24",
+                    "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
                 },
             )
             MODULE.yaml_write(
@@ -724,12 +733,29 @@ class InteractiveDeployTests(unittest.TestCase):
 
             all_vars = MODULE.load_yaml(all_vars_path)
             entry_vars = MODULE.load_yaml(entry_vars_path)
+            exit_vars = MODULE.load_yaml(exit_vars_path)
             self.assertEqual(all_vars["awg_package_version_mode"], "candidate")
             self.assertNotIn("awg_package_versions", all_vars)
             self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
             self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
             self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
             self.assertEqual(all_vars["awg3_mobile_go_source_commit"], "c" * 40)
+            # Профиль обфускации межсерверного канала - тоже часть
+            # закреплённого manifest этого выпуска репозитория (не только
+            # первичной установки, см. awg3_transit_obfuscation()) и должен
+            # обновиться при --update-components точно так же, как версии
+            # пакетов выше, иначе уже развёрнутый каскад никогда не получит
+            # улучшения профиля. Старое значение jc/jmin/jmax=1/1/1 в обоих
+            # файлах-фикстурах подтверждает, что оно было реально заменено,
+            # а не просто оставлено как было.
+            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jc"], 12)
+            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jmin"], 64)
+            self.assertEqual(entry_vars["awg3_transit_obfuscation"]["jmax"], 512)
+            self.assertEqual(
+                entry_vars["awg3_transit_obfuscation"],
+                exit_vars["awg3_transit_obfuscation"],
+            )
+            self.assertEqual(exit_vars["exit_awg_subnet"], "10.77.1.0/24")
 
     def test_failed_component_update_restores_inventory_and_runs_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -739,6 +765,7 @@ class InteractiveDeployTests(unittest.TestCase):
             production = repo / "inventory" / "production"
             all_vars_path = production / "group_vars" / "all" / "main.yml"
             entry_vars_path = production / "group_vars" / "entry.yml"
+            exit_vars_path = production / "group_vars" / "exit.yml"
             vault_path = production / "group_vars" / "all" / "vault.yml"
             hosts_path = production / "hosts.yml"
             stable_entry_path = (
@@ -766,9 +793,15 @@ class InteractiveDeployTests(unittest.TestCase):
             original_entry = {
                 "entry_sing_box_version": "1.0.0",
                 "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+                "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+            }
+            original_exit = {
+                "exit_awg_subnet": "10.77.1.0/24",
+                "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
             }
             MODULE.yaml_write(all_vars_path, original_all)
             MODULE.yaml_write(entry_vars_path, original_entry)
+            MODULE.yaml_write(exit_vars_path, original_exit)
             MODULE.yaml_write(
                 stable_entry_path,
                 {
@@ -872,6 +905,11 @@ class InteractiveDeployTests(unittest.TestCase):
 
             self.assertEqual(MODULE.load_yaml(all_vars_path), original_all)
             self.assertEqual(MODULE.load_yaml(entry_vars_path), original_entry)
+            # exit.yml должен откатиться вместе с entry.yml - оба хранят одну и
+            # ту же общую awg3_transit_obfuscation, а неудавшийся
+            # --update-components не должен оставить стороны канала
+            # рассинхронизированными (одна на новом профиле, другая на старом).
+            self.assertEqual(MODULE.load_yaml(exit_vars_path), original_exit)
             self.assertEqual(package_lock.read_text(encoding="utf-8"), original_lock)
             self.assertEqual(ansible_run.call_count, 3)
             rollback_extra = ansible_run.call_args_list[1].args[4]
@@ -2318,21 +2356,61 @@ class InteractiveDeployTests(unittest.TestCase):
             },
         )
 
-        # Jc/Jmin/Jmax генерируются awg3_transit_obfuscation() заново на
-        # каждом деплое (см. awg_server_obfuscation()), но сама функция
-        # намеренно переопределяет базовый профиль на постоянные 8/64/256 -
-        # это единственная не-случайная часть словаря и осознанное решение
-        # (обоснование: near-zero cost для длинного высоконагруженного
-        # туннеля, см. docs/awg3.md), поэтому её тоже стоит закрепить.
-        # S1-S4/H1-H4/I1-I5 намеренно НЕ закрепляются здесь буквально - они
-        # каждый раз разные по дизайну; их протокольные инварианты уже
-        # закреплены отдельно в test_awg3_profile_meets_header_protection_
-        # padding_requirement и test_profile_validator_accepts_all_
-        # generated_profiles.
+        # Jc/Jmin/Jmax и I1-I5 генерируются awg3_transit_obfuscation() заново
+        # на каждом деплое (см. awg_server_obfuscation()), но сама функция
+        # намеренно переопределяет их относительно общего профиля - это
+        # единственная не-случайная часть словаря (Jc/Jmin/Jmax - точные
+        # числа; I1 - точный целевой размер 1240, детерминированный по
+        # построению; I2-I5 - границы диапазона размера, не сам размер) и
+        # осознанное решение (обоснование: near-zero cost для длинного
+        # высоконагруженного туннеля без клиентского MTU-ограничения, см.
+        # docs/awg3.md), поэтому их тоже стоит закрепить. Содержимое каждого
+        # I-поля (случайные DCID/SCID/паддинг) и S1-S4/H1-H4 намеренно НЕ
+        # закрепляются буквально - они каждый раз разные по дизайну; их
+        # протокольные инварианты уже закреплены отдельно в
+        # test_awg3_profile_meets_header_protection_padding_requirement и
+        # test_profile_validator_accepts_all_generated_profiles.
         transit_profile = MODULE.awg3_transit_obfuscation()
         self.assertEqual(
             {key: transit_profile[key] for key in ("jc", "jmin", "jmax")},
-            {"jc": 8, "jmin": 64, "jmax": 256},
+            {"jc": 12, "jmin": 64, "jmax": 512},
+        )
+        # Свободный запас до защитного предела `+28 <= 1280` в
+        # validate_awg_obfuscation (её MTU-независимый дефолт, а не
+        # фактический согласованный MTU канала) - если это когда-нибудь
+        # нарушится, validate_awg_obfuscation() выше уже упадёт первой, но
+        # явная проверка здесь фиксирует зазор как осознанный, а не
+        # случайно оставшийся впритык.
+        self.assertLessEqual(transit_profile["jmax"] + 28, 1280)
+        i1_sizes = set()
+        i2_sizes, i3_sizes, i4_sizes, i5_sizes = [], [], [], []
+        for _ in range(20):
+            profile = MODULE.awg3_transit_obfuscation()
+            i1_sizes.add(MODULE.awg_cps_signature_size(profile["i1"]))
+            i2_sizes.append(MODULE.awg_cps_signature_size(profile["i2"]))
+            i3_sizes.append(MODULE.awg_cps_signature_size(profile["i3"]))
+            i4_sizes.append(MODULE.awg_cps_signature_size(profile["i4"]))
+            i5_sizes.append(MODULE.awg_cps_signature_size(profile["i5"]))
+        self.assertEqual(i1_sizes, {1240})
+        self.assertLessEqual(1240 + 28, 1280)
+        for sizes, bounds in (
+            (i2_sizes, (96, 384)),
+            (i3_sizes, (64, 320)),
+            (i4_sizes, (48, 256)),
+            (i5_sizes, (32, 192)),
+        ):
+            self.assertTrue(all(bounds[0] <= size <= bounds[1] for size in sizes))
+        # Изоляция от общего профиля: KeeneticOS/mobile не переопределяют
+        # I1-I5, поэтому I1 у них должен остаться на прежних 1200 байт даже
+        # после этого изменения - иначе транзитный профиль случайно потянул
+        # бы за собой общую функцию awg_server_obfuscation().
+        self.assertEqual(
+            MODULE.awg_cps_signature_size(MODULE.awg_server_obfuscation()["i1"]),
+            1200,
+        )
+        self.assertEqual(
+            MODULE.awg_cps_signature_size(MODULE.awg_mobile_awg3_obfuscation()["i1"]),
+            1200,
         )
 
         # inventory/example - это то, что копируется в production при первой

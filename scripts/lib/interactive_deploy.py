@@ -2001,8 +2001,14 @@ def validate_awg_obfuscation(
             fail(f"{name.upper()} AWG превышает минимальный внешний PMTU")
 
 
-def awg_quic_initial_signature() -> str:
-    """Создать индивидуальный QUIC Initial-подобный I1 размером 1200 байт.
+def awg_quic_initial_signature(target_size: int = AWG_QUIC_INITIAL_SIZE) -> str:
+    """Создать индивидуальный QUIC Initial-подобный I1 заданного размера.
+
+    Размер по умолчанию (1200 байт) используется общим профилем
+    (`awg_server_obfuscation`, KeeneticOS/mobile/transit до переопределения).
+    Явный `target_size` позволяет профилям с большим запасом MTU (например,
+    межсерверному AWG3+) использовать более крупный I1 без изменения этого
+    общего значения для остальных профилей.
 
     Доступные upstream-теги AWG не умеют вычислять QUIC AEAD, поэтому пакет не
     выдаётся за полноценное QUIC-соединение. При этом его открытая структура
@@ -2015,7 +2021,7 @@ def awg_quic_initial_signature() -> str:
     dcid_size = random_between((8, 20))
     scid_size = random_between((8, 20))
     fixed_size = 10 + dcid_size + scid_size
-    protected_size = AWG_QUIC_INITIAL_SIZE - fixed_size
+    protected_size = target_size - fixed_size
     if not 64 <= protected_size < 16384:
         fail("Не удалось сформировать безопасный размер QUIC-подобной AWG-сигнатуры")
     encoded_length = 0x4000 | protected_size
@@ -2140,8 +2146,31 @@ def awg_mobile_awg3_profile_is_complete(value: object) -> bool:
 
 
 def awg3_transit_obfuscation() -> dict[str, object]:
+    """Создать профиль обфускации межсерверного AWG3+ (ENTRY-EXIT).
+
+    Jc/Jmin/Jmax и I1-I5 переопределены относительно общего
+    `awg_server_obfuscation()` в сторону большей энтропии/размера: это
+    длинный высоконагруженный туннель без клиентского MTU-ограничения
+    (в отличие от KeeneticOS/mobile), а сами эти поля - junk и
+    handshake-смежные пакеты, а не поле, применяемое к каждому
+    транспортному пакету, поэтому увеличение почти не стоит пропускной
+    способности (см. docs/awg3.md). Значения оставлены с явным запасом
+    от защитного предела `+28 <= 1280` в `validate_awg_obfuscation`
+    (используется её MTU-независимый дефолт, а не фактический
+    согласованный MTU канала - профиль должен оставаться безопасным даже
+    при самом низком допустимом MTU).
+    """
     result = awg_server_obfuscation()
-    result.update({"jc": 8, "jmin": 64, "jmax": 256})
+    result.update({
+        "jc": 12,
+        "jmin": 64,
+        "jmax": 512,
+        "i1": awg_quic_initial_signature(1240),
+        "i2": awg_quic_short_signature((96, 384)),
+        "i3": awg_quic_short_signature((64, 320)),
+        "i4": awg_quic_short_signature((48, 256)),
+        "i5": awg_quic_short_signature((32, 192)),
+    })
     validate_awg_obfuscation(result)
     return result
 
@@ -2271,11 +2300,13 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     """Выбрать новые AWG-пакеты и проверенный manifest остальных компонентов."""
     all_vars_path = production / "group_vars" / "all" / "main.yml"
     entry_vars_path = production / "group_vars" / "entry.yml"
+    exit_vars_path = production / "group_vars" / "exit.yml"
     stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
     awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
     awg3_mobile_defaults_path = repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
     variables = load_yaml(all_vars_path)
     entry_variables = load_yaml(entry_vars_path)
+    exit_variables = load_yaml(exit_vars_path)
     stable_entry = load_yaml(stable_entry_path)
     awg3_defaults = load_yaml(awg3_defaults_path)
     awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
@@ -2294,8 +2325,18 @@ def prepare_component_update(repo: Path, production: Path) -> None:
         if key not in awg3_mobile_defaults:
             fail(f"Проверенный manifest mobile AWG 3.1 не содержит {key}")
         variables[key] = awg3_mobile_defaults[key]
+    # Профиль обфускации межсерверного канала - как и версии пакетов выше,
+    # часть проверенного manifest этого выпуска репозитория, а не только
+    # первичной установки. Пересоздаётся заново (свежие Jc/Jmin/Jmax/S1-S4/
+    # H1-H4/I1-I5 - см. awg3_transit_obfuscation()) и записывается
+    # одинаково на ENTRY и EXIT, иначе стороны разойдутся и handshake
+    # перестанет собираться.
+    transit_obfuscation = awg3_transit_obfuscation()
+    entry_variables["awg3_transit_obfuscation"] = transit_obfuscation
+    exit_variables["awg3_transit_obfuscation"] = transit_obfuscation
     yaml_write(all_vars_path, variables)
     yaml_write(entry_vars_path, entry_variables)
+    yaml_write(exit_vars_path, exit_variables)
 
 
 def restore_file(path: Path, content: bytes | None) -> None:
@@ -3203,7 +3244,8 @@ def main() -> None:
         component_backup: dict[Path, bytes | None] = {}
         if args.update_components:
             entry_vars_path = production / "group_vars" / "entry.yml"
-            for path in (all_vars_path, entry_vars_path, awg_package_lock):
+            exit_vars_path = production / "group_vars" / "exit.yml"
+            for path in (all_vars_path, entry_vars_path, exit_vars_path, awg_package_lock):
                 component_backup[path] = path.read_bytes() if path.is_file() else None
             prepare_component_update(repo, production)
         final_variables = {
