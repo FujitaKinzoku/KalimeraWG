@@ -2288,6 +2288,53 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertTrue(defaults["awg3_random_trailers"])
         self.assertFalse(defaults["awg3_disable_cookies"])
 
+        # Статические тайминги/паддинг - не генерируются заново при деплое
+        # (в отличие от Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5, см. ниже), поэтому их
+        # можно и нужно закрепить буквально: любое отклонение от диапазонов,
+        # близких к спецификации WireGuard с небольшим джиттером (обоснование
+        # см. в docs/awg3.md), должно быть осознанным решением, а не
+        # случайной правкой defaults/main.yml.
+        self.assertEqual(
+            {
+                key: defaults[key]
+                for key in (
+                    "awg3_content_padding_addition",
+                    "awg3_rekey_after_time",
+                    "awg3_rekey_timeout",
+                    "awg3_reject_after_time",
+                    "awg3_keepalive_timeout",
+                    "awg3_max_handshake_attempts",
+                    "awg3_persistent_keepalive",
+                )
+            },
+            {
+                "awg3_content_padding_addition": "8-32",
+                "awg3_rekey_after_time": "120-180",
+                "awg3_rekey_timeout": "5-8",
+                "awg3_reject_after_time": "180-240",
+                "awg3_keepalive_timeout": "10-15",
+                "awg3_max_handshake_attempts": "18-24",
+                "awg3_persistent_keepalive": "22-30",
+            },
+        )
+
+        # Jc/Jmin/Jmax генерируются awg3_transit_obfuscation() заново на
+        # каждом деплое (см. awg_server_obfuscation()), но сама функция
+        # намеренно переопределяет базовый профиль на постоянные 8/64/256 -
+        # это единственная не-случайная часть словаря и осознанное решение
+        # (обоснование: near-zero cost для длинного высоконагруженного
+        # туннеля, см. docs/awg3.md), поэтому её тоже стоит закрепить.
+        # S1-S4/H1-H4/I1-I5 намеренно НЕ закрепляются здесь буквально - они
+        # каждый раз разные по дизайну; их протокольные инварианты уже
+        # закреплены отдельно в test_awg3_profile_meets_header_protection_
+        # padding_requirement и test_profile_validator_accepts_all_
+        # generated_profiles.
+        transit_profile = MODULE.awg3_transit_obfuscation()
+        self.assertEqual(
+            {key: transit_profile[key] for key in ("jc", "jmin", "jmax")},
+            {"jc": 8, "jmin": 64, "jmax": 256},
+        )
+
         # inventory/example - это то, что копируется в production при первой
         # установке (см. prepare_production_directory); roles/awg3_transit -
         # то, что --update-components подтягивает в уже развёрнутый
