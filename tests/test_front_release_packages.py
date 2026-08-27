@@ -214,6 +214,17 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("Маршрутизация через RU-прокси: НЕ НАСТРОЕНА", proxy)
         self.assertIn("'FRONT' if 'front' in group_names", prompt)
 
+    def test_ru_proxy_off_disables_sing_box_not_just_stops_it(self) -> None:
+        proxy = (ROOT / "roles/operations/templates/ru-proxy.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        off_section = proxy.split("  off)")[1].split("  on)")[0]
+        on_section = proxy.split("  on)")[1].split("  --help", 1)[0]
+
+        self.assertIn("systemctl disable --now sing-box.service", off_section)
+        self.assertNotIn("systemctl stop sing-box.service", off_section)
+        self.assertIn("systemctl enable --now sing-box.service", on_section)
+
     def test_front_backend_gets_minimal_rule_set_access(self) -> None:
         backend_tasks = (
             ROOT / "roles/front_backend/tasks/main.yml"
