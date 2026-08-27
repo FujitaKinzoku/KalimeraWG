@@ -177,6 +177,18 @@ mobile_awg31_profile_is_complete() {
 }
 {% endif %}
 
+{% if awg3_transit_enabled | default(false) | bool %}
+awg3_transit_profile_is_complete() {
+    local interface="$1" config
+    config="$({{ awg3_tools_binary_path | quote }} showconf "$interface" 2>/dev/null)" || return 1
+    for field in HeaderProtectionKey ContentPaddingAddition RekeyAfterTime \
+        RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts \
+        RandomTrailers DisableCookies I1 I2 I3 I4 I5; do
+        grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
+    done
+}
+{% endif %}
+
 {% if awg_node_role == 'entry' %}
 dns_no_logs_policy_is_active() {
     grep -Fxq 'cache-size=0' /etc/dnsmasq.d/50-awg-base.conf &&
@@ -439,6 +451,7 @@ check 'состояние AWG до EXIT сервера доступно' awg sho
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
 check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu | int }}
+check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% else %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
 {% endif %}
@@ -614,6 +627,7 @@ check 'состояние AWG EXIT сервера доступно' awg show {{ 
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
 check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu | int }}
+check 'полный профиль AWG 3+ EXIT сервера применён' awg3_transit_profile_is_complete {{ exit_awg_interface | quote }}
 {% else %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
 {% endif %}
