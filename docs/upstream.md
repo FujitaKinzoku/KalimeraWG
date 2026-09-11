@@ -32,12 +32,13 @@ upstream-исходников должно закреплять точный com
 ## Межсерверная версия AmneziaWG 3+
 
 Межсерверный канал в пространстве пользователя собирается из неизменяемых
-upstream-ревизий:
+upstream-ревизий (тот же пул коммитов, что и клиентский mobile/AWG3+, но
+отдельная, независимо собираемая и кэшируемая пара бинарников):
 
-- `amnezia-vpn/amneziawg-go`, тег `v3.0.20260805`, commit
-  `08d68cdae27762c3e07f36bbb12d2bad32f81926`, лицензия MIT;
-- `amnezia-vpn/amneziawg-tools`, тег `v3.0.20260805`, commit
-  `9f70177d204d5be66c5b043518a57b7d62b3f9d1`, GPL-2.0-or-later или MIT;
+- `amnezia-vpn/amneziawg-go`, тег `v3.1.20260814`, commit
+  `1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1`, лицензия MIT;
+- `amnezia-vpn/amneziawg-tools`, тег `v3.1.20260812`, commit
+  `ee0f0a9aa34ff0a0da4b3433b9512781cfe02843`, GPL-2.0-or-later или MIT;
 - Go `1.25.12`, официальный архив с `go.dev`; SHA-256 для каждой архитектуры
   закреплён в роли Ansible.
 

@@ -54,7 +54,7 @@ case "${1:-status}" in
     systemctl disable --now {{ entry_ru_proxy_watch_timer_name | quote }} >/dev/null
     install -d -m 0755 "$(dirname "$manual_flag")"
     install -m 0644 /dev/null "$manual_flag"
-    systemctl stop sing-box.service
+    systemctl disable --now sing-box.service
     "$routing" apply
     {{ awg_dns_policy_path | quote }}
     echo 'RU-трафик теперь выходит напрямую через ENTRY.'

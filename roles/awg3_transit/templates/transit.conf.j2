@@ -24,6 +24,8 @@ RekeyTimeout = {{ awg3_rekey_timeout }}
 RejectAfterTime = {{ awg3_reject_after_time }}
 KeepaliveTimeout = {{ awg3_keepalive_timeout }}
 MaxHandshakeAttempts = {{ awg3_max_handshake_attempts }}
+RandomTrailers = {{ 'on' if awg3_random_trailers | bool else 'off' }}
+DisableCookies = {{ 'on' if awg3_disable_cookies | bool else 'off' }}
 
 [Peer]
 PublicKey = {{ awg3_transit_peer_public_key }}

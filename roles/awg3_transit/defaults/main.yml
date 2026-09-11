@@ -20,10 +20,10 @@ awg3_go_archives:
   aarch64:
     filename: go1.25.12.linux-arm64.tar.gz
     checksum: sha256:8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2
-awg3_go_source_version: v3.0.20260805
-awg3_go_source_commit: 08d68cdae27762c3e07f36bbb12d2bad32f81926
-awg3_tools_source_version: v3.0.20260805
-awg3_tools_source_commit: 9f70177d204d5be66c5b043518a57b7d62b3f9d1
+awg3_go_source_version: v3.1.20260814
+awg3_go_source_commit: 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1
+awg3_tools_source_version: v3.1.20260812
+awg3_tools_source_commit: ee0f0a9aa34ff0a0da4b3433b9512781cfe02843
 awg3_build_root: /usr/local/src/awg-iac
 awg3_cache_root: /var/cache/awg-iac/awg3
 awg3_go_install_root: "/opt/awg-iac/go-{{ awg3_go_version }}"
@@ -45,3 +45,5 @@ awg3_reject_after_time: "180-240"
 awg3_keepalive_timeout: "10-15"
 awg3_max_handshake_attempts: "18-24"
 awg3_persistent_keepalive: "22-30"
+awg3_random_trailers: true
+awg3_disable_cookies: false

@@ -80,6 +80,16 @@ class InstallResilienceTests(unittest.TestCase):
         self.assertIn('Acquire::Retries "5";', site)
         self.assertNotIn("resolvectl dns", site)
 
+    def test_shamir_play_waits_for_ssh_after_possible_sshd_reload(self) -> None:
+        site = (ROOT / "playbooks/site.yml").read_text(encoding="utf-8")
+
+        wait_task = site.index("Ожидание восстановления SSH после возможной перезагрузки sshd")
+        host_key_read = site.index("Чтение публичного Ed25519 host key без закрытого материала")
+
+        self.assertLess(wait_task, host_key_read)
+        wait_block = site[wait_task:host_key_read]
+        self.assertIn("ansible.builtin.wait_for_connection", wait_block)
+
     def test_ipset_is_an_initial_dependency(self) -> None:
         common_defaults = (ROOT / "roles/common/defaults/main.yml").read_text(
             encoding="utf-8"
