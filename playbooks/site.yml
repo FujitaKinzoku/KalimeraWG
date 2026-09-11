@@ -572,6 +572,11 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Ожидание восстановления SSH после возможной перезагрузки sshd
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+      when: awg_adoption_mode == 'apply'
+
     - name: Чтение публичного Ed25519 host key без закрытого материала
       ansible.builtin.slurp:
         path: /etc/ssh/ssh_host_ed25519_key.pub
