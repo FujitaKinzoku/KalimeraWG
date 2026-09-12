@@ -13,20 +13,6 @@
   changed_when: false
   failed_when: false
 
-- name: Остановка прежней userspace-службы mobile AWG 3.1
-  ansible.builtin.systemd_service:
-    name: awg3-mobile.service
-    enabled: false
-    state: stopped
-  failed_when: false
-
-- name: Освобождение интерфейса после userspace-движка mobile AWG 3.1
-  ansible.builtin.command:
-    argv: [/usr/sbin/ip, link, delete, dev, "{{ entry_mobile_client_interface }}"]
-  changed_when: true
-  failed_when: false
-  when: awg3_mobile_userspace_active.rc == 0
-
 - name: Проверка параметров mobile AWG 3.1
   ansible.builtin.assert:
     quiet: true
@@ -146,6 +132,24 @@
         state: absent
       changed_when: false
       no_log: true
+
+# Останавливаем прежний движок только после того, как новая конфигурация
+# успешно сформирована и проверена. Иначе неудачный прогон гасит рабочую
+# службу и заодно стирает признак "mobile был включён", по которому ниже
+# принимается решение о запуске - ровно так mobile однажды и выключился молча.
+- name: Остановка прежней userspace-службы mobile AWG 3.1
+  ansible.builtin.systemd_service:
+    name: awg3-mobile.service
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Освобождение интерфейса после userspace-движка mobile AWG 3.1
+  ansible.builtin.command:
+    argv: [/usr/sbin/ip, link, delete, dev, "{{ entry_mobile_client_interface }}"]
+  changed_when: true
+  failed_when: false
+  when: awg3_mobile_userspace_active.rc == 0
 
 - name: Удаление остатков userspace-движка mobile AWG 3.1
   ansible.builtin.file:
