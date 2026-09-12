@@ -129,15 +129,6 @@ AWG3_COMPONENT_KEYS = (
     "awg3_tools_source_commit",
 )
 
-AWG3_MOBILE_COMPONENT_KEYS = (
-    "awg3_mobile_go_version",
-    "awg3_mobile_go_archives",
-    "awg3_mobile_go_source_version",
-    "awg3_mobile_go_source_commit",
-    "awg3_mobile_tools_source_version",
-    "awg3_mobile_tools_source_commit",
-)
-
 
 def color_output_enabled() -> bool:
     """Использовать цвет только в настоящем совместимом терминале."""
@@ -330,22 +321,25 @@ def migrate_production_inventory(production: Path) -> bool:
                 "Production inventory обновлён: текущая проверенная сборка AWG3 "
                 "закреплена для воспроизводимых повторных deploy."
             )
-    awg3_mobile_defaults_path = (
-        production.parents[1] / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+    # Отдельной сборки mobile AWG 3.1 больше нет - интерфейс поднимает
+    # kernel-модуль, поэтому и закреплять для него нечего. Оставшиеся в
+    # inventory ключи прежней сборки безвредны и просто перестают читаться.
+    mobile_build_keys = (
+        "awg3_mobile_go_version",
+        "awg3_mobile_go_archives",
+        "awg3_mobile_go_source_version",
+        "awg3_mobile_go_source_commit",
+        "awg3_mobile_tools_source_version",
+        "awg3_mobile_tools_source_commit",
     )
-    if all_path.is_file() and awg3_mobile_defaults_path.is_file():
-        awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
-        mobile_components_changed = False
-        for key in AWG3_MOBILE_COMPONENT_KEYS:
-            if key not in all_vars and key in awg3_mobile_defaults:
-                all_vars[key] = awg3_mobile_defaults[key]
-                all_changed = True
-                mobile_components_changed = True
-        if mobile_components_changed:
-            print(
-                "Production inventory обновлён: отдельная сборка mobile AWG 3.1 "
-                "закреплена без изменения межсерверного AWG 3.0."
-            )
+    if all_path.is_file() and any(key in all_vars for key in mobile_build_keys):
+        for key in mobile_build_keys:
+            all_vars.pop(key, None)
+        all_changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль, "
+            "закрепление отдельной сборки убрано."
+        )
     if (
         entry_vars.get("entry_ru_tun_stack") == "mixed"
         and entry_vars.get("entry_ru_endpoint_independent_nat") is False
@@ -384,7 +378,6 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars.get("entry_mobile_client_available", False)
         and (
             entry_vars.get("entry_mobile_profile_generation") != "awg3.1"
-            or entry_vars.get("entry_mobile_service_name") != "awg3-mobile.service"
             or not awg_mobile_awg3_profile_is_complete(
                 entry_vars.get("entry_mobile_awg_obfuscation")
             )
@@ -393,7 +386,6 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars.update(
             {
                 "entry_mobile_profile_generation": "awg3.1",
-                "entry_mobile_service_name": "awg3-mobile.service",
                 "entry_mobile_awg_obfuscation": awg_mobile_awg3_obfuscation(),
             }
         )
@@ -401,6 +393,20 @@ def migrate_production_inventory(production: Path) -> bool:
         print(
             "Production inventory обновлён: профиль mobile заменён на mobile/AWG3+. "
             "Ранее выданные mobile-конфиги нужно выпустить заново."
+        )
+
+    # Переход mobile/AWG3+ с отдельного userspace-движка на kernel-модуль.
+    # Отдельно от блока выше: имя службы меняется без смены профиля, поэтому
+    # переиздавать клиентские конфиги не требуется.
+    if (
+        entry_vars.get("entry_mobile_client_available", False)
+        and entry_vars.get("entry_mobile_service_name") != MOBILE_SERVICE_NAME
+    ):
+        entry_vars["entry_mobile_service_name"] = MOBILE_SERVICE_NAME
+        changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль "
+            "AmneziaWG; ранее выданные конфиги остаются действительными."
         )
 
     cps_changed = False
@@ -515,7 +521,7 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
         "entry_mobile_legacy_public_port": 53,
         "entry_mobile_legacy_internal_port": 39746,
         "entry_mobile_client_mtu": 1380,
-        "entry_mobile_service_name": "awg3-mobile.service",
+        "entry_mobile_service_name": MOBILE_SERVICE_NAME,
         "entry_mobile_profile_generation": "awg3.1",
     }
     mobile_network_keys = {
@@ -1889,6 +1895,10 @@ AWG_CLIENT_PROFILES = {
     },
 }
 
+# Mobile/AWG3+ поднимается kernel-модулем через awg-quick, как и остальные
+# клиентские интерфейсы; имя интерфейса задано ролью entry (awg-mobile).
+MOBILE_SERVICE_NAME = "awg-quick@awg-mobile.service"
+
 AWG3_MOBILE_FEATURE_DEFAULTS = {
     "content_padding_addition": "8-32",
     "rekey_after_time": "120-180",
@@ -2346,13 +2356,11 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     exit_vars_path = production / "group_vars" / "exit.yml"
     stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
     awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
-    awg3_mobile_defaults_path = repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
     variables = load_yaml(all_vars_path)
     entry_variables = load_yaml(entry_vars_path)
     exit_variables = load_yaml(exit_vars_path)
     stable_entry = load_yaml(stable_entry_path)
     awg3_defaults = load_yaml(awg3_defaults_path)
-    awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
 
     variables["awg_package_version_mode"] = "candidate"
     variables.pop("awg_package_versions", None)
@@ -2364,10 +2372,6 @@ def prepare_component_update(repo: Path, production: Path) -> None:
         if key not in awg3_defaults:
             fail(f"Проверенный manifest AWG3 не содержит {key}")
         variables[key] = awg3_defaults[key]
-    for key in AWG3_MOBILE_COMPONENT_KEYS:
-        if key not in awg3_mobile_defaults:
-            fail(f"Проверенный manifest mobile AWG 3.1 не содержит {key}")
-        variables[key] = awg3_mobile_defaults[key]
     # Профиль обфускации межсерверного канала - как и версии пакетов выше,
     # часть проверенного manifest этого выпуска репозитория, а не только
     # первичной установки. Пересоздаётся заново (свежие Jc/Jmin/Jmax/S1-S4/
@@ -4129,7 +4133,7 @@ def main() -> None:
             "entry_mobile_legacy_internal_port": 39746,
             "entry_mobile_client_mtu": 1380,
             "entry_mobile_awg_obfuscation": mobile_server_obfuscation,
-            "entry_mobile_service_name": "awg3-mobile.service",
+            "entry_mobile_service_name": MOBILE_SERVICE_NAME,
             "entry_mobile_profile_generation": "awg3.1",
             "awg3_mobile_content_padding_addition": AWG3_MOBILE_FEATURE_DEFAULTS["content_padding_addition"],
             "awg3_mobile_rekey_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_after_time"],

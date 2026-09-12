@@ -719,20 +719,6 @@ class InteractiveDeployTests(unittest.TestCase):
                     "awg3_tools_source_commit": "b" * 40,
                 },
             )
-            MODULE.yaml_write(
-                awg3_mobile_defaults_path,
-                {
-                    "awg3_mobile_go_version": "1.25.12",
-                    "awg3_mobile_go_archives": {
-                        "x86_64": {"checksum": "sha256:mobile-go"}
-                    },
-                    "awg3_mobile_go_source_version": "v3.1",
-                    "awg3_mobile_go_source_commit": "c" * 40,
-                    "awg3_mobile_tools_source_version": "v3.1",
-                    "awg3_mobile_tools_source_commit": "d" * 40,
-                },
-            )
-
             MODULE.prepare_component_update(repo, production)
 
             all_vars = MODULE.load_yaml(all_vars_path)
@@ -743,7 +729,9 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
             self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
             self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
-            self.assertEqual(all_vars["awg3_mobile_go_source_commit"], "c" * 40)
+            # Отдельной сборки mobile больше нет: интерфейс поднимает
+            # kernel-модуль, закреплять для него нечего.
+            self.assertNotIn("awg3_mobile_go_source_commit", all_vars)
             # Профиль обфускации межсерверного канала - тоже часть
             # закреплённого manifest этого выпуска репозитория (не только
             # первичной установки, см. awg3_transit_obfuscation()) и должен
@@ -1428,7 +1416,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(migrated["entry_mobile_legacy_internal_port"], 39746)
             self.assertNotIn("entry_mobile_i1_mode", migrated)
             self.assertEqual(migrated["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(migrated["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(migrated["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             for index in range(1, 6):
                 self.assertTrue(migrated["entry_mobile_awg_obfuscation"][f"i{index}"])
             self.assertNotIn("entry_mobile_client_public_port", migrated)
@@ -1487,7 +1475,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry["entry_mobile_client_listen_port"], 8443)
             self.assertNotIn("entry_mobile_i1_mode", entry)
             self.assertEqual(entry["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(entry["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(entry["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertIn("entry_mobile_awg_obfuscation", entry)
             for index in range(1, 6):
                 self.assertTrue(entry["entry_mobile_awg_obfuscation"][f"i{index}"])
@@ -1516,7 +1504,7 @@ class InteractiveDeployTests(unittest.TestCase):
             entry_path.write_text(
                 "entry_mobile_client_available: true\n"
                 "entry_mobile_profile_generation: awg3.1\n"
-                "entry_mobile_service_name: awg3-mobile.service\n"
+                "entry_mobile_service_name: awg-quick@awg-mobile.service\n"
                 "entry_mobile_awg_obfuscation:\n"
                 "  s1: 8\n"
                 "  i1: '<b 0x01>'\n",
@@ -2286,9 +2274,6 @@ class InteractiveDeployTests(unittest.TestCase):
         config = (root / "roles/awg3_mobile/templates/mobile.conf.j2").read_text(
             encoding="utf-8"
         )
-        service = (
-            root / "roles/awg3_mobile/templates/awg3-mobile.service.j2"
-        ).read_text(encoding="utf-8")
         firewall = (
             root / "roles/entry/templates/awg-mobile-firewall.sh.j2"
         ).read_text(encoding="utf-8")
@@ -2305,7 +2290,13 @@ class InteractiveDeployTests(unittest.TestCase):
             "RandomTrailers", "DisableCookies",
         ):
             self.assertIn(f"{field} =", config)
-        self.assertIn("{{ awg3_mobile_binary_path }}", service)
+        # Mobile поднимается kernel-модулем через awg-quick, поэтому конфиг
+        # сам несёт адрес, MTU и обвязку, которую раньше делал userspace-скрипт.
+        self.assertIn("Address = {{ entry_mobile_client_address }}", config)
+        self.assertIn("MTU = {{ entry_mobile_client_mtu | int }}", config)
+        self.assertIn("Table = off", config)
+        self.assertIn("PostUp = {{ entry_mobile_firewall_path }} apply", config)
+        self.assertIn("PostDown = {{ entry_mobile_firewall_path }} remove", config)
         self.assertNotIn("AdvancedSecurity", config)
         self.assertIn("readonly comment=awg-mobile-public-quic", firewall)
         self.assertIn("--dport \"$listen_port\"", firewall)
@@ -3118,7 +3109,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry_vars["entry_mobile_client_listen_port"], 8443)
             self.assertNotIn("entry_mobile_i1_mode", entry_vars)
             self.assertEqual(entry_vars["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertEqual(entry_vars["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(entry_vars["entry_mobile_legacy_internal_port"], 39746)
             self.assertEqual(entry_vars["entry_awg0_listen_port"], 443)

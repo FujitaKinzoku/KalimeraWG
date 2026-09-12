@@ -1,6 +1,15 @@
 [Interface]
 PrivateKey = {{ vault_awg_entry_mobile_private_key }}
+Address = {{ entry_mobile_client_address }}
 ListenPort = {{ entry_mobile_client_listen_port }}
+MTU = {{ entry_mobile_client_mtu | int }}
+# Маршрутизацию клиентов ведёт роль entry_routing, awg-quick свои маршруты
+# не добавляет. PostUp/PostDown повторяют то, что раньше делал отдельный
+# управляющий скрипт userspace-движка: внешний UDP-порт, согласование
+# маршрутизации и применение локальных пиров.
+Table = off
+PostUp = {{ entry_mobile_firewall_path }} apply; {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }} || true; systemctl --no-block try-restart awg-local-peer-apply.service || true
+PostDown = {{ entry_mobile_firewall_path }} remove || true; {{ entry_routing_reconcile_path | default('/usr/local/sbin/awg-entry-routing-reconcile') }} || true
 Jc = {{ entry_mobile_awg_obfuscation.jc }}
 Jmin = {{ entry_mobile_awg_obfuscation.jmin }}
 Jmax = {{ entry_mobile_awg_obfuscation.jmax }}

@@ -42,7 +42,7 @@ entry_mobile_client_listen_port: 8443
 entry_mobile_legacy_public_port: 53
 entry_mobile_legacy_internal_port: 39746
 entry_mobile_client_mtu: 1380
-entry_mobile_service_name: awg3-mobile.service
+entry_mobile_service_name: awg-quick@awg-mobile.service
 
 entry_awg0_obfuscation:
   jc: 6

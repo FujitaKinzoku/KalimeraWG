@@ -37,7 +37,7 @@ entry_mobile_legacy_public_port: 53
 entry_mobile_legacy_internal_port: 39746
 entry_mobile_client_mtu: 1380
 entry_mobile_firewall_path: /usr/local/sbin/awg-mobile-firewall
-entry_mobile_service_name: awg3-mobile.service
+entry_mobile_service_name: "awg-quick@{{ entry_mobile_client_interface }}.service"
 entry_mobile_awg_obfuscation:
   jc: 5
   jmin: 10
