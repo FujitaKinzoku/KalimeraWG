@@ -101,5 +101,61 @@ class ToggleTransitEngineTests(unittest.TestCase):
                 MODULE.set_transit_engine(production, "kernel")
 
 
+class ExitRoleInterfacePathTests(unittest.TestCase):
+    """Пути AWG на EXIT должны выводиться из имени интерфейса.
+
+    Захардкоженный awg0 ломал kernel-путь при exit_awg_interface: awg3 -
+    роль писала awg0.conf, а awg-quick@awg3.service ждал awg3.conf через
+    LoadCredential и падал с 243/CREDENTIALS.
+    """
+
+    REPO = Path(__file__).parents[1]
+    DERIVED_KEYS = (
+        "exit_awg_config_path",
+        "exit_awg_candidate_path",
+        "exit_awg_backup_dir",
+    )
+
+    def test_exit_awg_paths_derive_from_interface_name(self) -> None:
+        defaults = yaml.safe_load(
+            (self.REPO / "roles" / "exit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        for key in self.DERIVED_KEYS:
+            with self.subTest(key=key):
+                self.assertIn("{{ exit_awg_interface }}", defaults[key])
+                self.assertNotIn("awg0", defaults[key])
+
+    def test_exit_awg_paths_stay_backward_compatible_for_awg0(self) -> None:
+        import jinja2
+
+        defaults = yaml.safe_load(
+            (self.REPO / "roles" / "exit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        rendered = {
+            key: jinja2.Template(defaults[key]).render(exit_awg_interface="awg0")
+            for key in self.DERIVED_KEYS
+        }
+        self.assertEqual(
+            rendered["exit_awg_config_path"], "/etc/amnezia/amneziawg/awg0.conf"
+        )
+        self.assertEqual(rendered["exit_awg_candidate_path"], "/run/ansible-awg0.conf")
+        self.assertEqual(
+            rendered["exit_awg_backup_dir"], "/root/config-backups/exit/awg0"
+        )
+
+    def test_exit_backup_destination_is_not_hardcoded_to_awg0(self) -> None:
+        tasks = (self.REPO / "roles" / "exit" / "tasks" / "main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("awg0.conf.{{ ansible_date_time", tasks)
+        self.assertIn(
+            "{{ exit_awg_interface }}.conf.{{ ansible_date_time", tasks
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,9 +72,17 @@ def main() -> None:
     changed = set_transit_engine(production, args.engine)
     if changed:
         print(f"Production inventory обновлён: движок транзита переключён на {args.engine!r}.")
-        print("Применить: sudo ./deploy --resume")
     else:
         print(f"Production inventory уже настроен на {args.engine!r}, изменений нет.")
+    print()
+    print("ВАЖНО: роли entry/exit в site.yml идут раньше awg3_transit, поэтому")
+    print("новый движок пытается занять то же имя интерфейса, пока старый его")
+    print("ещё держит ('already exists'). Перед деплоем освободите интерфейс")
+    print("на ОБОИХ серверах (ENTRY и EXIT):")
+    print("    sudo ip link delete awg3")
+    print("    sudo rm -f /var/run/amneziawg/awg3.sock")
+    print()
+    print("Затем применить: sudo ./deploy --resume")
 
 
 if __name__ == "__main__":

@@ -162,7 +162,7 @@
       ansible.builtin.copy:
         src: "{{ exit_awg_config_path }}"
         dest: >-
-          {{ exit_awg_backup_dir }}/awg0.conf.{{ ansible_date_time.iso8601_basic_short }}
+          {{ exit_awg_backup_dir }}/{{ exit_awg_interface }}.conf.{{ ansible_date_time.iso8601_basic_short }}
         remote_src: true
         owner: root
         group: root
