@@ -50,7 +50,11 @@
 {% set _ = mappings.append({'source': runtime_secrets_controller_client_state_path, 'target': 'controller/clients'}) %}
 {% endif %}
 {% for mapping in mappings %}
-    {"source": {{ mapping.source | to_json }}, "target": {{ mapping.target | to_json }}}{% if not loop.last %},{% endif %}
+{# Печатаем маппинг целиком: кроме source/target он может нести access_group,
+   traverse_paths и read_paths, по которым apply_runtime_access раздаёт группе
+   узкий доступ внутрь tmpfs. Перечисление полей по именам уже приводило к
+   тому, что эти три ключа молча терялись. #}
+    {{ mapping | to_json }}{% if not loop.last %},{% endif %}
 {% endfor %}
   ]
 }
