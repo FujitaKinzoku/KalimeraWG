@@ -311,6 +311,37 @@ class KernelTransitProfileTests(unittest.TestCase):
         )
 
 
+class AwgQuickCandidateNameTests(unittest.TestCase):
+    """Имя файла-кандидата обязано быть годным именем интерфейса.
+
+    awg-quick strip выводит имя интерфейса из имени файла и отвергает всё
+    длиннее 15 символов: "The config file must be a valid interface name,
+    followed by .conf". На этом уже один раз падал деплой mobile.
+    """
+
+    REPO = Path(__file__).parents[1]
+    CANDIDATES = (
+        ("roles/awg3_mobile/defaults/main.yml", "awg3_mobile_candidate_path"),
+        ("roles/exit/defaults/main.yml", "exit_awg_candidate_path"),
+    )
+
+    def test_candidate_basenames_are_valid_interface_names(self) -> None:
+        import re
+
+        for relative, key in self.CANDIDATES:
+            defaults = yaml.safe_load(
+                (self.REPO / relative).read_text(encoding="utf-8")
+            )
+            value = defaults[key]
+            rendered = value.replace(
+                "{{ exit_awg_interface }}", defaults.get("exit_awg_interface", "awg0")
+            )
+            name = rendered.rsplit("/", 1)[-1].removesuffix(".conf")
+            with self.subTest(key=key, name=name):
+                self.assertLessEqual(len(name), 15)
+                self.assertRegex(name, r"^[a-zA-Z0-9_=+.-]{1,15}$")
+
+
 class TransitSizeRandomisationTests(unittest.TestCase):
     """Рандомизация размера на межсерверном канале выключена намеренно.
 

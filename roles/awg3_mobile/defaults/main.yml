@@ -12,7 +12,10 @@ awg3_mobile_service_name: "awg-quick@{{ entry_mobile_client_interface }}.service
 awg3_mobile_tools_binary_path: /usr/bin/awg
 awg3_mobile_config_dir: "{{ entry_awg_config_dir | default('/etc/amnezia/amneziawg') }}"
 awg3_mobile_config_path: "{{ awg3_mobile_config_dir }}/{{ entry_mobile_client_interface }}.conf"
-awg3_mobile_candidate_path: "/run/ansible-{{ entry_mobile_client_interface }}.conf"
+# awg-quick выводит имя интерфейса из имени файла кандидата и требует, чтобы
+# оно было не длиннее 15 символов, иначе strip отказывается его разбирать.
+# "ansible-awg-mobile" в этот предел не укладывается, поэтому имя короткое.
+awg3_mobile_candidate_path: /run/awgm-cand.conf
 awg3_mobile_backup_dir: /root/config-backups/entry/awg3-mobile
 
 awg3_mobile_content_padding_addition: "8-32"
