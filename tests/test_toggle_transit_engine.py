@@ -157,5 +157,143 @@ class ExitRoleInterfacePathTests(unittest.TestCase):
         )
 
 
+AWG31_FIELDS = (
+    "Jc",
+    "Jmin",
+    "Jmax",
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "I1",
+    "I2",
+    "I3",
+    "I4",
+    "I5",
+    "HeaderProtectionKey",
+    "ContentPaddingAddition",
+    "RekeyAfterTime",
+    "RekeyTimeout",
+    "RejectAfterTime",
+    "KeepaliveTimeout",
+    "MaxHandshakeAttempts",
+    "RandomTrailers",
+    "DisableCookies",
+)
+
+
+class KernelTransitProfileTests(unittest.TestCase):
+    """Kernel-путь транзита должен нести тот же профиль AWG 3.1, что и userspace.
+
+    Модуль amneziawg v3.1 принимает весь набор через netlink (проверено на
+    реальном awg setconf/showconf), поэтому урезать kernel-профиль до I1 без
+    HeaderProtectionKey/ContentPaddingAddition/RandomTrailers больше незачем.
+    """
+
+    REPO = Path(__file__).parents[1]
+    ENTRY_TEMPLATE = REPO / "roles" / "entry" / "templates" / "awg1.conf.j2"
+    EXIT_TEMPLATE = REPO / "roles" / "exit" / "templates" / "awg0.conf.j2"
+
+    def test_both_kernel_templates_carry_full_awg31_field_set(self) -> None:
+        for template in (self.ENTRY_TEMPLATE, self.EXIT_TEMPLATE):
+            text = template.read_text(encoding="utf-8")
+            for field in AWG31_FIELDS:
+                with self.subTest(template=template.name, field=field):
+                    self.assertRegex(text, rf"(?m)^{field} = ")
+
+    def test_kernel_templates_take_i2_i5_from_the_shared_profile(self) -> None:
+        entry = self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        exit_text = self.EXIT_TEMPLATE.read_text(encoding="utf-8")
+        for index in range(1, 6):
+            with self.subTest(index=index):
+                self.assertIn(f"entry_awg1_obfuscation.i{index}", entry)
+                self.assertIn(f"exit_awg_obfuscation.i{index}", exit_text)
+
+    def test_entry_kernel_template_restores_the_peer_route(self) -> None:
+        entry = self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("Table = off", entry)
+        self.assertIn("PostUp = ip -4 route replace", entry)
+        self.assertIn("awg3_peer_tunnel_address", entry)
+
+    def _render_entry(self, **overrides: object) -> str:
+        import jinja2
+
+        context: dict[str, object] = {
+            "vault_awg_entry_exit_private_key": "PRIV",
+            "entry_exit_tunnel_address": "10.77.0.2/32",
+            "entry_awg1_mtu": 1420,
+            "awg3_peer_tunnel_address": "10.77.0.1",
+            "entry_awg1_obfuscation": {
+                "jc": 12,
+                "jmin": 64,
+                "jmax": 512,
+                "s1": 17,
+                "s2": 23,
+                "s3": 23,
+                "s4": 29,
+                "h1": "1-2",
+                "h2": "3-4",
+                "h3": "5-6",
+                "h4": "7-8",
+                "i1": "<b 0x01><r 10>",
+                "i2": "<b 0x02><r 10>",
+                "i3": "<b 0x03><r 10>",
+                "i4": "<b 0x04><r 10>",
+                "i5": "<b 0x05><r 10>",
+            },
+            "vault_awg3_header_protection_key": "HPK",
+            "awg3_content_padding_addition": "8-32",
+            "awg3_rekey_after_time": "120-180",
+            "awg3_rekey_timeout": "5-8",
+            "awg3_reject_after_time": "180-240",
+            "awg3_keepalive_timeout": "10-15",
+            "awg3_max_handshake_attempts": "18-24",
+            "awg3_random_trailers": True,
+            "awg3_disable_cookies": False,
+            "vault_awg_entry_exit_peer_public_key": "PUB",
+            "vault_awg_entry_exit_psk": "PSK",
+            "entry_exit_allowed_ips": ["0.0.0.0/0"],
+            "entry_exit_endpoint": "198.51.100.1:443",
+            "entry_exit_persistent_keepalive": 25,
+        }
+        context.update(overrides)
+        # trim_blocks=True повторяет окружение Ansible; фильтр bool -
+        # ansible-специфичный, в ванильном Jinja2 его нет. Это структурная
+        # проверка рендера, полная ansible-верность шаблонов проверяется
+        # отдельно в CI (render-shell.yml и ansible syntax check).
+        environment = jinja2.Environment(trim_blocks=True, autoescape=False)
+        environment.filters["bool"] = lambda value: str(value).strip().lower() in {
+            "true",
+            "yes",
+            "on",
+            "1",
+        }
+        template = environment.from_string(
+            self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        )
+        return template.render(**context)
+
+    def test_entry_template_renders_cleanly_with_ansible_trim_blocks(self) -> None:
+        rendered = self._render_entry()
+        self.assertIn("PostUp = ip -4 route replace 10.77.0.1/32 dev %i", rendered)
+        self.assertIn("RandomTrailers = on", rendered)
+        self.assertIn("DisableCookies = off", rendered)
+        self.assertIn("I5 = <b 0x05><r 10>", rendered)
+        # Ни одной пустой строки внутри [Interface] - иначе awg-quick
+        # обрежет секцию на первой из них.
+        interface_block = rendered.split("[Peer]")[0]
+        self.assertNotIn("\n\n", interface_block.rstrip() + "\n")
+
+    def test_entry_template_omits_peer_route_when_address_is_unset(self) -> None:
+        rendered = self._render_entry(awg3_peer_tunnel_address="")
+        self.assertNotIn("PostUp", rendered)
+        self.assertNotIn("PostDown", rendered)
+        self.assertIn("Table = off", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
