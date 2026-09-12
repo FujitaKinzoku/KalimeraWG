@@ -2344,7 +2344,9 @@ class InteractiveDeployTests(unittest.TestCase):
             defaults["awg3_tools_source_commit"],
             "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
         )
-        self.assertTrue(defaults["awg3_random_trailers"])
+        # Рандомизация размера выключена намеренно: замерено 7.6% против 1.9%
+        # потерь на живом межсерверном канале, см. комментарий в defaults роли.
+        self.assertFalse(defaults["awg3_random_trailers"])
         self.assertFalse(defaults["awg3_disable_cookies"])
 
         # Статические тайминги/паддинг - не генерируются заново при деплое
@@ -2367,7 +2369,7 @@ class InteractiveDeployTests(unittest.TestCase):
                 )
             },
             {
-                "awg3_content_padding_addition": "8-32",
+                "awg3_content_padding_addition": "0",
                 "awg3_rekey_after_time": "120-180",
                 "awg3_rekey_timeout": "5-8",
                 "awg3_reject_after_time": "180-240",

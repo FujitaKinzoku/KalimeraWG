@@ -1,7 +1,8 @@
 [Interface]
 PrivateKey = {{ vault_awg_entry_exit_private_key }}
 Address = {{ entry_exit_tunnel_address }}
-MTU = {{ entry_awg1_mtu }}
+ListenPort = {{ awg3_transit_listen_port }}
+MTU = {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
 Table = off
 {% if awg3_peer_tunnel_address | default('') | length > 0 %}
 PostUp = ip -4 route replace {{ awg3_peer_tunnel_address }}/32 dev %i

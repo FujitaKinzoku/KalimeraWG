@@ -226,6 +226,8 @@ class KernelTransitProfileTests(unittest.TestCase):
             "vault_awg_entry_exit_private_key": "PRIV",
             "entry_exit_tunnel_address": "10.77.0.2/32",
             "entry_awg1_mtu": 1420,
+            "awg3_transit_listen_port": 39745,
+            "awg3_shared_effective_mtu": 1359,
             "awg3_peer_tunnel_address": "10.77.0.1",
             "entry_awg1_obfuscation": {
                 "jc": 12,
@@ -293,6 +295,46 @@ class KernelTransitProfileTests(unittest.TestCase):
         self.assertNotIn("PostUp", rendered)
         self.assertNotIn("PostDown", rendered)
         self.assertIn("Table = off", rendered)
+
+    def test_entry_template_pins_the_managed_listen_port(self) -> None:
+        # Без явного ListenPort ядро берёт случайный порт, и правила UFW,
+        # рассчитанные на awg3_transit_listen_port, перестают совпадать.
+        rendered = self._render_entry()
+        self.assertIn("ListenPort = 39745", rendered)
+
+    def test_entry_template_uses_the_measured_cascade_mtu(self) -> None:
+        # Статический entry_awg1_mtu не знает про измеренный PMTU канала;
+        # берём согласованное значение, а статику оставляем как запасную.
+        self.assertIn("MTU = 1359", self._render_entry())
+        self.assertIn(
+            "MTU = 1420", self._render_entry(awg3_shared_effective_mtu=None)
+        )
+
+
+class TransitSizeRandomisationTests(unittest.TestCase):
+    """Рандомизация размера на межсерверном канале выключена намеренно.
+
+    Замер на живом канале (5 прогонов на конфигурацию, UDP 150 Mbit/s):
+    7.6% потерь при включённых ContentPaddingAddition/RandomTrailers против
+    1.9% при выключенных, диапазоны не пересекались. Остальной профиль AWG 3.1
+    сохранён - он ничего не стоит по потерям.
+    """
+
+    DEFAULTS = (
+        Path(__file__).parents[1] / "roles" / "awg3_transit" / "defaults" / "main.yml"
+    )
+
+    def test_transit_disables_both_size_randomisation_fields(self) -> None:
+        defaults = yaml.safe_load(self.DEFAULTS.read_text(encoding="utf-8"))
+        self.assertEqual(defaults["awg3_content_padding_addition"], "0")
+        self.assertFalse(defaults["awg3_random_trailers"])
+
+    def test_transit_keeps_the_rest_of_the_awg31_profile(self) -> None:
+        defaults = yaml.safe_load(self.DEFAULTS.read_text(encoding="utf-8"))
+        self.assertEqual(defaults["awg3_rekey_after_time"], "120-180")
+        self.assertEqual(defaults["awg3_reject_after_time"], "180-240")
+        self.assertEqual(defaults["awg3_max_handshake_attempts"], "18-24")
+        self.assertFalse(defaults["awg3_disable_cookies"])
 
 
 if __name__ == "__main__":
