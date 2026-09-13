@@ -116,9 +116,14 @@ threat model for the new mechanisms in
 | Segment | Purpose | Default state |
 |---|---|---|
 | `awg0`, UDP/443 | modern clients | enabled |
-| `awg-mobile`, UDP/8443 | dedicated userspace mobile/AWG3+ with the full AWG 3.1 profile | enabled on first mobile peer |
+| `awg-mobile`, UDP/8443 | dedicated mobile/AWG3+ with the full AWG 3.1 profile | enabled on first mobile peer |
 | `awg-old` | KeeneticOS 4.3.x compatibility | enabled on first old peer |
-| `awg3`, EXIT UDP/443 | independent userspace ENTRY–EXIT transit | enabled |
+| `awg3`, EXIT UDP/443 | independent ENTRY–EXIT transit | enabled |
+
+Every interface, transit included, is brought up by the AmneziaWG kernel
+module. A fallback userspace engine based on `amneziawg-go` is kept for the
+transit channel only; it is selected with `scripts/toggle-transit-engine.py`
+and is not used by default - see [docs/awg3.md](docs/awg3.md).
 
 The public AWG3 port on EXIT is allowed only from the known ENTRY IPv4. Client
 and transit segments use separate interfaces, keys, and parameters.
