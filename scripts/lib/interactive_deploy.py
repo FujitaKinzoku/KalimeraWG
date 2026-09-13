@@ -1915,6 +1915,20 @@ AWG_QUIC_INITIAL_SIZE = 1200
 AWG_CPS_RANDOM_TAG_MAX = 1000
 AWG_MINIMUM_OUTER_PMTU = 1280
 
+# Границы размера коротких CPS-подписей I2-I5 общего профиля: пара диапазонов
+# на ключ, из которых на каждый вызов разыгрываются нижняя и верхняя граница.
+# Сами границы тоже случайны намеренно - репозиторий публичный, и постоянные
+# литералы делали бы структуру профиля одинаковой во всех установках.
+# Единственный источник правды: тесты читают эту же таблицу. Закреплённый в
+# тесте отдельной копией предел уже успел устареть молча и отбраковывал 7%
+# честных профилей, роняя CI на пустом месте.
+AWG_SHORT_SIGNATURE_BOUNDS: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    "i2": ((80, 110), (170, 220)),
+    "i3": ((50, 75), (140, 180)),
+    "i4": ((35, 55), (110, 145)),
+    "i5": ((22, 40), (80, 110)),
+}
+
 
 def random_between(bounds: tuple[int, int]) -> int:
     lower, upper = bounds
@@ -2093,6 +2107,12 @@ def awg_random_header_ranges() -> list[str]:
     return ranges
 
 
+def awg_short_signature_size_bounds(key: str) -> tuple[int, int]:
+    """Разыграть границы размера короткой CPS-подписи I2-I5."""
+    low, high = AWG_SHORT_SIGNATURE_BOUNDS[key]
+    return random_between(low), random_between(high)
+
+
 def awg_server_obfuscation() -> dict[str, object]:
     """Создать постоянный профиль AWG2 для KeeneticOS 5.1.x."""
     header_ranges = awg_random_header_ranges()
@@ -2113,18 +2133,10 @@ def awg_server_obfuscation() -> dict[str, object]:
         "h3": header_ranges[2],
         "h4": header_ranges[3],
         "i1": awg_quic_initial_signature(random_between((1200, 1252))),
-        "i2": awg_quic_short_signature(
-            (random_between((80, 110)), random_between((170, 220)))
-        ),
-        "i3": awg_quic_short_signature(
-            (random_between((50, 75)), random_between((140, 180)))
-        ),
-        "i4": awg_quic_short_signature(
-            (random_between((35, 55)), random_between((110, 145)))
-        ),
-        "i5": awg_quic_short_signature(
-            (random_between((22, 40)), random_between((80, 110)))
-        ),
+        "i2": awg_quic_short_signature(awg_short_signature_size_bounds("i2")),
+        "i3": awg_quic_short_signature(awg_short_signature_size_bounds("i3")),
+        "i4": awg_quic_short_signature(awg_short_signature_size_bounds("i4")),
+        "i5": awg_quic_short_signature(awg_short_signature_size_bounds("i5")),
     }
     validate_awg_obfuscation(result)
     return result
@@ -2848,7 +2860,7 @@ def show_deployment_summary(production: Path) -> None:
     transit_label = (
         "AWG 3+ userspace"
         if entry_vars.get("awg3_transit_enabled", False)
-        else "AmneziaWG"
+        else "AmneziaWG kernel"
     )
     access_rows.append(
         (
@@ -3531,9 +3543,11 @@ def main() -> None:
     )
     if client_awg_port == legacy_awg_port:
         fail("Основной и совместимый клиентские UDP-порты AWG на ENTRY должны различаться")
-    # На ENTRY клиентский kernel-интерфейс и userspace AWG3 не могут надёжно
-    # делить один сокет. Публичным портом каскада остаётся UDP/443 на EXIT, а
-    # локальный порт AWG3 на ENTRY выбирается отдельно и фильтруется по IP EXIT.
+    # Межсерверный интерфейс на ENTRY не может делить сокет с клиентскими - у
+    # каждого интерфейса свой ListenPort, независимо от того, поднимает его
+    # kernel-модуль или запасной userspace-движок. Публичным портом каскада
+    # остаётся UDP/443 на EXIT, а локальный порт межсерверного канала на ENTRY
+    # выбирается отдельно и фильтруется по IP EXIT.
     entry_transit_listen_port = 39745
     while entry_transit_listen_port in {client_awg_port, legacy_awg_port}:
         entry_transit_listen_port += 1
@@ -4144,7 +4158,14 @@ def main() -> None:
             "awg3_mobile_persistent_keepalive": AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"],
             "awg3_mobile_random_trailers": AWG3_MOBILE_FEATURE_DEFAULTS["random_trailers"],
             "awg3_mobile_disable_cookies": AWG3_MOBILE_FEATURE_DEFAULTS["disable_cookies"],
-            "awg3_transit_enabled": True,
+            # Межсерверный канал поднимает kernel-модуль AmneziaWG, а не
+            # отдельный userspace-движок: на одном и том же канале userspace
+            # терял 6.4-7.8% пакетов против 0.85% у kernel-модуля, и именно это
+            # выражалось в медленном зарубежном трафике. Полный набор полей 3.1
+            # kernel принимает (проверено реальными awg setconf/showconf).
+            # Запасной userspace-путь остаётся доступен через
+            # scripts/toggle-transit-engine.py для хостов, где DKMS не собирается.
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": entry_transit_listen_port,
             "awg3_transit_address": f"{entry_transit_ip}/32",
@@ -4198,9 +4219,14 @@ def main() -> None:
             "exit_awg_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
             "exit_awg_subnet": str(transit_subnet),
             "exit_awg_obfuscation": transit_obfuscation,
-            "exit_manage_awg_config": False,
+            # Стороны транзита обязаны быть на одном движке - см. комментарий у
+            # ENTRY выше и таблицу движков в scripts/toggle-transit-engine.py.
+            # При kernel-модуле конфиг межсерверного интерфейса пишет роль exit,
+            # поэтому exit_manage_awg_config включён; при userspace его писала бы
+            # роль awg3_transit, и флаг был бы выключен.
+            "exit_manage_awg_config": True,
             "exit_peer_migration_policy": "explicit",
-            "awg3_transit_enabled": True,
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": transit_awg_port,
             "awg3_transit_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",

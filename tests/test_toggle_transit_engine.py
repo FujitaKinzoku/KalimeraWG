@@ -213,6 +213,16 @@ class KernelTransitProfileTests(unittest.TestCase):
                 self.assertIn(f"entry_awg1_obfuscation.i{index}", entry)
                 self.assertIn(f"exit_awg_obfuscation.i{index}", exit_text)
 
+    def test_exit_kernel_template_uses_the_measured_cascade_mtu(self) -> None:
+        # EXIT брал статический exit_awg_mtu, пока ENTRY уже использовал
+        # измеренный PMTU - стороны одного туннеля расходились по MTU.
+        # Фильтр default обязан идти с true: без него определённый, но пустой
+        # факт Ansible не считается отсутствующим и подставится как есть.
+        exit_text = self.EXIT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn(
+            "awg3_shared_effective_mtu | default(exit_awg_mtu, true)", exit_text
+        )
+
     def test_entry_kernel_template_restores_the_peer_route(self) -> None:
         entry = self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("Table = off", entry)
@@ -366,6 +376,131 @@ class TransitSizeRandomisationTests(unittest.TestCase):
         self.assertEqual(defaults["awg3_reject_after_time"], "180-240")
         self.assertEqual(defaults["awg3_max_handshake_attempts"], "18-24")
         self.assertFalse(defaults["awg3_disable_cookies"])
+
+
+class FreshInstallTransitEngineTests(unittest.TestCase):
+    """Первичная установка обязана поднимать тот же движок, что и проверенный каскад.
+
+    Переезд межсерверного канала на kernel-модуль дошёл до шаблонов и до живого
+    каскада (через toggle-transit-engine.py и --resume), но мастер первичной
+    установки продолжал закреплять userspace. Чистая установка с закреплённой
+    "известно-хорошей" ревизии приезжала на движке, который на том же канале
+    терял 6.4-7.8% пакетов против 0.85% у kernel-модуля - ровно та проблема
+    медленного зарубежного трафика, ради которой переезд и делался.
+
+    Флаги связаны попарно: awg3_transit_enabled выбирает движок, а
+    exit_manage_awg_config говорит, какая роль пишет конфиг интерфейса на EXIT.
+    Половина одной строки таблицы вместе с половиной другой означает, что
+    интерфейс не поднимает никто, поэтому проверяем строку целиком.
+    """
+
+    REPO = Path(__file__).parents[1]
+    DEPLOY = REPO / "scripts" / "lib" / "interactive_deploy.py"
+    EXAMPLE = REPO / "inventory" / "example" / "group_vars"
+
+    @staticmethod
+    def _constant_dicts(source: str) -> list[dict[str, object]]:
+        """Все словарные литералы модуля со строковыми ключами.
+
+        Разбор через ast, а не поиск по тексту: значение флага должно читаться
+        из настоящего литерала, иначе тест начнёт ловить упоминания в
+        комментариях и строках.
+        """
+        import ast
+
+        collected: list[dict[str, object]] = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Dict):
+                continue
+            literal: dict[str, object] = {}
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    if isinstance(value, ast.Constant):
+                        literal[key.value] = value.value
+                    else:
+                        literal[key.value] = NotImplemented
+            if literal:
+                collected.append(literal)
+        return collected
+
+    def _fresh_install_side(self, marker: str) -> dict[str, object]:
+        literals = [
+            literal
+            for literal in self._constant_dicts(
+                self.DEPLOY.read_text(encoding="utf-8")
+            )
+            if marker in literal and "awg3_transit_enabled" in literal
+        ]
+        self.assertEqual(
+            len(literals),
+            1,
+            f"ожидался ровно один словарь первичной установки с ключом {marker}",
+        )
+        return literals[0]
+
+    def test_fresh_install_pins_the_kernel_engine_on_both_sides(self) -> None:
+        kernel = MODULE.TRANSIT_ENGINE_VALUES["kernel"]
+        sides = {
+            "entry": self._fresh_install_side("awg3_mobile_random_trailers"),
+            "exit": self._fresh_install_side("exit_manage_awg_config"),
+        }
+        for side, expected in kernel.items():
+            for key, value in expected.items():
+                with self.subTest(side=side, key=key):
+                    self.assertEqual(sides[side][key], value)
+
+    def test_fresh_install_never_mixes_two_engine_rows(self) -> None:
+        # Прямая защита от найденного разрыва: userspace-строка, доехавшая до
+        # мастера установки, обязана быть распознана как чужая целиком.
+        userspace = MODULE.TRANSIT_ENGINE_VALUES["userspace"]
+        sides = {
+            "entry": self._fresh_install_side("awg3_mobile_random_trailers"),
+            "exit": self._fresh_install_side("exit_manage_awg_config"),
+        }
+        for side, foreign in userspace.items():
+            for key, value in foreign.items():
+                with self.subTest(side=side, key=key):
+                    self.assertNotEqual(sides[side][key], value)
+
+    def test_status_screen_reports_the_actual_engine(self) -> None:
+        # kalimera-status печатал "AWG 3+ userspace" константой, поэтому на
+        # kernel-каскаде показывал оператору не тот движок. Ярлык обязан
+        # выводиться из awg3_transit_enabled, а не быть вписан в шаблон.
+        status = (
+            self.REPO / "roles" / "terminal" / "templates" / "kalimera-status.py.j2"
+        ).read_text(encoding="utf-8")
+        transit_row = next(
+            line for line in status.splitlines() if "Канал ENTRY–EXIT" in line
+        )
+        self.assertIn("CONFIG['transit_engine']", transit_row)
+        self.assertNotIn("userspace", transit_row)
+        self.assertNotIn("kernel", transit_row)
+
+        tasks = (
+            self.REPO / "roles" / "terminal" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("terminal_summary_transit_engine", tasks)
+        self.assertIn("awg3_transit_enabled", tasks)
+
+        # Рендер в CI обязан подавать этот факт, иначе шаблон упадёт на
+        # неопределённой переменной уже после мержа.
+        render = (
+            self.REPO / "tests" / "render-shell.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("terminal_summary_transit_engine", render)
+
+    def test_example_inventory_matches_the_same_engine_row(self) -> None:
+        # Example - стартовое содержимое новой production-inventory и заодно
+        # то, что читает человек; разъехавшись с мастером, оно описывало бы
+        # каскад, который не поднимается.
+        kernel = MODULE.TRANSIT_ENGINE_VALUES["kernel"]
+        for side, expected in kernel.items():
+            variables = yaml.safe_load(
+                (self.EXAMPLE / f"{side}.yml").read_text(encoding="utf-8")
+            )
+            for key, value in expected.items():
+                with self.subTest(side=side, key=key):
+                    self.assertEqual(variables[key], value)
 
 
 if __name__ == "__main__":

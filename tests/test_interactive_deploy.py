@@ -2246,14 +2246,40 @@ class InteractiveDeployTests(unittest.TestCase):
         )
 
     def test_modern_i2_i5_signatures_remain_populated_and_bounded(self) -> None:
-        server = MODULE.awg_server_obfuscation()
-        for key in ("i2", "i3", "i4", "i5"):
-            value = str(server[key])
-            self.assertTrue(value.startswith("<b 0x"))
-            self.assertIn("><r ", value)
-            random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
-            self.assertGreater(random_size, 0)
-            self.assertLess(random_size, 192)
+        # Предел берётся из таблицы границ генератора, а не собственным
+        # литералом: прежняя копия "< 192" устарела после расширения границ и
+        # отбраковывала 7% честных профилей - редкий, но настоящий красный CI.
+        # Одного вызова мало, чтобы поймать такой разъезд, поэтому выборка.
+        for _ in range(200):
+            server = MODULE.awg_server_obfuscation()
+            for key, (low, high) in MODULE.AWG_SHORT_SIGNATURE_BOUNDS.items():
+                value = str(server[key])
+                with self.subTest(key=key, value=value):
+                    self.assertTrue(value.startswith("<b 0x"))
+                    self.assertIn("><r ", value)
+                    random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
+                    # <r N> несёт размер пакета без первого байта тега <b 0x..>,
+                    # поэтому сверяем с границами восстановленный размер.
+                    self.assertGreaterEqual(random_size + 1, low[0])
+                    self.assertLessEqual(random_size + 1, high[1])
+                    self.assertLessEqual(random_size, MODULE.AWG_CPS_RANDOM_TAG_MAX)
+
+    def test_short_signature_bounds_stay_ordered_and_descending(self) -> None:
+        # Структурные инварианты самой таблицы: нижняя граница ниже верхней, а
+        # подписи I2-I5 идут по убыванию - иначе "короткая" подпись перестанет
+        # быть короче предыдущей и профиль потеряет задуманную форму.
+        bounds = MODULE.AWG_SHORT_SIGNATURE_BOUNDS
+        self.assertEqual(list(bounds), ["i2", "i3", "i4", "i5"])
+        previous: tuple[int, int] | None = None
+        for key, (low, high) in bounds.items():
+            with self.subTest(key=key):
+                self.assertLess(low[0], low[1])
+                self.assertLess(high[0], high[1])
+                self.assertLess(low[1], high[0])
+                if previous is not None:
+                    self.assertLess(low[1], previous[0])
+                    self.assertLess(high[1], previous[1])
+                previous = (low[1], high[1])
 
     def test_old_profile_uses_only_base_scalar_asc(self) -> None:
         server = MODULE.awg_legacy_server_obfuscation()
@@ -3099,7 +3125,9 @@ class InteractiveDeployTests(unittest.TestCase):
             )
             self.assertFalse(entry_vars["entry_ru_proxy_enabled"])
             self.assertEqual(entry_vars["entry_wan_interface"], "auto")
-            self.assertTrue(entry_vars["awg3_transit_enabled"])
+            # Межсерверный канал закрепляется за kernel-модулем: на том же
+            # канале userspace-движок терял 6.4-7.8% пакетов против 0.85%.
+            self.assertFalse(entry_vars["awg3_transit_enabled"])
             self.assertEqual(entry_vars["entry_exit_interface"], "awg3")
             self.assertTrue(entry_vars["entry_legacy_client_available"])
             self.assertFalse(entry_vars["entry_legacy_client_enabled"])
@@ -3125,6 +3153,12 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(exit_vars["exit_awg_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_transit_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_peer_endpoint_port"], 39745)
+            # Парный флаг к awg3_transit_enabled: при kernel-модуле конфиг
+            # межсерверного интерфейса на EXIT пишет роль exit. Две выключенные
+            # половины разных строк таблицы движков означали бы, что интерфейс
+            # не поднимает никто - см. tests/test_toggle_transit_engine.py.
+            self.assertFalse(exit_vars["awg3_transit_enabled"])
+            self.assertTrue(exit_vars["exit_manage_awg_config"])
             self.assertEqual(
                 exit_vars["security_interserver_peer_ipv4"], "198.51.100.10"
             )
