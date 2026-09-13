@@ -4,3 +4,7 @@
     argv: [/usr/bin/systemctl, try-restart, "{{ awg3_mobile_service_name }}"]
   changed_when: true
   when: awg3_mobile_enabled | bool
+
+- name: Перечитать systemd после удаления userspace mobile
+  ansible.builtin.systemd_service:
+    daemon_reload: true

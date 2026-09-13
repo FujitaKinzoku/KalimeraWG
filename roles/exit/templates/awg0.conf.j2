@@ -1,7 +1,7 @@
 [Interface]
 PrivateKey = {{ vault_awg_exit_private_key }}
 Address = {{ exit_awg_address }}
-MTU = {{ exit_awg_mtu }}
+MTU = {{ awg3_shared_effective_mtu | default(exit_awg_mtu, true) | int }}
 ListenPort = {{ exit_awg_listen_port }}
 PostUp = iptables -t nat -C POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE; iptables -t mangle -C FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || iptables -t mangle -A FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}; iptables -t mangle -C FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || iptables -t mangle -A FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}; while iptables -D FORWARD -i %i -o %i -j DROP 2>/dev/null; do :; done; iptables -I FORWARD -i %i -o %i -j DROP
 PostDown = iptables -t nat -D POSTROUTING -s {{ exit_awg_subnet }} -o {{ exit_wan_interface }} -j MASQUERADE 2>/dev/null || true; iptables -t mangle -D FORWARD -o %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || true; iptables -t mangle -D FORWARD -i %i -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }} 2>/dev/null || true; iptables -D FORWARD -i %i -o %i -j DROP 2>/dev/null || true
@@ -17,6 +17,19 @@ H2 = {{ exit_awg_obfuscation.h2 }}
 H3 = {{ exit_awg_obfuscation.h3 }}
 H4 = {{ exit_awg_obfuscation.h4 }}
 I1 = {{ exit_awg_obfuscation.i1 }}
+I2 = {{ exit_awg_obfuscation.i2 }}
+I3 = {{ exit_awg_obfuscation.i3 }}
+I4 = {{ exit_awg_obfuscation.i4 }}
+I5 = {{ exit_awg_obfuscation.i5 }}
+HeaderProtectionKey = {{ vault_awg3_header_protection_key }}
+ContentPaddingAddition = {{ awg3_content_padding_addition }}
+RekeyAfterTime = {{ awg3_rekey_after_time }}
+RekeyTimeout = {{ awg3_rekey_timeout }}
+RejectAfterTime = {{ awg3_reject_after_time }}
+KeepaliveTimeout = {{ awg3_keepalive_timeout }}
+MaxHandshakeAttempts = {{ awg3_max_handshake_attempts }}
+RandomTrailers = {{ 'on' if awg3_random_trailers | bool else 'off' }}
+DisableCookies = {{ 'on' if awg3_disable_cookies | bool else 'off' }}
 
 {% for peer in vault_exit_peers %}
 [Peer]

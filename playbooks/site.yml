@@ -93,6 +93,13 @@
       changed_when: false
       when: awg_prepare_apt | default(true) | bool
 
+# Измерение не зависит от движка межсерверного канала: оно идёт ICMP до
+# публичного IPv4 пира по WAN, а не через туннель. Поэтому условие здесь
+# ролевое, а не по awg3_transit_enabled - прежний гейт по движку выключал всю
+# игру целиком, как только канал переводили на kernel-модуль, и каскад молча
+# оставался на статическом MTU. Просто убрать условие нельзя: игра идёт по
+# hosts: all, а FRONT не участвует в межсерверном канале и подставил бы чужой
+# WAN-интерфейс и неопределённый security_interserver_peer_ipv4.
 - name: Двустороннее согласование MTU между ENTRY и EXIT
   hosts: all
   gather_facts: false
@@ -113,7 +120,7 @@
         lock_timeout: 600
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление остаточного временного разрешения ICMP
       ansible.builtin.command:
@@ -141,7 +148,7 @@
       failed_when: false
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление остаточного временного запрета ICMP
       ansible.builtin.command:
@@ -167,12 +174,12 @@
       failed_when: false
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Измерение MTU с обязательным удалением временного ICMP-правила
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
       block:
         - name: Временное включение ответов ICMP echo для измерения MTU
           ansible.builtin.command:
@@ -336,7 +343,7 @@
              map('int') | min }}
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Создание каталога состояния MTU
       ansible.builtin.file:
@@ -347,7 +354,7 @@
         mode: "0755"
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Согласование MTU клиентского интерфейса с каскадом
       ansible.builtin.set_fact:
@@ -358,7 +365,6 @@
       when:
         - awg_node_role | default('') == 'entry'
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
 
     - name: Сохранение результата MTU на серверах
       ansible.builtin.copy:
@@ -374,7 +380,7 @@
         mode: "0644"
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Передача безопасного результата MTU управляющему компьютеру
       ansible.builtin.copy:
@@ -391,7 +397,7 @@
       run_once: true
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
         - awg_mtu_controller_result_path is defined
 
 - name: Настройка ENTRY сервера

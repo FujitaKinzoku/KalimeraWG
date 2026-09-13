@@ -196,7 +196,6 @@
   loop:
     - awg-quick@.service
     - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
-    - "{{ awg3_mobile_service_name | default('awg3-mobile.service') }}"
     - sing-box.service
     - "{{ front_backend_service_name | default('kalimera-front-backend.service') }}"
     - "{{ front_xray_service_name | default('xray.service') }}"
@@ -215,7 +214,8 @@
   loop:
     - {unit: awg-quick@.service, template: awg-quick-credential.conf.j2}
     - {unit: "{{ awg3_transit_service_name | default('awg3-transit.service') }}", template: awg3-credential.conf.j2}
-    - {unit: "{{ awg3_mobile_service_name | default('awg3-mobile.service') }}", template: awg3-mobile-credential.conf.j2}
+    # Mobile/AWG3+ - обычный инстанс awg-quick@, credentials ему выдаёт
+    # шаблонный drop-in выше; отдельный поверх него только маскировал бы его.
     - {unit: sing-box.service, template: sing-box-credential.conf.j2}
     - {unit: "{{ front_backend_service_name | default('kalimera-front-backend.service') }}", template: front-backend-credential.conf.j2}
     - {unit: "{{ front_xray_service_name | default('xray.service') }}", template: xray-credential.conf.j2}
@@ -250,7 +250,7 @@
       - "{{ item }}"
   loop:
     - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
-    - "{{ awg3_mobile_service_name | default('awg3-mobile.service') }}"
+    - "{{ awg3_mobile_service_name | default('awg-quick@awg-mobile.service') }}"
     - "awg-quick@{{ entry_client_interface | default('awg0') }}.service"
     - "awg-quick@{{ entry_legacy_client_interface | default('awg-old') }}.service"
     - sing-box.service

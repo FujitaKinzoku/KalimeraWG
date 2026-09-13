@@ -89,6 +89,7 @@
         terminal_summary_mobile_interface: awg-mobile
         terminal_summary_mobile_service: awg3-mobile.service
         terminal_summary_exit_transit_interface: awg3
+        terminal_summary_transit_engine: AmneziaWG kernel
 
     - name: Пересоздание временного каталога шаблонов
       block:
@@ -264,10 +265,6 @@
               dest: awg3-transit-restart
             - src: roles/awg3_transit/templates/validate-config.sh.j2
               dest: awg3-validate-config
-            - src: roles/awg3_mobile/templates/mobile-setup.sh.j2
-              dest: awg3-mobile-setup
-            - src: roles/awg3_mobile/templates/validate-config.sh.j2
-              dest: awg3-mobile-validate-config
             - src: roles/runtime_secrets/templates/unlock-runtime.sh.j2
               dest: kalimera-secrets-unlock
             - src: roles/front/templates/certbot-deploy-hook.sh.j2
@@ -612,8 +609,6 @@
               - "{{ rendered_shell_root }}/awg3-transit-setup"
               - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
-              - "{{ rendered_shell_root }}/awg3-mobile-setup"
-              - "{{ rendered_shell_root }}/awg3-mobile-validate-config"
               - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"

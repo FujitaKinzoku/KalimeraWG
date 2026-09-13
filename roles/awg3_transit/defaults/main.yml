@@ -38,12 +38,19 @@ awg3_mtu_minimum: 1120
 awg3_mtu_ceiling: 1420
 awg3_mtu_overhead: 80
 awg3_transit_mtu: 1280
-awg3_content_padding_addition: "8-32"
+# Рандомизация размера содержимого на межсерверном канале отключена: замеры
+# на живом канале (5 прогонов на конфигурацию, UDP 150 Mbit/s) дали 7.6% потерь
+# против 1.9% при выключенных ContentPaddingAddition и RandomTrailers, диапазоны
+# не пересекались. Остальной профиль AWG 3.1 сохранён - он обходится бесплатно.
+# Канал закреплён в UFW за единственным IP пира и не подставлен произвольному
+# зондированию, поэтому маскировка размера здесь стоит дороже, чем даёт.
+# Вернуть можно этими же двумя значениями ("8-32" и true).
+awg3_content_padding_addition: "0"
 awg3_rekey_after_time: "120-180"
 awg3_rekey_timeout: "5-8"
 awg3_reject_after_time: "180-240"
 awg3_keepalive_timeout: "10-15"
 awg3_max_handshake_attempts: "18-24"
 awg3_persistent_keepalive: "22-30"
-awg3_random_trailers: true
+awg3_random_trailers: false
 awg3_disable_cookies: false

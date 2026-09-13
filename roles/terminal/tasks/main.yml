@@ -66,9 +66,13 @@
     terminal_summary_mobile_interface: >-
       {{ hostvars[groups['entry'][0]].entry_mobile_client_interface | default('awg-mobile') }}
     terminal_summary_mobile_service: >-
-      {{ hostvars[groups['entry'][0]].awg3_mobile_service_name | default('awg3-mobile.service') }}
+      {{ hostvars[groups['entry'][0]].awg3_mobile_service_name | default('awg-quick@awg-mobile.service') }}
     terminal_summary_exit_transit_interface: >-
       {{ hostvars[groups['exit'][0]].exit_awg_interface | default('awg3') }}
+    terminal_summary_transit_engine: >-
+      {{ 'AWG 3+ userspace'
+         if hostvars[groups['entry'][0]].awg3_transit_enabled | default(false) | bool
+         else 'AmneziaWG kernel' }}
   when: terminal_enabled | bool
 
 - name: Установка пакетов интерактивного терминала

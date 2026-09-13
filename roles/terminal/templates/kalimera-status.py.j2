@@ -47,6 +47,7 @@ CONFIG = {
     "mobile_interface": {{ terminal_summary_mobile_interface | to_json }},
     "mobile_service": {{ terminal_summary_mobile_service | to_json }},
     "exit_transit_interface": {{ terminal_summary_exit_transit_interface | to_json }},
+    "transit_engine": {{ terminal_summary_transit_engine | trim | to_json }},
     "proxy_disabled_flag": {{ entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled') | to_json }},
     "proxy_manual_flag": {{ entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off') | to_json }},
     "default_dot": "194.242.2.2@853#dns.mullvad.net",
@@ -562,7 +563,7 @@ def main() -> int:
             ("VPN-клиенты", f"{CONFIG['entry_host']}:{CONFIG['client_port']}/UDP", "INFO"),
             ("Старые клиенты", f"{CONFIG['entry_host']}:{CONFIG['legacy_port']}/UDP; {old_text}", old_level),
             ("Мобильные клиенты", f"{CONFIG['entry_host']}:{CONFIG['mobile_port']}/UDP; {mobile_text}", mobile_level),
-            ("Канал ENTRY–EXIT", f"{CONFIG['exit_host']}:{CONFIG['exit_transit_port']} · AWG 3+ userspace; {transit_text}", transit_level),
+            ("Канал ENTRY–EXIT", f"{CONFIG['exit_host']}:{CONFIG['exit_transit_port']} · {CONFIG['transit_engine']}; {transit_text}", transit_level),
         ],
     )
 

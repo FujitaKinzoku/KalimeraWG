@@ -719,20 +719,6 @@ class InteractiveDeployTests(unittest.TestCase):
                     "awg3_tools_source_commit": "b" * 40,
                 },
             )
-            MODULE.yaml_write(
-                awg3_mobile_defaults_path,
-                {
-                    "awg3_mobile_go_version": "1.25.12",
-                    "awg3_mobile_go_archives": {
-                        "x86_64": {"checksum": "sha256:mobile-go"}
-                    },
-                    "awg3_mobile_go_source_version": "v3.1",
-                    "awg3_mobile_go_source_commit": "c" * 40,
-                    "awg3_mobile_tools_source_version": "v3.1",
-                    "awg3_mobile_tools_source_commit": "d" * 40,
-                },
-            )
-
             MODULE.prepare_component_update(repo, production)
 
             all_vars = MODULE.load_yaml(all_vars_path)
@@ -743,7 +729,9 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
             self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
             self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
-            self.assertEqual(all_vars["awg3_mobile_go_source_commit"], "c" * 40)
+            # Отдельной сборки mobile больше нет: интерфейс поднимает
+            # kernel-модуль, закреплять для него нечего.
+            self.assertNotIn("awg3_mobile_go_source_commit", all_vars)
             # Профиль обфускации межсерверного канала - тоже часть
             # закреплённого manifest этого выпуска репозитория (не только
             # первичной установки, см. awg3_transit_obfuscation()) и должен
@@ -1428,7 +1416,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(migrated["entry_mobile_legacy_internal_port"], 39746)
             self.assertNotIn("entry_mobile_i1_mode", migrated)
             self.assertEqual(migrated["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(migrated["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(migrated["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             for index in range(1, 6):
                 self.assertTrue(migrated["entry_mobile_awg_obfuscation"][f"i{index}"])
             self.assertNotIn("entry_mobile_client_public_port", migrated)
@@ -1487,7 +1475,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry["entry_mobile_client_listen_port"], 8443)
             self.assertNotIn("entry_mobile_i1_mode", entry)
             self.assertEqual(entry["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(entry["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(entry["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertIn("entry_mobile_awg_obfuscation", entry)
             for index in range(1, 6):
                 self.assertTrue(entry["entry_mobile_awg_obfuscation"][f"i{index}"])
@@ -1516,7 +1504,7 @@ class InteractiveDeployTests(unittest.TestCase):
             entry_path.write_text(
                 "entry_mobile_client_available: true\n"
                 "entry_mobile_profile_generation: awg3.1\n"
-                "entry_mobile_service_name: awg3-mobile.service\n"
+                "entry_mobile_service_name: awg-quick@awg-mobile.service\n"
                 "entry_mobile_awg_obfuscation:\n"
                 "  s1: 8\n"
                 "  i1: '<b 0x01>'\n",
@@ -2258,14 +2246,40 @@ class InteractiveDeployTests(unittest.TestCase):
         )
 
     def test_modern_i2_i5_signatures_remain_populated_and_bounded(self) -> None:
-        server = MODULE.awg_server_obfuscation()
-        for key in ("i2", "i3", "i4", "i5"):
-            value = str(server[key])
-            self.assertTrue(value.startswith("<b 0x"))
-            self.assertIn("><r ", value)
-            random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
-            self.assertGreater(random_size, 0)
-            self.assertLess(random_size, 192)
+        # Предел берётся из таблицы границ генератора, а не собственным
+        # литералом: прежняя копия "< 192" устарела после расширения границ и
+        # отбраковывала 7% честных профилей - редкий, но настоящий красный CI.
+        # Одного вызова мало, чтобы поймать такой разъезд, поэтому выборка.
+        for _ in range(200):
+            server = MODULE.awg_server_obfuscation()
+            for key, (low, high) in MODULE.AWG_SHORT_SIGNATURE_BOUNDS.items():
+                value = str(server[key])
+                with self.subTest(key=key, value=value):
+                    self.assertTrue(value.startswith("<b 0x"))
+                    self.assertIn("><r ", value)
+                    random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
+                    # <r N> несёт размер пакета без первого байта тега <b 0x..>,
+                    # поэтому сверяем с границами восстановленный размер.
+                    self.assertGreaterEqual(random_size + 1, low[0])
+                    self.assertLessEqual(random_size + 1, high[1])
+                    self.assertLessEqual(random_size, MODULE.AWG_CPS_RANDOM_TAG_MAX)
+
+    def test_short_signature_bounds_stay_ordered_and_descending(self) -> None:
+        # Структурные инварианты самой таблицы: нижняя граница ниже верхней, а
+        # подписи I2-I5 идут по убыванию - иначе "короткая" подпись перестанет
+        # быть короче предыдущей и профиль потеряет задуманную форму.
+        bounds = MODULE.AWG_SHORT_SIGNATURE_BOUNDS
+        self.assertEqual(list(bounds), ["i2", "i3", "i4", "i5"])
+        previous: tuple[int, int] | None = None
+        for key, (low, high) in bounds.items():
+            with self.subTest(key=key):
+                self.assertLess(low[0], low[1])
+                self.assertLess(high[0], high[1])
+                self.assertLess(low[1], high[0])
+                if previous is not None:
+                    self.assertLess(low[1], previous[0])
+                    self.assertLess(high[1], previous[1])
+                previous = (low[1], high[1])
 
     def test_old_profile_uses_only_base_scalar_asc(self) -> None:
         server = MODULE.awg_legacy_server_obfuscation()
@@ -2286,9 +2300,6 @@ class InteractiveDeployTests(unittest.TestCase):
         config = (root / "roles/awg3_mobile/templates/mobile.conf.j2").read_text(
             encoding="utf-8"
         )
-        service = (
-            root / "roles/awg3_mobile/templates/awg3-mobile.service.j2"
-        ).read_text(encoding="utf-8")
         firewall = (
             root / "roles/entry/templates/awg-mobile-firewall.sh.j2"
         ).read_text(encoding="utf-8")
@@ -2305,7 +2316,13 @@ class InteractiveDeployTests(unittest.TestCase):
             "RandomTrailers", "DisableCookies",
         ):
             self.assertIn(f"{field} =", config)
-        self.assertIn("{{ awg3_mobile_binary_path }}", service)
+        # Mobile поднимается kernel-модулем через awg-quick, поэтому конфиг
+        # сам несёт адрес, MTU и обвязку, которую раньше делал userspace-скрипт.
+        self.assertIn("Address = {{ entry_mobile_client_address }}", config)
+        self.assertIn("MTU = {{ entry_mobile_client_mtu | int }}", config)
+        self.assertIn("Table = off", config)
+        self.assertIn("PostUp = {{ entry_mobile_firewall_path }} apply", config)
+        self.assertIn("PostDown = {{ entry_mobile_firewall_path }} remove", config)
         self.assertNotIn("AdvancedSecurity", config)
         self.assertIn("readonly comment=awg-mobile-public-quic", firewall)
         self.assertIn("--dport \"$listen_port\"", firewall)
@@ -2344,7 +2361,9 @@ class InteractiveDeployTests(unittest.TestCase):
             defaults["awg3_tools_source_commit"],
             "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
         )
-        self.assertTrue(defaults["awg3_random_trailers"])
+        # Рандомизация размера выключена намеренно: замерено 7.6% против 1.9%
+        # потерь на живом межсерверном канале, см. комментарий в defaults роли.
+        self.assertFalse(defaults["awg3_random_trailers"])
         self.assertFalse(defaults["awg3_disable_cookies"])
 
         # Статические тайминги/паддинг - не генерируются заново при деплое
@@ -2367,7 +2386,7 @@ class InteractiveDeployTests(unittest.TestCase):
                 )
             },
             {
-                "awg3_content_padding_addition": "8-32",
+                "awg3_content_padding_addition": "0",
                 "awg3_rekey_after_time": "120-180",
                 "awg3_rekey_timeout": "5-8",
                 "awg3_reject_after_time": "180-240",
@@ -3106,7 +3125,9 @@ class InteractiveDeployTests(unittest.TestCase):
             )
             self.assertFalse(entry_vars["entry_ru_proxy_enabled"])
             self.assertEqual(entry_vars["entry_wan_interface"], "auto")
-            self.assertTrue(entry_vars["awg3_transit_enabled"])
+            # Межсерверный канал закрепляется за kernel-модулем: на том же
+            # канале userspace-движок терял 6.4-7.8% пакетов против 0.85%.
+            self.assertFalse(entry_vars["awg3_transit_enabled"])
             self.assertEqual(entry_vars["entry_exit_interface"], "awg3")
             self.assertTrue(entry_vars["entry_legacy_client_available"])
             self.assertFalse(entry_vars["entry_legacy_client_enabled"])
@@ -3116,7 +3137,7 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry_vars["entry_mobile_client_listen_port"], 8443)
             self.assertNotIn("entry_mobile_i1_mode", entry_vars)
             self.assertEqual(entry_vars["entry_mobile_profile_generation"], "awg3.1")
-            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg3-mobile.service")
+            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertEqual(entry_vars["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(entry_vars["entry_mobile_legacy_internal_port"], 39746)
             self.assertEqual(entry_vars["entry_awg0_listen_port"], 443)
@@ -3132,6 +3153,12 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(exit_vars["exit_awg_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_transit_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_peer_endpoint_port"], 39745)
+            # Парный флаг к awg3_transit_enabled: при kernel-модуле конфиг
+            # межсерверного интерфейса на EXIT пишет роль exit. Две выключенные
+            # половины разных строк таблицы движков означали бы, что интерфейс
+            # не поднимает никто - см. tests/test_toggle_transit_engine.py.
+            self.assertFalse(exit_vars["awg3_transit_enabled"])
+            self.assertTrue(exit_vars["exit_manage_awg_config"])
             self.assertEqual(
                 exit_vars["security_interserver_peer_ipv4"], "198.51.100.10"
             )

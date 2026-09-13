@@ -129,15 +129,6 @@ AWG3_COMPONENT_KEYS = (
     "awg3_tools_source_commit",
 )
 
-AWG3_MOBILE_COMPONENT_KEYS = (
-    "awg3_mobile_go_version",
-    "awg3_mobile_go_archives",
-    "awg3_mobile_go_source_version",
-    "awg3_mobile_go_source_commit",
-    "awg3_mobile_tools_source_version",
-    "awg3_mobile_tools_source_commit",
-)
-
 
 def color_output_enabled() -> bool:
     """Использовать цвет только в настоящем совместимом терминале."""
@@ -330,22 +321,25 @@ def migrate_production_inventory(production: Path) -> bool:
                 "Production inventory обновлён: текущая проверенная сборка AWG3 "
                 "закреплена для воспроизводимых повторных deploy."
             )
-    awg3_mobile_defaults_path = (
-        production.parents[1] / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+    # Отдельной сборки mobile AWG 3.1 больше нет - интерфейс поднимает
+    # kernel-модуль, поэтому и закреплять для него нечего. Оставшиеся в
+    # inventory ключи прежней сборки безвредны и просто перестают читаться.
+    mobile_build_keys = (
+        "awg3_mobile_go_version",
+        "awg3_mobile_go_archives",
+        "awg3_mobile_go_source_version",
+        "awg3_mobile_go_source_commit",
+        "awg3_mobile_tools_source_version",
+        "awg3_mobile_tools_source_commit",
     )
-    if all_path.is_file() and awg3_mobile_defaults_path.is_file():
-        awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
-        mobile_components_changed = False
-        for key in AWG3_MOBILE_COMPONENT_KEYS:
-            if key not in all_vars and key in awg3_mobile_defaults:
-                all_vars[key] = awg3_mobile_defaults[key]
-                all_changed = True
-                mobile_components_changed = True
-        if mobile_components_changed:
-            print(
-                "Production inventory обновлён: отдельная сборка mobile AWG 3.1 "
-                "закреплена без изменения межсерверного AWG 3.0."
-            )
+    if all_path.is_file() and any(key in all_vars for key in mobile_build_keys):
+        for key in mobile_build_keys:
+            all_vars.pop(key, None)
+        all_changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль, "
+            "закрепление отдельной сборки убрано."
+        )
     if (
         entry_vars.get("entry_ru_tun_stack") == "mixed"
         and entry_vars.get("entry_ru_endpoint_independent_nat") is False
@@ -384,7 +378,6 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars.get("entry_mobile_client_available", False)
         and (
             entry_vars.get("entry_mobile_profile_generation") != "awg3.1"
-            or entry_vars.get("entry_mobile_service_name") != "awg3-mobile.service"
             or not awg_mobile_awg3_profile_is_complete(
                 entry_vars.get("entry_mobile_awg_obfuscation")
             )
@@ -393,7 +386,6 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars.update(
             {
                 "entry_mobile_profile_generation": "awg3.1",
-                "entry_mobile_service_name": "awg3-mobile.service",
                 "entry_mobile_awg_obfuscation": awg_mobile_awg3_obfuscation(),
             }
         )
@@ -401,6 +393,20 @@ def migrate_production_inventory(production: Path) -> bool:
         print(
             "Production inventory обновлён: профиль mobile заменён на mobile/AWG3+. "
             "Ранее выданные mobile-конфиги нужно выпустить заново."
+        )
+
+    # Переход mobile/AWG3+ с отдельного userspace-движка на kernel-модуль.
+    # Отдельно от блока выше: имя службы меняется без смены профиля, поэтому
+    # переиздавать клиентские конфиги не требуется.
+    if (
+        entry_vars.get("entry_mobile_client_available", False)
+        and entry_vars.get("entry_mobile_service_name") != MOBILE_SERVICE_NAME
+    ):
+        entry_vars["entry_mobile_service_name"] = MOBILE_SERVICE_NAME
+        changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль "
+            "AmneziaWG; ранее выданные конфиги остаются действительными."
         )
 
     cps_changed = False
@@ -515,7 +521,7 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
         "entry_mobile_legacy_public_port": 53,
         "entry_mobile_legacy_internal_port": 39746,
         "entry_mobile_client_mtu": 1380,
-        "entry_mobile_service_name": "awg3-mobile.service",
+        "entry_mobile_service_name": MOBILE_SERVICE_NAME,
         "entry_mobile_profile_generation": "awg3.1",
     }
     mobile_network_keys = {
@@ -1889,6 +1895,10 @@ AWG_CLIENT_PROFILES = {
     },
 }
 
+# Mobile/AWG3+ поднимается kernel-модулем через awg-quick, как и остальные
+# клиентские интерфейсы; имя интерфейса задано ролью entry (awg-mobile).
+MOBILE_SERVICE_NAME = "awg-quick@awg-mobile.service"
+
 AWG3_MOBILE_FEATURE_DEFAULTS = {
     "content_padding_addition": "8-32",
     "rekey_after_time": "120-180",
@@ -1904,6 +1914,20 @@ AWG3_MOBILE_FEATURE_DEFAULTS = {
 AWG_QUIC_INITIAL_SIZE = 1200
 AWG_CPS_RANDOM_TAG_MAX = 1000
 AWG_MINIMUM_OUTER_PMTU = 1280
+
+# Границы размера коротких CPS-подписей I2-I5 общего профиля: пара диапазонов
+# на ключ, из которых на каждый вызов разыгрываются нижняя и верхняя граница.
+# Сами границы тоже случайны намеренно - репозиторий публичный, и постоянные
+# литералы делали бы структуру профиля одинаковой во всех установках.
+# Единственный источник правды: тесты читают эту же таблицу. Закреплённый в
+# тесте отдельной копией предел уже успел устареть молча и отбраковывал 7%
+# честных профилей, роняя CI на пустом месте.
+AWG_SHORT_SIGNATURE_BOUNDS: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    "i2": ((80, 110), (170, 220)),
+    "i3": ((50, 75), (140, 180)),
+    "i4": ((35, 55), (110, 145)),
+    "i5": ((22, 40), (80, 110)),
+}
 
 
 def random_between(bounds: tuple[int, int]) -> int:
@@ -2083,6 +2107,12 @@ def awg_random_header_ranges() -> list[str]:
     return ranges
 
 
+def awg_short_signature_size_bounds(key: str) -> tuple[int, int]:
+    """Разыграть границы размера короткой CPS-подписи I2-I5."""
+    low, high = AWG_SHORT_SIGNATURE_BOUNDS[key]
+    return random_between(low), random_between(high)
+
+
 def awg_server_obfuscation() -> dict[str, object]:
     """Создать постоянный профиль AWG2 для KeeneticOS 5.1.x."""
     header_ranges = awg_random_header_ranges()
@@ -2103,18 +2133,10 @@ def awg_server_obfuscation() -> dict[str, object]:
         "h3": header_ranges[2],
         "h4": header_ranges[3],
         "i1": awg_quic_initial_signature(random_between((1200, 1252))),
-        "i2": awg_quic_short_signature(
-            (random_between((80, 110)), random_between((170, 220)))
-        ),
-        "i3": awg_quic_short_signature(
-            (random_between((50, 75)), random_between((140, 180)))
-        ),
-        "i4": awg_quic_short_signature(
-            (random_between((35, 55)), random_between((110, 145)))
-        ),
-        "i5": awg_quic_short_signature(
-            (random_between((22, 40)), random_between((80, 110)))
-        ),
+        "i2": awg_quic_short_signature(awg_short_signature_size_bounds("i2")),
+        "i3": awg_quic_short_signature(awg_short_signature_size_bounds("i3")),
+        "i4": awg_quic_short_signature(awg_short_signature_size_bounds("i4")),
+        "i5": awg_quic_short_signature(awg_short_signature_size_bounds("i5")),
     }
     validate_awg_obfuscation(result)
     return result
@@ -2346,13 +2368,11 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     exit_vars_path = production / "group_vars" / "exit.yml"
     stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
     awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
-    awg3_mobile_defaults_path = repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
     variables = load_yaml(all_vars_path)
     entry_variables = load_yaml(entry_vars_path)
     exit_variables = load_yaml(exit_vars_path)
     stable_entry = load_yaml(stable_entry_path)
     awg3_defaults = load_yaml(awg3_defaults_path)
-    awg3_mobile_defaults = load_yaml(awg3_mobile_defaults_path)
 
     variables["awg_package_version_mode"] = "candidate"
     variables.pop("awg_package_versions", None)
@@ -2364,10 +2384,6 @@ def prepare_component_update(repo: Path, production: Path) -> None:
         if key not in awg3_defaults:
             fail(f"Проверенный manifest AWG3 не содержит {key}")
         variables[key] = awg3_defaults[key]
-    for key in AWG3_MOBILE_COMPONENT_KEYS:
-        if key not in awg3_mobile_defaults:
-            fail(f"Проверенный manifest mobile AWG 3.1 не содержит {key}")
-        variables[key] = awg3_mobile_defaults[key]
     # Профиль обфускации межсерверного канала - как и версии пакетов выше,
     # часть проверенного manifest этого выпуска репозитория, а не только
     # первичной установки. Пересоздаётся заново (свежие Jc/Jmin/Jmax/S1-S4/
@@ -2844,7 +2860,7 @@ def show_deployment_summary(production: Path) -> None:
     transit_label = (
         "AWG 3+ userspace"
         if entry_vars.get("awg3_transit_enabled", False)
-        else "AmneziaWG"
+        else "AmneziaWG kernel"
     )
     access_rows.append(
         (
@@ -3527,9 +3543,11 @@ def main() -> None:
     )
     if client_awg_port == legacy_awg_port:
         fail("Основной и совместимый клиентские UDP-порты AWG на ENTRY должны различаться")
-    # На ENTRY клиентский kernel-интерфейс и userspace AWG3 не могут надёжно
-    # делить один сокет. Публичным портом каскада остаётся UDP/443 на EXIT, а
-    # локальный порт AWG3 на ENTRY выбирается отдельно и фильтруется по IP EXIT.
+    # Межсерверный интерфейс на ENTRY не может делить сокет с клиентскими - у
+    # каждого интерфейса свой ListenPort, независимо от того, поднимает его
+    # kernel-модуль или запасной userspace-движок. Публичным портом каскада
+    # остаётся UDP/443 на EXIT, а локальный порт межсерверного канала на ENTRY
+    # выбирается отдельно и фильтруется по IP EXIT.
     entry_transit_listen_port = 39745
     while entry_transit_listen_port in {client_awg_port, legacy_awg_port}:
         entry_transit_listen_port += 1
@@ -4129,7 +4147,7 @@ def main() -> None:
             "entry_mobile_legacy_internal_port": 39746,
             "entry_mobile_client_mtu": 1380,
             "entry_mobile_awg_obfuscation": mobile_server_obfuscation,
-            "entry_mobile_service_name": "awg3-mobile.service",
+            "entry_mobile_service_name": MOBILE_SERVICE_NAME,
             "entry_mobile_profile_generation": "awg3.1",
             "awg3_mobile_content_padding_addition": AWG3_MOBILE_FEATURE_DEFAULTS["content_padding_addition"],
             "awg3_mobile_rekey_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_after_time"],
@@ -4140,7 +4158,14 @@ def main() -> None:
             "awg3_mobile_persistent_keepalive": AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"],
             "awg3_mobile_random_trailers": AWG3_MOBILE_FEATURE_DEFAULTS["random_trailers"],
             "awg3_mobile_disable_cookies": AWG3_MOBILE_FEATURE_DEFAULTS["disable_cookies"],
-            "awg3_transit_enabled": True,
+            # Межсерверный канал поднимает kernel-модуль AmneziaWG, а не
+            # отдельный userspace-движок: на одном и том же канале userspace
+            # терял 6.4-7.8% пакетов против 0.85% у kernel-модуля, и именно это
+            # выражалось в медленном зарубежном трафике. Полный набор полей 3.1
+            # kernel принимает (проверено реальными awg setconf/showconf).
+            # Запасной userspace-путь остаётся доступен через
+            # scripts/toggle-transit-engine.py для хостов, где DKMS не собирается.
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": entry_transit_listen_port,
             "awg3_transit_address": f"{entry_transit_ip}/32",
@@ -4194,9 +4219,14 @@ def main() -> None:
             "exit_awg_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
             "exit_awg_subnet": str(transit_subnet),
             "exit_awg_obfuscation": transit_obfuscation,
-            "exit_manage_awg_config": False,
+            # Стороны транзита обязаны быть на одном движке - см. комментарий у
+            # ENTRY выше и таблицу движков в scripts/toggle-transit-engine.py.
+            # При kernel-модуле конфиг межсерверного интерфейса пишет роль exit,
+            # поэтому exit_manage_awg_config включён; при userspace его писала бы
+            # роль awg3_transit, и флаг был бы выключен.
+            "exit_manage_awg_config": True,
             "exit_peer_migration_policy": "explicit",
-            "awg3_transit_enabled": True,
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": transit_awg_port,
             "awg3_transit_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",

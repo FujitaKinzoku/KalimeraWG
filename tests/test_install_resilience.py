@@ -212,6 +212,18 @@ class InstallResilienceTests(unittest.TestCase):
         self.assertIn('"name": "front-service"', backend)
         self.assertIn('"routing_mark": "{{ entry_exit_mark }}"', backend)
         self.assertIn('"routing_mark": "{{ entry_ru_mark }}"', backend)
+        # "default_interface" привязывает исходящий сокет backend к
+        # WAN-интерфейсу и фиксирует исходный адрес ещё до маршрутизации,
+        # после чего routing_mark выше не работает: метка выбрала бы таблицу
+        # через межсерверный интерфейс, но адрес уже взят публичный, ENTRY.
+        # Проявлялось это тем, что весь трафик VLESS/FRONT выходил в интернет
+        # с ENTRY вместо EXIT - при исправном туннеле и пустых логах, поэтому
+        # искалось долго. Подтверждено на двух каскадах и снято удалением
+        # строки; вернуть её - значит вернуть отказ смены страны выхода.
+        # Проверяется форма с двоеточием, то есть реальный ключ JSON: само имя
+        # опции упоминается в пояснении внутри шаблона и не должно считаться
+        # за её присутствие.
+        self.assertNotIn('"default_interface":', backend)
         self.assertIn('"disabled": true', backend)
         self.assertIn("{'source': '/etc/letsencrypt', 'target': 'letsencrypt'}", runtime_config)
         runtime_tasks = (

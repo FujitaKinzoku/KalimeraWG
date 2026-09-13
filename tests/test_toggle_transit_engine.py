@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import importlib.util
+import tempfile
+import unittest
+from pathlib import Path
+
+import yaml
+
+
+MODULE_PATH = Path(__file__).parents[1] / "scripts" / "toggle-transit-engine.py"
+SPEC = importlib.util.spec_from_file_location("toggle_transit_engine", MODULE_PATH)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+class ToggleTransitEngineTests(unittest.TestCase):
+    def _write_production(self, root: Path) -> Path:
+        production = root / "production"
+        group_vars = production / "group_vars"
+        group_vars.mkdir(parents=True)
+        (group_vars / "entry.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "entry_exit_interface": "awg3",
+                    "entry_exit_tunnel_address": "10.77.0.2/32",
+                    "awg3_transit_enabled": True,
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        (group_vars / "exit.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "exit_awg_address": "10.77.0.1/24",
+                    "awg3_transit_enabled": True,
+                    "exit_manage_awg_config": False,
+                },
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return production
+
+    def test_kernel_engine_disables_userspace_transit_and_enables_awg0(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = self._write_production(Path(temporary))
+
+            changed = MODULE.set_transit_engine(production, "kernel")
+
+            self.assertTrue(changed)
+            entry = MODULE.load_yaml(production / "group_vars" / "entry.yml")
+            exit_vars = MODULE.load_yaml(production / "group_vars" / "exit.yml")
+            self.assertEqual(entry["awg3_transit_enabled"], False)
+            self.assertEqual(exit_vars["awg3_transit_enabled"], False)
+            self.assertEqual(exit_vars["exit_manage_awg_config"], True)
+            # Unrelated keys survive untouched.
+            self.assertEqual(entry["entry_exit_tunnel_address"], "10.77.0.2/32")
+            self.assertEqual(exit_vars["exit_awg_address"], "10.77.0.1/24")
+
+    def test_userspace_engine_reverts_to_original_production_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = self._write_production(Path(temporary))
+
+            MODULE.set_transit_engine(production, "kernel")
+            changed_back = MODULE.set_transit_engine(production, "userspace")
+
+            self.assertTrue(changed_back)
+            entry = MODULE.load_yaml(production / "group_vars" / "entry.yml")
+            exit_vars = MODULE.load_yaml(production / "group_vars" / "exit.yml")
+            self.assertEqual(entry["awg3_transit_enabled"], True)
+            self.assertEqual(exit_vars["awg3_transit_enabled"], True)
+            self.assertEqual(exit_vars["exit_manage_awg_config"], False)
+
+    def test_reapplying_same_engine_reports_no_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = self._write_production(Path(temporary))
+
+            MODULE.set_transit_engine(production, "kernel")
+            changed_again = MODULE.set_transit_engine(production, "kernel")
+
+            self.assertFalse(changed_again)
+
+    def test_unknown_engine_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = self._write_production(Path(temporary))
+
+            with self.assertRaises(SystemExit):
+                MODULE.set_transit_engine(production, "bogus")
+
+    def test_missing_inventory_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = Path(temporary) / "production"
+            production.mkdir()
+            (production / "group_vars").mkdir()
+
+            with self.assertRaises(SystemExit):
+                MODULE.set_transit_engine(production, "kernel")
+
+
+class ExitRoleInterfacePathTests(unittest.TestCase):
+    """Пути AWG на EXIT должны выводиться из имени интерфейса.
+
+    Захардкоженный awg0 ломал kernel-путь при exit_awg_interface: awg3 -
+    роль писала awg0.conf, а awg-quick@awg3.service ждал awg3.conf через
+    LoadCredential и падал с 243/CREDENTIALS.
+    """
+
+    REPO = Path(__file__).parents[1]
+    DERIVED_KEYS = (
+        "exit_awg_config_path",
+        "exit_awg_candidate_path",
+        "exit_awg_backup_dir",
+    )
+
+    def test_exit_awg_paths_derive_from_interface_name(self) -> None:
+        defaults = yaml.safe_load(
+            (self.REPO / "roles" / "exit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        for key in self.DERIVED_KEYS:
+            with self.subTest(key=key):
+                self.assertIn("{{ exit_awg_interface }}", defaults[key])
+                self.assertNotIn("awg0", defaults[key])
+
+    def test_exit_awg_paths_stay_backward_compatible_for_awg0(self) -> None:
+        import jinja2
+
+        defaults = yaml.safe_load(
+            (self.REPO / "roles" / "exit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        rendered = {
+            key: jinja2.Template(defaults[key]).render(exit_awg_interface="awg0")
+            for key in self.DERIVED_KEYS
+        }
+        self.assertEqual(
+            rendered["exit_awg_config_path"], "/etc/amnezia/amneziawg/awg0.conf"
+        )
+        self.assertEqual(rendered["exit_awg_candidate_path"], "/run/ansible-awg0.conf")
+        self.assertEqual(
+            rendered["exit_awg_backup_dir"], "/root/config-backups/exit/awg0"
+        )
+
+    def test_exit_backup_destination_is_not_hardcoded_to_awg0(self) -> None:
+        tasks = (self.REPO / "roles" / "exit" / "tasks" / "main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("awg0.conf.{{ ansible_date_time", tasks)
+        self.assertIn(
+            "{{ exit_awg_interface }}.conf.{{ ansible_date_time", tasks
+        )
+
+
+AWG31_FIELDS = (
+    "Jc",
+    "Jmin",
+    "Jmax",
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "I1",
+    "I2",
+    "I3",
+    "I4",
+    "I5",
+    "HeaderProtectionKey",
+    "ContentPaddingAddition",
+    "RekeyAfterTime",
+    "RekeyTimeout",
+    "RejectAfterTime",
+    "KeepaliveTimeout",
+    "MaxHandshakeAttempts",
+    "RandomTrailers",
+    "DisableCookies",
+)
+
+
+class KernelTransitProfileTests(unittest.TestCase):
+    """Kernel-путь транзита должен нести тот же профиль AWG 3.1, что и userspace.
+
+    Модуль amneziawg v3.1 принимает весь набор через netlink (проверено на
+    реальном awg setconf/showconf), поэтому урезать kernel-профиль до I1 без
+    HeaderProtectionKey/ContentPaddingAddition/RandomTrailers больше незачем.
+    """
+
+    REPO = Path(__file__).parents[1]
+    ENTRY_TEMPLATE = REPO / "roles" / "entry" / "templates" / "awg1.conf.j2"
+    EXIT_TEMPLATE = REPO / "roles" / "exit" / "templates" / "awg0.conf.j2"
+
+    def test_both_kernel_templates_carry_full_awg31_field_set(self) -> None:
+        for template in (self.ENTRY_TEMPLATE, self.EXIT_TEMPLATE):
+            text = template.read_text(encoding="utf-8")
+            for field in AWG31_FIELDS:
+                with self.subTest(template=template.name, field=field):
+                    self.assertRegex(text, rf"(?m)^{field} = ")
+
+    def test_kernel_templates_take_i2_i5_from_the_shared_profile(self) -> None:
+        entry = self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        exit_text = self.EXIT_TEMPLATE.read_text(encoding="utf-8")
+        for index in range(1, 6):
+            with self.subTest(index=index):
+                self.assertIn(f"entry_awg1_obfuscation.i{index}", entry)
+                self.assertIn(f"exit_awg_obfuscation.i{index}", exit_text)
+
+    def test_exit_kernel_template_uses_the_measured_cascade_mtu(self) -> None:
+        # EXIT брал статический exit_awg_mtu, пока ENTRY уже использовал
+        # измеренный PMTU - стороны одного туннеля расходились по MTU.
+        # Фильтр default обязан идти с true: без него определённый, но пустой
+        # факт Ansible не считается отсутствующим и подставится как есть.
+        exit_text = self.EXIT_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn(
+            "awg3_shared_effective_mtu | default(exit_awg_mtu, true)", exit_text
+        )
+
+    def test_entry_kernel_template_restores_the_peer_route(self) -> None:
+        entry = self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("Table = off", entry)
+        self.assertIn("PostUp = ip -4 route replace", entry)
+        self.assertIn("awg3_peer_tunnel_address", entry)
+
+    def _render_entry(self, **overrides: object) -> str:
+        import jinja2
+
+        context: dict[str, object] = {
+            "vault_awg_entry_exit_private_key": "PRIV",
+            "entry_exit_tunnel_address": "10.77.0.2/32",
+            "entry_awg1_mtu": 1420,
+            "awg3_transit_listen_port": 39745,
+            "awg3_shared_effective_mtu": 1359,
+            "awg3_peer_tunnel_address": "10.77.0.1",
+            "entry_awg1_obfuscation": {
+                "jc": 12,
+                "jmin": 64,
+                "jmax": 512,
+                "s1": 17,
+                "s2": 23,
+                "s3": 23,
+                "s4": 29,
+                "h1": "1-2",
+                "h2": "3-4",
+                "h3": "5-6",
+                "h4": "7-8",
+                "i1": "<b 0x01><r 10>",
+                "i2": "<b 0x02><r 10>",
+                "i3": "<b 0x03><r 10>",
+                "i4": "<b 0x04><r 10>",
+                "i5": "<b 0x05><r 10>",
+            },
+            "vault_awg3_header_protection_key": "HPK",
+            "awg3_content_padding_addition": "8-32",
+            "awg3_rekey_after_time": "120-180",
+            "awg3_rekey_timeout": "5-8",
+            "awg3_reject_after_time": "180-240",
+            "awg3_keepalive_timeout": "10-15",
+            "awg3_max_handshake_attempts": "18-24",
+            "awg3_random_trailers": True,
+            "awg3_disable_cookies": False,
+            "vault_awg_entry_exit_peer_public_key": "PUB",
+            "vault_awg_entry_exit_psk": "PSK",
+            "entry_exit_allowed_ips": ["0.0.0.0/0"],
+            "entry_exit_endpoint": "198.51.100.1:443",
+            "entry_exit_persistent_keepalive": 25,
+        }
+        context.update(overrides)
+        # trim_blocks=True повторяет окружение Ansible; фильтр bool -
+        # ansible-специфичный, в ванильном Jinja2 его нет. Это структурная
+        # проверка рендера, полная ansible-верность шаблонов проверяется
+        # отдельно в CI (render-shell.yml и ansible syntax check).
+        environment = jinja2.Environment(trim_blocks=True, autoescape=False)
+        environment.filters["bool"] = lambda value: str(value).strip().lower() in {
+            "true",
+            "yes",
+            "on",
+            "1",
+        }
+        template = environment.from_string(
+            self.ENTRY_TEMPLATE.read_text(encoding="utf-8")
+        )
+        return template.render(**context)
+
+    def test_entry_template_renders_cleanly_with_ansible_trim_blocks(self) -> None:
+        rendered = self._render_entry()
+        self.assertIn("PostUp = ip -4 route replace 10.77.0.1/32 dev %i", rendered)
+        self.assertIn("RandomTrailers = on", rendered)
+        self.assertIn("DisableCookies = off", rendered)
+        self.assertIn("I5 = <b 0x05><r 10>", rendered)
+        # Ни одной пустой строки внутри [Interface] - иначе awg-quick
+        # обрежет секцию на первой из них.
+        interface_block = rendered.split("[Peer]")[0]
+        self.assertNotIn("\n\n", interface_block.rstrip() + "\n")
+
+    def test_entry_template_omits_peer_route_when_address_is_unset(self) -> None:
+        rendered = self._render_entry(awg3_peer_tunnel_address="")
+        self.assertNotIn("PostUp", rendered)
+        self.assertNotIn("PostDown", rendered)
+        self.assertIn("Table = off", rendered)
+
+    def test_entry_template_pins_the_managed_listen_port(self) -> None:
+        # Без явного ListenPort ядро берёт случайный порт, и правила UFW,
+        # рассчитанные на awg3_transit_listen_port, перестают совпадать.
+        rendered = self._render_entry()
+        self.assertIn("ListenPort = 39745", rendered)
+
+    def test_entry_template_uses_the_measured_cascade_mtu(self) -> None:
+        # Статический entry_awg1_mtu не знает про измеренный PMTU канала;
+        # берём согласованное значение, а статику оставляем как запасную.
+        self.assertIn("MTU = 1359", self._render_entry())
+        self.assertIn(
+            "MTU = 1420", self._render_entry(awg3_shared_effective_mtu=None)
+        )
+
+
+class AwgQuickCandidateNameTests(unittest.TestCase):
+    """Имя файла-кандидата обязано быть годным именем интерфейса.
+
+    awg-quick strip выводит имя интерфейса из имени файла и отвергает всё
+    длиннее 15 символов: "The config file must be a valid interface name,
+    followed by .conf". На этом уже один раз падал деплой mobile.
+    """
+
+    REPO = Path(__file__).parents[1]
+    CANDIDATES = (
+        ("roles/awg3_mobile/defaults/main.yml", "awg3_mobile_candidate_path"),
+        ("roles/exit/defaults/main.yml", "exit_awg_candidate_path"),
+    )
+
+    def test_candidate_basenames_are_valid_interface_names(self) -> None:
+        import re
+
+        for relative, key in self.CANDIDATES:
+            defaults = yaml.safe_load(
+                (self.REPO / relative).read_text(encoding="utf-8")
+            )
+            value = defaults[key]
+            rendered = value.replace(
+                "{{ exit_awg_interface }}", defaults.get("exit_awg_interface", "awg0")
+            )
+            name = rendered.rsplit("/", 1)[-1].removesuffix(".conf")
+            with self.subTest(key=key, name=name):
+                self.assertLessEqual(len(name), 15)
+                self.assertRegex(name, r"^[a-zA-Z0-9_=+.-]{1,15}$")
+
+
+class TransitSizeRandomisationTests(unittest.TestCase):
+    """Рандомизация размера на межсерверном канале выключена намеренно.
+
+    Замер на живом канале (5 прогонов на конфигурацию, UDP 150 Mbit/s):
+    7.6% потерь при включённых ContentPaddingAddition/RandomTrailers против
+    1.9% при выключенных, диапазоны не пересекались. Остальной профиль AWG 3.1
+    сохранён - он ничего не стоит по потерям.
+    """
+
+    DEFAULTS = (
+        Path(__file__).parents[1] / "roles" / "awg3_transit" / "defaults" / "main.yml"
+    )
+
+    def test_transit_disables_both_size_randomisation_fields(self) -> None:
+        defaults = yaml.safe_load(self.DEFAULTS.read_text(encoding="utf-8"))
+        self.assertEqual(defaults["awg3_content_padding_addition"], "0")
+        self.assertFalse(defaults["awg3_random_trailers"])
+
+    def test_transit_keeps_the_rest_of_the_awg31_profile(self) -> None:
+        defaults = yaml.safe_load(self.DEFAULTS.read_text(encoding="utf-8"))
+        self.assertEqual(defaults["awg3_rekey_after_time"], "120-180")
+        self.assertEqual(defaults["awg3_reject_after_time"], "180-240")
+        self.assertEqual(defaults["awg3_max_handshake_attempts"], "18-24")
+        self.assertFalse(defaults["awg3_disable_cookies"])
+
+
+class FreshInstallTransitEngineTests(unittest.TestCase):
+    """Первичная установка обязана поднимать тот же движок, что и проверенный каскад.
+
+    Переезд межсерверного канала на kernel-модуль дошёл до шаблонов и до живого
+    каскада (через toggle-transit-engine.py и --resume), но мастер первичной
+    установки продолжал закреплять userspace. Чистая установка с закреплённой
+    "известно-хорошей" ревизии приезжала на движке, который на том же канале
+    терял 6.4-7.8% пакетов против 0.85% у kernel-модуля - ровно та проблема
+    медленного зарубежного трафика, ради которой переезд и делался.
+
+    Флаги связаны попарно: awg3_transit_enabled выбирает движок, а
+    exit_manage_awg_config говорит, какая роль пишет конфиг интерфейса на EXIT.
+    Половина одной строки таблицы вместе с половиной другой означает, что
+    интерфейс не поднимает никто, поэтому проверяем строку целиком.
+    """
+
+    REPO = Path(__file__).parents[1]
+    DEPLOY = REPO / "scripts" / "lib" / "interactive_deploy.py"
+    EXAMPLE = REPO / "inventory" / "example" / "group_vars"
+
+    @staticmethod
+    def _constant_dicts(source: str) -> list[dict[str, object]]:
+        """Все словарные литералы модуля со строковыми ключами.
+
+        Разбор через ast, а не поиск по тексту: значение флага должно читаться
+        из настоящего литерала, иначе тест начнёт ловить упоминания в
+        комментариях и строках.
+        """
+        import ast
+
+        collected: list[dict[str, object]] = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Dict):
+                continue
+            literal: dict[str, object] = {}
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    if isinstance(value, ast.Constant):
+                        literal[key.value] = value.value
+                    else:
+                        literal[key.value] = NotImplemented
+            if literal:
+                collected.append(literal)
+        return collected
+
+    def _fresh_install_side(self, marker: str) -> dict[str, object]:
+        literals = [
+            literal
+            for literal in self._constant_dicts(
+                self.DEPLOY.read_text(encoding="utf-8")
+            )
+            if marker in literal and "awg3_transit_enabled" in literal
+        ]
+        self.assertEqual(
+            len(literals),
+            1,
+            f"ожидался ровно один словарь первичной установки с ключом {marker}",
+        )
+        return literals[0]
+
+    def test_fresh_install_pins_the_kernel_engine_on_both_sides(self) -> None:
+        kernel = MODULE.TRANSIT_ENGINE_VALUES["kernel"]
+        sides = {
+            "entry": self._fresh_install_side("awg3_mobile_random_trailers"),
+            "exit": self._fresh_install_side("exit_manage_awg_config"),
+        }
+        for side, expected in kernel.items():
+            for key, value in expected.items():
+                with self.subTest(side=side, key=key):
+                    self.assertEqual(sides[side][key], value)
+
+    def test_fresh_install_never_mixes_two_engine_rows(self) -> None:
+        # Прямая защита от найденного разрыва: userspace-строка, доехавшая до
+        # мастера установки, обязана быть распознана как чужая целиком.
+        userspace = MODULE.TRANSIT_ENGINE_VALUES["userspace"]
+        sides = {
+            "entry": self._fresh_install_side("awg3_mobile_random_trailers"),
+            "exit": self._fresh_install_side("exit_manage_awg_config"),
+        }
+        for side, foreign in userspace.items():
+            for key, value in foreign.items():
+                with self.subTest(side=side, key=key):
+                    self.assertNotEqual(sides[side][key], value)
+
+    def test_status_screen_reports_the_actual_engine(self) -> None:
+        # kalimera-status печатал "AWG 3+ userspace" константой, поэтому на
+        # kernel-каскаде показывал оператору не тот движок. Ярлык обязан
+        # выводиться из awg3_transit_enabled, а не быть вписан в шаблон.
+        status = (
+            self.REPO / "roles" / "terminal" / "templates" / "kalimera-status.py.j2"
+        ).read_text(encoding="utf-8")
+        transit_row = next(
+            line for line in status.splitlines() if "Канал ENTRY–EXIT" in line
+        )
+        self.assertIn("CONFIG['transit_engine']", transit_row)
+        self.assertNotIn("userspace", transit_row)
+        self.assertNotIn("kernel", transit_row)
+
+        tasks = (
+            self.REPO / "roles" / "terminal" / "tasks" / "main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("terminal_summary_transit_engine", tasks)
+        self.assertIn("awg3_transit_enabled", tasks)
+
+        # Рендер в CI обязан подавать этот факт, иначе шаблон упадёт на
+        # неопределённой переменной уже после мержа.
+        render = (
+            self.REPO / "tests" / "render-shell.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("terminal_summary_transit_engine", render)
+
+    def test_example_inventory_matches_the_same_engine_row(self) -> None:
+        # Example - стартовое содержимое новой production-inventory и заодно
+        # то, что читает человек; разъехавшись с мастером, оно описывало бы
+        # каскад, который не поднимается.
+        kernel = MODULE.TRANSIT_ENGINE_VALUES["kernel"]
+        for side, expected in kernel.items():
+            variables = yaml.safe_load(
+                (self.EXAMPLE / f"{side}.yml").read_text(encoding="utf-8")
+            )
+            for key, value in expected.items():
+                with self.subTest(side=side, key=key):
+                    self.assertEqual(variables[key], value)
+
+
+if __name__ == "__main__":
+    unittest.main()

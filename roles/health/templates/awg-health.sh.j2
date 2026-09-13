@@ -143,18 +143,10 @@ runtime_secret_dependencies_are_loaded() {
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:' &&
-{% if entry_mobile_client_available | default(false) | bool %}
-        systemctl cat {{ awg3_mobile_service_name | default('awg3-mobile.service') | quote }} |
-            grep -Fq 'LoadCredential=awg-mobile.conf:' &&
-{% endif %}
         systemctl cat {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} |
             grep -Fq 'LoadCredential=front-backend.json:'
 {% elif awg_node_role == 'entry' %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
-{% if entry_mobile_client_available | default(false) | bool %}
-        systemctl cat {{ awg3_mobile_service_name | default('awg3-mobile.service') | quote }} |
-            grep -Fq 'LoadCredential=awg-mobile.conf:' &&
-{% endif %}
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:'
 {% else %}
@@ -177,17 +169,42 @@ mobile_awg31_profile_is_complete() {
 }
 {% endif %}
 
+{#
+   Проверка полноты профиля нужна в обоих режимах движка. Раньше она
+   определялась только при включённом userspace, и после перевода канала на
+   kernel-модуль молча переставала существовать - вместе с проверкой MTU это
+   оставляло без контроля ровно то, что переезд и менял.
+
+   Наборы полей различаются намеренно. У userspace проверяется весь набор -
+   он давно подтверждён на реальном showconf. В kernel-режиме из списка
+   исключены ContentPaddingAddition, RandomTrailers и DisableCookies: на
+   межсерверном канале они намеренно стоят в 0/off, а печатает ли kernel
+   showconf поля с нулевыми значениями, на живом канале пока не подтверждено.
+   Требовать их присутствия означало бы рисковать ложным FAIL на исправном
+   каскаде, а различающую силу они всё равно не несут - её дают
+   HeaderProtectionKey и I1-I5, которые никогда не совпадают с умолчанием.
+#}
 {% if awg3_transit_enabled | default(false) | bool %}
+{% set awg3_profile_tool = awg3_tools_binary_path %}
+{% set awg3_profile_fields = [
+       'HeaderProtectionKey', 'ContentPaddingAddition', 'RekeyAfterTime',
+       'RekeyTimeout', 'RejectAfterTime', 'KeepaliveTimeout',
+       'MaxHandshakeAttempts', 'RandomTrailers', 'DisableCookies',
+       'I1', 'I2', 'I3', 'I4', 'I5'] %}
+{% else %}
+{% set awg3_profile_tool = 'awg' %}
+{% set awg3_profile_fields = [
+       'HeaderProtectionKey', 'RekeyAfterTime', 'RekeyTimeout',
+       'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts',
+       'I1', 'I2', 'I3', 'I4', 'I5'] %}
+{% endif %}
 awg3_transit_profile_is_complete() {
     local interface="$1" config
-    config="$({{ awg3_tools_binary_path | quote }} showconf "$interface" 2>/dev/null)" || return 1
-    for field in HeaderProtectionKey ContentPaddingAddition RekeyAfterTime \
-        RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts \
-        RandomTrailers DisableCookies I1 I2 I3 I4 I5; do
+    config="$({{ awg3_profile_tool | quote }} showconf "$interface" 2>/dev/null)" || return 1
+    for field in {{ awg3_profile_fields | join(' ') }}; do
         grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
     done
 }
-{% endif %}
 
 {% if awg_node_role == 'entry' %}
 dns_no_logs_policy_is_active() {
@@ -454,6 +471,8 @@ check 'MTU межсерверного интерфейса применён' int
 check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% else %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
+check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
+check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% endif %}
 check 'согласование локальных VPN-пиров' systemctl is-active --quiet awg-local-peer-apply.service
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
@@ -630,6 +649,8 @@ check 'MTU межсерверного интерфейса EXIT применён
 check 'полный профиль AWG 3+ EXIT сервера применён' awg3_transit_profile_is_complete {{ exit_awg_interface | quote }}
 {% else %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
+check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_shared_effective_mtu | default(exit_awg_mtu, true) | int }}
+check 'полный профиль AWG 3+ EXIT сервера применён' awg3_transit_profile_is_complete {{ exit_awg_interface | quote }}
 {% endif %}
 check 'ограниченный NAT EXIT сервера' iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
 check 'изоляция клиентов EXIT сервера' iptables -w 10 -C FORWARD -i {{ exit_awg_interface | quote }} -o {{ exit_awg_interface | quote }} -j DROP
