@@ -55,7 +55,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn('"fingerprint": "firefox"', manager)
         self.assertIn('"protocol": "blackhole"', manager)
         self.assertIn('"domainStrategy": "AsIs"', manager)
-        self.assertIn('"remarks": "Kalimera-FRONT-disguiseV2"', manager)
+        self.assertIn('"remarks": "Kalimera-FRONT-disguiseV3"', manager)
 
     def test_client_export_has_isolated_update_playbook(self) -> None:
         playbook = (

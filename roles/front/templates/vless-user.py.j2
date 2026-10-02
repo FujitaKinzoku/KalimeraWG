@@ -163,6 +163,21 @@ def restart_xray() -> None:
     subprocess.run([SYSTEMCTL, "restart", SERVICE], check=True)
 
 
+def uplink_sends_get_body(xhttp: dict) -> bool:
+    """Отправит ли клиент Xray пакеты аплинка GET-запросом с телом.
+
+    При наличии extra Xray-core берёт из xhttpSettings снаружи только host,
+    path и mode (infra/conf/transport_method.go, SplitHTTPConfig.Build), а
+    uplinkDataPlacement body и auto (как и отсутствие поля) клиент кладёт в
+    тело запроса (transport/internet/splithttp/config.go, FillPacketRequest).
+    """
+    extra = xhttp.get("extra")
+    effective = extra if isinstance(extra, dict) else xhttp
+    method = str(effective.get("uplinkHTTPMethod") or "POST").upper()
+    placement = effective.get("uplinkDataPlacement") or "auto"
+    return method == "GET" and placement in ("body", "auto")
+
+
 def client_config(record: dict, settings: dict) -> dict:
     mode = record["mode"]
     domains = settings.get("domains", {})
@@ -172,6 +187,15 @@ def client_config(record: dict, settings: dict) -> dict:
     xhttp = settings.get("xhttp")
     if not isinstance(xhttp, dict):
         fail("Параметры XHTTP отсутствуют")
+    # Yandex Cloud CDN отвечает 413 на любой GET с телом, и такой профиль не
+    # пропустил бы через CDN ни одного пакета аплинка. Прямой путь через
+    # nginx FRONT тело в GET принимает, поэтому запрет только для CDN.
+    if mode == "cdn" and uplink_sends_get_body(xhttp):
+        fail(
+            "Параметры экспорта устарели: CDN-профиль отправлял бы аплинк телом "
+            "GET-запроса, а CDN отвечает на такой запрос 413. Обновите FRONT "
+            "(kalimera-deploy --resume) и повторите экспорт."
+        )
     encryption = settings.get("encryption", "none")
     dns = settings.get("dns")
     if not isinstance(dns, dict):
@@ -239,7 +263,10 @@ def client_config(record: dict, settings: dict) -> dict:
             {"protocol": "freedom", "tag": "direct"},
             {"protocol": "blackhole", "tag": "block"},
         ],
-        "remarks": "Kalimera-FRONT-disguiseV2",
+        # V3: аплинк GET без тела, нагрузка в заголовках. Новое имя профиля
+        # позволяет в клиенте отличить перевыпущенный JSON от старого V2,
+        # который через CDN больше не работает.
+        "remarks": "Kalimera-FRONT-disguiseV3",
         "routing": {
             "domainStrategy": "AsIs",
             "rules": [

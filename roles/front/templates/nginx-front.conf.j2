@@ -72,6 +72,16 @@ server {
         proxy_read_timeout 1h;
         proxy_send_timeout 1h;
         client_max_body_size 0;
+
+        # Аплинк packet-up приходит GET-запросами без тела: Yandex Cloud CDN
+        # отвечает 413 на любой GET с телом, поэтому нагрузка лежит в
+        # заголовках <ключ>-0, <ключ>-1 (front_xhttp_uplink_* в defaults
+        # роли). Одна такая строка - около 3 КБ, весь пакет - около 5,5 КБ,
+        # и встроенных large_client_header_buffers 4 8k (поле до 8 КБ, все
+        # заголовки до 32 КБ, в том числе по HTTP/2) хватает с запасом -
+        # директива намеренно не переопределяется. Ключ без подчёркивания:
+        # при встроенном underscores_in_headers off такие заголовки nginx
+        # молча выбрасывает.
     }
 
     location / {

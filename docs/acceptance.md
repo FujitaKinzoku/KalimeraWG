@@ -47,7 +47,9 @@
 
 1. `kalimera-test` проходит на ENTRY, EXIT и FRONT.
 2. `vless-user create test-cdn cdn` выводит JSON, который импортируется без
-   ручного изменения XHTTP-параметров.
+   ручного изменения XHTTP-параметров. Аплинк в нём идёт GET-запросами без
+   тела, нагрузка в заголовках, а `awg-health --strict` на FRONT проходит
+   проверку `аплинк packet-up через CDN доходит до Xray (GET без тела)`.
 3. Новая сессия устанавливается через CDN при действующей внешней политике
    белых списков.
 4. `vless-user create test-direct direct` создаёт отдельный JSON прямого
@@ -56,7 +58,9 @@
    разрывает основной маршрут через EXIT.
 6. После перезагрузки FRONT реестр пользователей совпадает с активной
    конфигурацией Xray, а секреты открыты из 2-of-N хранилища.
-7. `--replace-front` оставляет старый FRONT разрешённым до отдельного commit.
+7. `--replace-front` оставляет старый FRONT разрешённым до отдельного commit,
+   а `awg-health --strict` на новом FRONT до commit проверяет аплинк напрямую
+   через его origin-домен, не через CDN, который ещё смотрит на старый FRONT.
 8. После переключения CDN origin и проверки новой сессии
    `--commit-front-replacement` удаляет временное UFW-правило старого FRONT.
 9. До commit команда `--rollback-front-replacement` возвращает прежний
@@ -66,6 +70,6 @@
 11. После commit установщик явно требует выключить или переустановить старый
     FRONT и показывает его прежний адрес без секретных данных.
 
-Параметры `packet-up`, GET uplink, XHTTP path, Nginx buffering/timeout,
+Параметры `packet-up`, GET uplink без тела с нагрузкой в заголовках, XHTTP path, Nginx buffering/timeout,
 публичный CDN-домен, пользовательские UUID и служебный REALITY backend не
 должны меняться во время замены FRONT.

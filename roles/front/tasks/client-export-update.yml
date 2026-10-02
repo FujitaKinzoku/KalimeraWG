@@ -176,6 +176,24 @@
   changed_when: false
   no_log: true
 
+# Yandex Cloud CDN отвечает 413 на любой GET с телом. При наличии extra Xray
+# берёт метод и размещение аплинка только из него, а uplinkDataPlacement
+# body/auto клиент кладёт в тело - такой JSON выдавать нельзя.
+- name: Проверка аплинка без тела в клиентском JSON
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/jq
+      - -e
+      - >-
+        .outbounds[] | select(.tag == "proxy") |
+        .streamSettings.xhttpSettings | (.extra // .) |
+        ((.uplinkHTTPMethod // "POST") | ascii_upcase) != "GET" or
+        ((.uplinkDataPlacement // "auto") == "header" or
+         (.uplinkDataPlacement // "auto") == "cookie")
+      - "{{ front_vless_export_dir }}/{{ front_client_export_test_name }}.json"
+  changed_when: false
+  no_log: true
+
 - name: Семантическая проверка обновлённого клиентского JSON
   ansible.builtin.command:
     argv:

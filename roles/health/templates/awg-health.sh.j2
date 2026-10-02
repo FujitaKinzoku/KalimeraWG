@@ -736,6 +736,218 @@ front_tls_endpoint_ready() {
             -verify_return_error >/dev/null 2>&1
 }
 
+# Живая проверка того, из-за чего CDN-доступ пропал целиком: Yandex Cloud
+# CDN отвечает 413 на любой GET с телом (а POST у него выключен), и пакеты
+# аплинка не доходили даже до nginx, хотя TLS endpoint CDN был жив. Запрос
+# уходит на домен из второго аргумента и строится из того же
+# client-settings.json, из которого vless-user собирает клиентские JSON: GET,
+# id сессии, номер пакета и паддинг там же, где их кладёт клиент, и нагрузка
+# по uplinkDataPlacement - заголовками <ключ>-N по uplinkChunkSize, cookie
+# или, для устаревшего профиля, телом (тогда CDN вернёт 413 и проверка
+# упадёт так же, как упали клиенты). Проба не меньше любого настоящего
+# пакета: те же заголовки браузера, что добавляет Xray, наибольшие длина
+# куска и паддинг, а нагрузка на 48 байт больше scMaxEachPostBytes. Иначе
+# предел заголовков CDN между размером пробы и размером пакета клиента
+# прошёл бы проверку, а клиенты упирались бы в него.
+# К пути добавляется случайный сегмент: Xray и nginx сравнивают путь по
+# префиксу, а уникальный URL не даёт CDN закешировать ответ пробы по адресу,
+# который используют настоящие клиенты. Сессия пробы без нисходящего потока
+# удаляется самим Xray через 30 секунд. URL и cookie передаются curl через
+# stdin, а не аргументами, и не печатаются.
+front_uplink_probe_request() {
+    local variant="$1" domain="$2" settings out path placement data_key chunk bytes
+    local session_placement session_key seq_placement seq_key obfs
+    local padding_placement padding_key padding_header padding_bytes
+    local padding_low padding_high now chrome
+    local padding payload payload_len session nonce query='' cookies='' part i
+    local -a fields=() headers=()
+    [[ "$variant" == valid || "$variant" == invalid ]] || return 1
+    [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+    settings={{ front_vless_client_settings_path | quote }}
+    # При наличии extra Xray берёт из xhttpSettings снаружи только host, path
+    # и mode; отсутствующие поля заменяются встроенными значениями Xray-core.
+    out="$(jq -er '
+        [.xhttp.path] + (
+            (.xhttp.extra // .xhttp) | [
+                (.uplinkDataPlacement // "auto"),
+                (.uplinkDataKey // ""),
+                (.uplinkChunkSize // ""),
+                (.scMaxEachPostBytes // 1000000),
+                (.sessionIDPlacement // "path"),
+                (.sessionIDKey // ""),
+                (.seqPlacement // "path"),
+                (.seqKey // ""),
+                (.xPaddingObfsMode // false),
+                (.xPaddingPlacement // "queryInHeader"),
+                (.xPaddingKey // "x_padding"),
+                (.xPaddingHeader // "X-Padding"),
+                (.xPaddingBytes // "100-1000")
+            ]
+        ) | map(tostring) | .[]
+    ' "$settings")" || return 1
+    mapfile -t fields <<<"$out"
+    [[ -n "${fields[13]+set}" && -z "${fields[14]+set}" ]] || return 1
+    # Значения попадают в кавычки конфигурации curl: кавычка или обратная
+    # косая черта в них означали бы повреждённый профиль.
+    [[ "${fields[*]}" != *[\"\\]* ]] || return 1
+    path="${fields[0]%/}"
+    placement="${fields[1]}"
+    data_key="${fields[2]}"
+    chunk="${fields[3]##*-}"
+    bytes="${fields[4]##*-}"
+    session_placement="${fields[5]}"
+    session_key="${fields[6]}"
+    seq_placement="${fields[7]}"
+    seq_key="${fields[8]}"
+    obfs="${fields[9]}"
+    padding_placement="${fields[10]}"
+    padding_key="${fields[11]}"
+    padding_header="${fields[12]}"
+    padding_bytes="${fields[13]}"
+    [[ "$path" == /* ]] || return 1
+    # Больше 64 КБ на пакет через заголовки CDN не пропустит в любом случае.
+    [[ "$bytes" =~ ^[0-9]+$ ]] || return 1
+    (( bytes > 0 && bytes <= 65536 )) || return 1
+    if [[ -z "$chunk" ]]; then
+        # Встроенные размеры Xray-core (GetNormalizedUplinkChunkSize).
+        if [[ "$placement" == cookie ]]; then chunk=3072; else chunk=4000; fi
+    fi
+    [[ "$chunk" =~ ^[0-9]+$ ]] || return 1
+    (( chunk >= 64 )) || return 1
+    [[ "$padding_bytes" =~ ^([0-9]+)(-([0-9]+))?$ ]] || return 1
+    padding_low="${BASH_REMATCH[1]}"
+    padding_high="${BASH_REMATCH[3]:-$padding_low}"
+    (( padding_high > 0 && padding_high >= padding_low )) || return 1
+    # Наибольшая допустимая длина. Символ X кодируется в HPACK ровно одним
+    # байтом, поэтому такая строка проходит и проверку длины repeat-x, и
+    # проверку tokenish в Xray (splithttp/xpadding.go, IsPaddingValid).
+    printf -v padding '%*s' "$padding_high" ''
+    padding="${padding// /X}"
+    session="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$session" =~ ^[0-9a-f]{32}$ && "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+    # base64url без паддинга, как в Xray (RawURLEncoding). Порядок наборов
+    # tr выбран так, чтобы второй не начинался с дефиса и не стал ключом.
+    # 48 байт (64 символа) сверх наибольшего пакета - запас на случайную
+    # длину паддинга tokenish и версии в заголовках настоящего клиента.
+    # Сервер FRONT принимает такой пакет: scMaxEachPostBytes у него не задан,
+    # и действует встроенный предел 1 000 000 байт.
+    payload="$(head -c "$(( bytes + 48 ))" /dev/urandom | base64 -w0 | tr '/+' '_-' | tr -d '=')"
+    payload_len="$(printf '%s' "$payload" | wc -c)"
+    (( payload_len > 1 )) || return 1
+    if [[ "$variant" == invalid ]]; then
+        # Тот же размер, но последний символ заведомо не base64url: дошедший
+        # до Xray пакет обязан получить 400. Именно последний: Xray склеивает
+        # куски <ключ>-0, <ключ>-1, ... до первого отсутствующего, поэтому
+        # если CDN или nginx выбросили или обрезали любой кусок, испорченный
+        # символ до Xray не дойдёт, остаток декодируется, ответ будет 200, и
+        # проверка упадёт.
+        payload="${payload:0:payload_len-1}."
+    fi
+    now="$(date -u +%s)" || return 1
+    [[ "$now" =~ ^[0-9]+$ ]] || return 1
+    # Версия Chrome по той же формуле, что у Xray (ChromeVersion: Chrome 144
+    # от 13.01.2026 = день 20466 эпохи Unix, новая версия каждые 35 дней).
+    chrome=$(( 144 + (now / 86400 - 20466 - 35) / 35 ))
+    # Заголовки, которые Xray-core v26.7.28 без явного User-Agent добавляет к
+    # каждому пакету: маскировка под fetch() из Chrome (common/utils/browser.go,
+    # applyMasqueradedHeaders) и Accept-Encoding, который HTTP/2-транспорт Go
+    # (golang.org/x/net/http2) ставит сам. Без них проба была бы примерно на
+    # 0,5 КБ меньше настоящего пакета. Свои User-Agent и Accept curl при этом
+    # не добавляет.
+    headers+=(
+        "Sec-CH-UA: \"Not?A_Brand\";v=\"99\", \"Chromium\";v=\"$chrome\", \"Google Chrome\";v=\"$chrome\""
+        'Sec-CH-UA-Mobile: ?0'
+        'Sec-CH-UA-Platform: "Windows"'
+        'DNT: 1'
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chrome.0.0.0 Safari/537.36"
+        'Accept-Language: en-US,en;q=0.9'
+        'Sec-Fetch-Mode: cors'
+        'Sec-Fetch-Dest: empty'
+        'Sec-Fetch-Site: same-origin'
+        'Priority: u=1, i'
+        'Cache-Control: no-cache'
+        'Pragma: no-cache'
+        'Accept: */*'
+        'Accept-Encoding: gzip'
+    )
+
+    case "$session_placement" in
+        path) path+="/$session" ;;
+        cookie) cookies+="${cookies:+; }${session_key:-x_session}=$session" ;;
+        query) query+="${query:+&}${session_key:-x_session}=$session" ;;
+        header) headers+=("${session_key:-X-Session}: $session") ;;
+        *) return 1 ;;
+    esac
+    case "$seq_placement" in
+        path) path+="/0" ;;
+        cookie) cookies+="${cookies:+; }${seq_key:-x_seq}=0" ;;
+        query) query+="${query:+&}${seq_key:-x_seq}=0" ;;
+        header) headers+=("${seq_key:-X-Seq}: 0") ;;
+        *) return 1 ;;
+    esac
+    path+="/$nonce"
+    if [[ "$obfs" == true ]]; then
+        case "$padding_placement" in
+            cookie) cookies+="${cookies:+; }$padding_key=$padding" ;;
+            query) query+="${query:+&}$padding_key=$padding" ;;
+            header) headers+=("$padding_header: $padding") ;;
+            *) headers+=("$padding_header: https://$domain$path?$padding_key=$padding") ;;
+        esac
+    else
+        headers+=("Referer: https://$domain$path?x_padding=$padding")
+    fi
+    case "$placement" in
+        header|cookie)
+            for (( i = 0; i * chunk < payload_len; i++ )); do
+                part="${payload:i*chunk:chunk}"
+                if [[ "$placement" == header ]]; then
+                    headers+=("${data_key:-X-Data}-$i: $part")
+                else
+                    cookies+="${cookies:+; }${data_key:-x_data}_$i=$part"
+                fi
+            done
+            ;;
+    esac
+
+    {
+        printf 'url = "https://%s%s%s"\n' "$domain" "$path" "${query:+?$query}"
+        # Внутри кавычек конфигурации curl кавычку и обратную косую черту
+        # (они есть в Sec-CH-UA) нужно экранировать обратной косой чертой.
+        printf '%s\n' "${headers[@]}" |
+            sed 's/["\\]/\\&/g; s/^/header = "/; s/$/"/'
+        if [[ -n "$cookies" ]]; then
+            printf 'cookie = "%s"\n' "$cookies"
+        fi
+        case "$placement" in
+            header|cookie) ;;
+            *) printf 'request = "GET"\ndata-binary = "%s"\n' "$payload" ;;
+        esac
+    } | curl --silent --ipv4 --max-time 20 --output /dev/null \
+        --write-out '%{http_code}' --config -
+}
+
+# $1 - домен, через который идёт проба: домен CDN или, пока замена FRONT не
+# подтверждена, origin-домен этого FRONT.
+front_uplink_reaches_xray() {
+    local domain="$1" placement status
+    placement="$(jq -er '(.xhttp.extra // .xhttp).uplinkDataPlacement // "auto"' \
+        {{ front_vless_client_settings_path | quote }})" || return 1
+    status="$(front_uplink_probe_request valid "$domain")" || return 1
+    [[ "$status" == 200 ]] || return 1
+    case "$placement" in
+        header|cookie)
+            # Пустая нагрузка декодируется без ошибки, и Xray отвечает на неё
+            # тем же 200, поэтому 200 выше ничего не доказывает, если CDN или
+            # nginx вырезали заголовки по дороге. Пакет той же длины с
+            # испорченным последним символом обязан дойти до Xray целиком и
+            # получить 400.
+            status="$(front_uplink_probe_request invalid "$domain")" || return 1
+            [[ "$status" == 400 ]]
+            ;;
+    esac
+}
+
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
 check 'синтаксис Nginx FRONT-релея' nginx -t
@@ -751,6 +963,22 @@ check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_read
 {% endif %}
 {% if 'cdn' in front_access_modes %}
 check 'TLS endpoint CDN доступен' front_tls_endpoint_ready {{ front_cdn_domain | quote }}
+{% if front_xhttp_mode | default('packet-up') == 'packet-up' %}
+{% if front_replacement_state | default('active') == 'prepared' %}
+# До commit замены CDN origin по-прежнему указывает на старый FRONT
+# (оператор переключает его после --replace-front), и проба через CDN
+# проверила бы не этот сервер, а старый FRONT без аплинка в заголовках
+# провалил бы её и сорвал замену. Поэтому до commit тот же пакет уходит прямо
+# на origin-домен этого FRONT: проверяются его nginx и Xray, но не CDN. После
+# commit FRONT не перенастраивается, и проба через CDN включится при
+# следующем обычном deploy.
+check 'аплинк packet-up без тела доходит до Xray нового FRONT (напрямую, до commit замены)' \
+    front_uplink_reaches_xray {{ front_origin_domain | quote }}
+{% else %}
+check 'аплинк packet-up через CDN доходит до Xray (GET без тела)' \
+    front_uplink_reaches_xray {{ front_cdn_domain | quote }}
+{% endif %}
+{% endif %}
 {% endif %}
 {% if front_entry_reality_stopped | default(false) | bool %}
 printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'

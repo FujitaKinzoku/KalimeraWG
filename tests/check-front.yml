@@ -321,11 +321,26 @@
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.uplinkHTTPMethod == 'GET'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionIDKey == 'PHPESSID'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionKey == 'PHPESSID'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionIDTable == 'hex'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.sessionIDLength == '32'
+              # Yandex Cloud CDN отвечает 413 на любой GET с телом: аплинк
+              # обязан уходить в заголовках, и действующие поля - внутри extra.
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.uplinkDataPlacement == 'header'
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.uplinkDataKey == front_xhttp_uplink_data_key
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.uplinkChunkSize == front_xhttp_uplink_chunk_size
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.scMaxEachPostBytes == front_xhttp_uplink_max_each_post_bytes
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.scMinPostsIntervalMs == front_xhttp_uplink_min_posts_interval_ms
+              - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.uplinkDataPlacement == 'header'
               - (front_test_vless_export.stdout | from_json).outbounds[0].streamSettings.xhttpSettings.extra.xmux.hKeepAlivePeriod == 30
               - (front_test_vless_export.stdout | from_json).outbounds[1].tag == 'direct'
               - (front_test_vless_export.stdout | from_json).outbounds[2].tag == 'block'
               - (front_test_vless_export.stdout | from_json).routing.rules[0].outboundTag == 'proxy'
-              - (front_test_vless_export.stdout | from_json).remarks == 'Kalimera-FRONT-disguiseV2'
+              - (front_test_vless_export.stdout | from_json).remarks == 'Kalimera-FRONT-disguiseV3'
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].streamSettings.xhttpSettings.extra.uplinkDataPlacement == 'auto'
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].streamSettings.xhttpSettings.extra.uplinkDataKey == front_xhttp_uplink_data_key
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].streamSettings.xhttpSettings.extra.sessionIDTable == 'hex'
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].streamSettings.xhttpSettings.extra.serverMaxHeaderBytes == front_xhttp_server_max_header_bytes | int
+              - (front_test_active_initial.content | b64decode | from_json).inbounds[0].streamSettings.xhttpSettings.extra.scMaxBufferedPosts == front_xhttp_server_max_buffered_posts | int
               - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.clients | length == 1
               - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption == front_test_vless_decryption
               - (front_test_active_initial.content | b64decode | from_json).inbounds[0].settings.decryption is match('^mlkem768x25519plus\.native\.600s\.')

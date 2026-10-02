@@ -19,17 +19,28 @@
         "network": "xhttp",
         "xhttpSettings": {
           "path": "{{ front_xhttp_path }}",
-          "mode": "{{ front_xhttp_mode }}"{% if front_xhttp_mode == 'packet-up' %},
-          "uplinkHTTPMethod": "GET"{% endif %}
-
+          "mode": "{{ front_xhttp_mode }}",
+{% if front_xhttp_mode == 'packet-up' %}
+          "uplinkHTTPMethod": "GET",
+{% endif %}
+{# Сервер принимает аплинк в режиме auto (заголовки, cookie и тело сразу),
+   см. front_xhttp_uplink_data_placement в defaults/main.yml. При наличии
+   extra Xray берёт отсюда только path и mode, поэтому те же поля повторены
+   внутри extra. #}
+          "uplinkDataPlacement": "auto",
+          "uplinkDataKey": "{{ front_xhttp_uplink_data_key }}",
+          "serverMaxHeaderBytes": {{ front_xhttp_server_max_header_bytes | int }},
+          "scMaxBufferedPosts": {{ front_xhttp_server_max_buffered_posts | int }}
 {% if front_xhttp_disguise_enabled | default(false) | bool %}
           ,"extra": {
             "sessionIDKey": "{{ front_xhttp_disguise_session_cookie }}",
             "sessionIDPlacement": "cookie",
-            "sessionIDLength": "16-32",
-            "sessionIDTable": "Base36",
-            "uplinkDataKey": "{{ front_xhttp_disguise_uplink_param }}",
-            "uplinkDataPlacement": "body",
+            "sessionIDLength": "32",
+            "sessionIDTable": "hex",
+            "uplinkDataKey": "{{ front_xhttp_uplink_data_key }}",
+            "uplinkDataPlacement": "auto",
+            "serverMaxHeaderBytes": {{ front_xhttp_server_max_header_bytes | int }},
+            "scMaxBufferedPosts": {{ front_xhttp_server_max_buffered_posts | int }},
             "seqKey": "chunk",
             "seqPlacement": "query",
             "xPaddingKey": "{{ front_xhttp_disguise_padding_key }}",

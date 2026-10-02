@@ -30,6 +30,39 @@
       группе entry.
   when: front_relay_enabled | default(false) | bool
 
+# Аплинк packet-up обязан уходить GET-запросом БЕЗ тела (Yandex Cloud CDN
+# отвечает 413 на любой GET с телом), а нагрузка в заголовках - укладываться
+# в проверенные пределы: одиночный заголовок 6000 байт прошёл CDN живой
+# пробой, nginx по умолчанию ограничивает поле 8 КБ и выбрасывает имена с
+# подчёркиванием, а HTTP-сервер Xray - весь заголовок serverMaxHeaderBytes.
+# Подробности - в комментариях front_xhttp_uplink_* в defaults/main.yml.
+- name: "Проверка: аплинк XHTTP проходит CDN без тела запроса"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_xhttp_uplink_data_placement in ['header', 'cookie']
+      - front_xhttp_uplink_data_key is match('^[A-Za-z][A-Za-z0-9-]{0,62}$')
+      - front_xhttp_uplink_chunk_size | string is match('^[0-9]+(-[0-9]+)?$')
+      - ((front_xhttp_uplink_chunk_size | string).split('-') | map('int') | min) >= 64
+      - ((front_xhttp_uplink_chunk_size | string).split('-') | map('int') | max) <= 6000
+      - front_xhttp_uplink_max_each_post_bytes | string is match('^[0-9]+(-[0-9]+)?$')
+      - ((front_xhttp_uplink_max_each_post_bytes | string).split('-') | map('int') | min) > 0
+      - front_xhttp_uplink_min_posts_interval_ms | string is match('^[0-9]+(-[0-9]+)?$')
+      - ((front_xhttp_uplink_min_posts_interval_ms | string).split('-') | map('int') | min) > 0
+      - front_xhttp_server_max_header_bytes | int >= 8192
+      - >-
+        ((front_xhttp_uplink_max_each_post_bytes | string).split('-') | map('int') | max)
+        * 4 // 3 + 4096 <= front_xhttp_server_max_header_bytes | int
+    fail_msg: >-
+      Аплинк XHTTP должен идти в заголовках (header) или cookie, а не в теле
+      GET-запроса: Yandex Cloud CDN отвечает 413 на любой GET с телом. Ключ -
+      только латиница, цифры и дефис (заголовки с подчёркиванием nginx молча
+      выбрасывает), кусок uplinkChunkSize - от 64 до 6000 символов (6000 -
+      проверенный через CDN предел одного заголовка), интервал - больше нуля,
+      а весь пакет в base64url вместе с 4 КБ прочих заголовков обязан
+      помещаться в front_xhttp_server_max_header_bytes.
+  when: front_relay_enabled | default(false) | bool
+
 - name: Проверка DNS и TLS готового CDN-ресурса
   ansible.builtin.shell: |
     set -Eeuo pipefail
