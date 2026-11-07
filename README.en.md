@@ -9,55 +9,63 @@
 
 <h1 align="center">KalimeraWG</h1>
 
-<p align="center"><em><b>A managed AWG cascade: client → ENTRY → EXIT</b><br>
-AmneziaWG 3+ · VLESS+REALITY · CDN/XHTTP · route-aware DNS · optional SOAX/SOCKS5</em></p>
+<p align="center"><em><b>A managed VPN cascade: client → ENTRY → EXIT, with a CDN → FRONT fallback</b><br>
+AmneziaWG 3.1 · VLESS+REALITY · CDN/XHTTP · route-aware DNS · optional SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v2.1.0"><img src="https://img.shields.io/badge/release-v2.1.0-7B2CBF" alt="KalimeraWG v2.1.0"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.0"><img src="https://img.shields.io/badge/release-v3.0.0-7B2CBF" alt="KalimeraWG v3.0.0"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
-  <img src="https://img.shields.io/badge/AmneziaWG-3+-7B2CBF" alt="AmneziaWG 3+">
+  <img src="https://img.shields.io/badge/AmneziaWG-3.1-7B2CBF" alt="AmneziaWG 3.1">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License"></a>
 </p>
 
-KalimeraWG turns two clean Ubuntu 24.04 VPS instances into a reproducible
-ENTRY/EXIT cascade, creates the first client, and installs operational tools.
-Release `v2.1.0` has been verified through repeated clean VPS deployments.
+KalimeraWG turns clean Ubuntu 24.04 VPS instances into a reproducible cascade,
+creates the first client, and installs operational tools. The primary path is
+AmneziaWG to ENTRY plus a dedicated ENTRY–EXIT channel. An optional third role,
+FRONT, accepts VLESS/XHTTP directly or through a CDN and exists mainly for
+mobile allowlist conditions.
 
-> **v2.0.0 is a major security-hardening release.** The access model changed
-> (a dedicated `kalimera` administrator instead of everyday root), on-disk
-> secrets now get threshold protection, SSH and log-retention policy were
-> tightened, and cascade boot races were fixed. See
-> [What's new in v2.0.0](#whats-new-in-v200) and [CHANGELOG.md](CHANGELOG.md)
-> for details.
+> **v3.0.0 is the current working release.** The ENTRY–EXIT channel and
+> mobile/AWG3+ run on the kernel module with the full AWG 3.1 field set, FRONT
+> is installed together with the cascade, and the VLESS uplink is compatible
+> with Yandex Cloud CDN. The release was confirmed by a clean ENTRY + EXIT +
+> FRONT install on real servers. See [What's new in v3.0.0](#whats-new-in-v300)
+> and [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
 | Requirement | Value |
 |---|---|
-| Servers | two clean Ubuntu 24.04 LTS VPS instances |
-| ENTRY | accepts clients; public IPv4 required |
+| Servers | two clean Ubuntu 24.04 LTS VPS instances, a third one for FRONT |
+| ENTRY | accepts clients and runs the installer; public IPv4 required |
 | EXIT | primary egress; public IPv4 required |
-| Bootstrap access | root and working SSH on both servers; `kalimera` key access afterwards |
+| FRONT (optional) | public IPv4 and a domain whose A record points at it; a ready CDN resource for CDN mode |
+| Bootstrap access | root and working SSH on every server; `kalimera` key access afterwards |
 | Typical time | 20–40 minutes |
 
 Run as `root` on ENTRY:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v2.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.0/install.sh | bash
 ```
 
-The command installs the immutable `v2.1.0` tag rather than the moving `main`
-branch. Confirm the local version with `./deploy --version`.
+The command installs the immutable `v3.0.0` tag rather than the moving `main`
+branch. Confirm the local version with `./deploy --version`. Enter the EXIT and
+FRONT addresses as IPv4 literals, not DNS names.
 
-## Field-validated allowlist stage
+For FRONT behind a CDN, prepare the origin domain (A record to FRONT) and the
+CDN resource beforehand: HTTPS origin on that domain, Host header and SNI set to
+the origin domain, caching off. After installation, get the first VLESS profile
+on FRONT with `vless-user export initial`. Details:
+[docs/front-relay.md](docs/front-relay.md).
 
-> **Status on August 23, 2026.** The `feature/vless-reality-fallback` branch
-> established a new client session while mobile allowlist restrictions were
-> active. The validated path was **compatible cloud CDN → FRONT → ENTRY**, and the
-> existing RU/EXIT routing policy remained intact after ingress. This records
-> one field-tested milestone; it is not a stable release or a universal carrier
-> availability guarantee.
+## Mobile allowlist conditions
+
+> A new client session is established while mobile allowlist restrictions are
+> active through **Russian cloud CDN → FRONT → ENTRY**, and the RU/EXIT routing
+> policy remains intact after ingress. This applies to the tested networks and
+> CDNs and is not a universal carrier availability guarantee.
 
 <p align="center">
   <picture>
@@ -73,16 +81,36 @@ use the FRONT origin directly or a reachable CDN edge.
 | Client path | Transport | Purpose | Validation status |
 |---|---|---|---|
 | client → ENTRY | AmneziaWG 3+, UDP/443 or mobile UDP/8443 | lowest-overhead primary path | previously validated |
-| client → FRONT | TLS + VLESS/XHTTP, TCP/443 | direct VLESS without CDN; no public VLESS listener on ENTRY | implemented on the test branch |
+| client → FRONT | TLS + VLESS/XHTTP, TCP/443 | direct VLESS without CDN; no public VLESS listener on ENTRY | implemented |
 | client → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | ingress through a reachable CDN edge | field-validated |
 | FRONT → ENTRY | VLESS+REALITY | protected service hop available only from FRONT | field-validated |
 | ENTRY → EXIT / RU | AWG 3+ or SOCKS5/fail-open | unchanged destination policy | retained |
+
+The XHTTP uplink uses bodyless GET requests with the payload in headers: since
+30 September 2026 Yandex Cloud CDN answers `413` to any GET with a body. Upload
+through the CDN is therefore limited to about 2.2 Mbit/s; download is not.
 
 Carrier, region, DNS, CDN edge, and filtering policy can change independently.
 See [docs/front-relay.md](docs/front-relay.md) for the detailed architecture,
 failure matrix, deployment notes, and current limitations.
 
-## What's new in v2.0.0
+## What's new in v3.0.0
+
+| Area | v2.1.0 | v3.0.0 |
+|---|---|---|
+| ENTRY–EXIT channel | userspace `amneziawg-go`, AWG 3.0 | kernel module with the full AWG 3.1 field set; 0.85% loss on the channel instead of 6–8% |
+| mobile | separate profile | mobile/AWG3+ on the kernel module, full AWG 3.1 profile on UDP/8443 |
+| FRONT | none | third role: VLESS/XHTTP directly or through a CDN, REALITY service hop to ENTRY, installed with the cascade |
+| CDN | - | bodyless uplink compatible with Yandex Cloud CDN; ML-KEM-768 VLESS Encryption |
+| Obfuscation | fixed profile structure | AWG profile structure randomized per installation |
+| Reliability | - | the FRONT backend comes back by itself after reboot; VLESS egresses through EXIT, not ENTRY |
+| Checks | - | `awg-health` verifies the full AWG 3.1 profile and that the uplink passes the CDN |
+
+After upgrading an existing cascade, VLESS client profiles must be exported
+again (`vless-user export NAME`) and mobile profiles recreated. Full list in
+[CHANGELOG.md](CHANGELOG.md), section `[3.0.0]`.
+
+### What came in v2.0.0
 
 `v2.0.0` is a security-hardening package on top of `v1.0.0`: ports, MTU, DNS
 policy, and cascade routing are unchanged. Highlights:
@@ -141,14 +169,15 @@ and transit segments use separate interfaces, keys, and parameters.
 
 ### Validated compatibility
 
-| Path | `v2.1.0` validation |
+| Path | `v3.0.0` validation |
 |---|---|
-| Ubuntu 24.04 LTS | repeated clean deployments across different VPS providers, reboot, and strict audit |
-| ENTRY–EXIT | fresh AWG 3+ handshake, coordinated MTU, and post-reboot recovery |
-| mobile/AWG3+ | full AWG 3.1 profile implemented; clean VPS and 5.0.1.5+ client acceptance is required for this test branch |
+| Ubuntu 24.04 LTS | clean ENTRY + EXIT + FRONT install on real VPS; reboot and strict audit on live cascades |
+| ENTRY–EXIT | fresh AWG 3.1 handshake on the kernel module, coordinated MTU, and post-reboot recovery |
+| mobile/AWG3+ | full AWG 3.1 profile, real client connections |
 | KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
 | RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
-| Mobile allowlist | feature branch established a new session via compatible cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
+| Mobile allowlist | new session via Russian cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
+| Yandex Cloud CDN | bodyless uplink verified on real Xray v26.7.28 and with live probes through the CDN |
 
 This matrix records scenarios that were actually exercised. It cannot guarantee
 identical behavior across every carrier, hosting provider, and client version.
@@ -186,7 +215,7 @@ Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
 | health/audit gates | detect service, firewall, DNS, and routing drift |
 | Telegram | alerts on reboot, failover, and recovery |
 
-## Security in v2.1.0
+## Security
 
 | Boundary | Implementation |
 |---|---|
@@ -254,4 +283,4 @@ lawful use and provider terms.
 KalimeraWG is not an official Amnezia VPN project. Third-party notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v2.1.0 · two servers, one managed route</b></p>
+<p align="center"><b>KalimeraWG v3.0.0 · a managed cascade with a CDN fallback</b></p>
