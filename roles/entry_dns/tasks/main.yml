@@ -44,14 +44,14 @@
          if entry_dns_runtime_dot_override | length > 0
          else entry_dot_upstreams }}
 
-- name: "Загрузка: DNS ENTRY сервера — этап 1"
+- name: "Загрузка: DNS ENTRY сервера - этап 1"
   ansible.builtin.set_fact:
     entry_force_ru_domains: "{{ lookup('ansible.builtin.file', entry_ru_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
     entry_force_exit_domains: "{{ lookup('ansible.builtin.file', entry_se_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
     entry_direct_domains: "{{ lookup('ansible.builtin.file', entry_entry_domain_file).splitlines() | map('trim') | reject('match', '^(#|$)') | list }}"
   when: entry_domain_files_enabled | bool
 
-- name: "Проверка: DNS ENTRY сервера — этап 2"
+- name: "Проверка: DNS ENTRY сервера - этап 2"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -61,7 +61,7 @@
       - entry_dns_effective_dot_upstreams | length >= 1
     fail_msg: "Для DNS ENTRY требуются проверенные listeners, upstream-серверы и доменные политики"
 
-- name: "Проверка: DNS ENTRY сервера — этап 2b"
+- name: "Проверка: DNS ENTRY сервера - этап 2b"
   ansible.builtin.assert:
     quiet: true
     that:
@@ -69,7 +69,7 @@
     fail_msg: "entry_dns_default_via_exit требует корректный awg3_peer_tunnel_address (адрес EXIT на межсерверном канале)"
   when: entry_dns_default_via_exit | default(false) | bool
 
-- name: "Установка: DNS ENTRY сервера — этап 3"
+- name: "Установка: DNS ENTRY сервера - этап 3"
   ansible.builtin.apt:
     name:
       - dnsmasq
@@ -79,20 +79,20 @@
     state: present
     lock_timeout: 600
 
-- name: "Отключение: DNS ENTRY сервера — этап 4"
+- name: "Отключение: DNS ENTRY сервера - этап 4"
   ansible.builtin.systemd_service:
     name: unbound-resolvconf.service
     enabled: false
     state: stopped
     masked: true
 
-- name: "Очистка: DNS ENTRY сервера — этап 5"
+- name: "Очистка: DNS ENTRY сервера - этап 5"
   ansible.builtin.command:
     argv: [/usr/bin/systemctl, reset-failed, unbound-resolvconf.service]
   changed_when: false
   failed_when: false
 
-- name: "Создание: DNS ENTRY сервера — этап 6"
+- name: "Создание: DNS ENTRY сервера - этап 6"
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -105,7 +105,7 @@
     - "{{ entry_dns_candidate_root }}/unbound"
   changed_when: false
 
-- name: "Создание: DNS ENTRY сервера — этап 7"
+- name: "Создание: DNS ENTRY сервера - этап 7"
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -117,7 +117,7 @@
     - "{{ entry_unbound_config_dir }}"
     - /etc/systemd/system/dnsmasq.service.d
 
-- name: "Формирование: DNS ENTRY сервера — этап 8"
+- name: "Формирование: DNS ENTRY сервера - этап 8"
   ansible.builtin.template:
     src: dnsmasq.conf.j2
     dest: "{{ entry_dns_candidate_root }}/dnsmasq.conf"
@@ -126,7 +126,7 @@
     mode: "0600"
   changed_when: false
 
-- name: "Формирование: DNS ENTRY сервера — этап 9"
+- name: "Формирование: DNS ENTRY сервера - этап 9"
   ansible.builtin.template:
     src: "{{ item.template }}"
     dest: "{{ entry_dns_candidate_root }}/dnsmasq.d/{{ item.name }}"
@@ -136,7 +136,7 @@
   loop: "{{ entry_dnsmasq_managed_files }}"
   changed_when: false
 
-- name: "Формирование: DNS ENTRY сервера — этап 10"
+- name: "Формирование: DNS ENTRY сервера - этап 10"
   ansible.builtin.template:
     src: 90-awg-dot.conf.j2
     dest: "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
@@ -145,7 +145,7 @@
     mode: "0644"
   changed_when: false
 
-- name: "Проверка: DNS ENTRY сервера — этап 11"
+- name: "Проверка: DNS ENTRY сервера - этап 11"
   ansible.builtin.command:
     argv:
       - /usr/sbin/dnsmasq
@@ -153,14 +153,14 @@
       - "--conf-file={{ entry_dns_candidate_root }}/dnsmasq.conf"
   changed_when: false
 
-- name: "Проверка: DNS ENTRY сервера — этап 12"
+- name: "Проверка: DNS ENTRY сервера - этап 12"
   ansible.builtin.command:
     argv:
       - /usr/sbin/unbound-checkconf
       - "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
   changed_when: false
 
-- name: "Установка: DNS ENTRY сервера — этап 13"
+- name: "Установка: DNS ENTRY сервера - этап 13"
   ansible.builtin.include_tasks: manage_file.yml
   loop: "{{ entry_dnsmasq_managed_files }}"
   loop_control:
@@ -172,7 +172,7 @@
     entry_dns_backup_dir: "{{ entry_dns_backup_root }}/dnsmasq"
     entry_dns_service_to_restart: dnsmasq.service
 
-- name: "Установка: DNS ENTRY сервера — этап 14"
+- name: "Установка: DNS ENTRY сервера - этап 14"
   ansible.builtin.include_tasks: manage_file.yml
   vars:
     entry_dns_file:
@@ -182,7 +182,7 @@
     entry_dns_backup_dir: "{{ entry_dns_backup_root }}/unbound"
     entry_dns_service_to_restart: unbound.service
 
-- name: "Установка: DNS ENTRY сервера — этап 15"
+- name: "Установка: DNS ENTRY сервера - этап 15"
   ansible.builtin.template:
     src: dnsmasq-dependencies.conf.j2
     dest: /etc/systemd/system/dnsmasq.service.d/50-awg-managed.conf
@@ -193,13 +193,13 @@
     - Перезагрузить модули systemd для DNS
     - Перезапустить dnsmasq
 
-- name: "Удаление: DNS ENTRY сервера — этап 16"
+- name: "Удаление: DNS ENTRY сервера - этап 16"
   ansible.builtin.file:
     path: "{{ entry_dns_candidate_root }}"
     state: absent
   changed_when: false
 
-- name: "Проверка: DNS ENTRY сервера — этап 17"
+- name: "Проверка: DNS ENTRY сервера - этап 17"
   ansible.builtin.command:
     argv:
       - /usr/bin/ss
@@ -209,23 +209,23 @@
   register: entry_dns_unbound_listener
   changed_when: false
 
-- name: "Планирование: DNS ENTRY сервера — этап 18"
+- name: "Планирование: DNS ENTRY сервера - этап 18"
   ansible.builtin.command: /usr/bin/true
   changed_when: true
   when: entry_dns_unbound_listener.stdout | trim | length == 0
   notify: Перезапустить Unbound
 
-- name: "Применение: DNS ENTRY сервера — этап 19"
+- name: "Применение: DNS ENTRY сервера - этап 19"
   ansible.builtin.meta: flush_handlers
 
-- name: "Проверка: DNS ENTRY сервера — этап 20"
+- name: "Проверка: DNS ENTRY сервера - этап 20"
   ansible.builtin.wait_for:
     host: 127.0.0.1
     port: "{{ entry_dns_default_port }}"
     state: started
     timeout: 15
 
-- name: "Включение: DNS ENTRY сервера — этап 21"
+- name: "Включение: DNS ENTRY сервера - этап 21"
   ansible.builtin.systemd_service:
     name: "{{ item }}"
     enabled: true
@@ -235,7 +235,7 @@
     - unbound.service
     - dnsmasq.service
 
-- name: "Создание: DNS ENTRY сервера — этап 22"
+- name: "Создание: DNS ENTRY сервера - этап 22"
   ansible.builtin.file:
     path: "{{ entry_dns_resolved_dropin_dir }}"
     state: directory
@@ -243,7 +243,7 @@
     group: root
     mode: "0755"
 
-- name: "Настройка: DNS ENTRY сервера — этап 23"
+- name: "Настройка: DNS ENTRY сервера - этап 23"
   ansible.builtin.template:
     src: 60-kalimerawg-resolved.conf.j2
     dest: "{{ entry_dns_resolved_dropin_path }}"
@@ -252,13 +252,13 @@
     mode: "0644"
   register: entry_dns_resolved_dropin
 
-- name: "Включение: DNS ENTRY сервера — этап 24"
+- name: "Включение: DNS ENTRY сервера - этап 24"
   ansible.builtin.systemd_service:
     name: systemd-resolved.service
     enabled: true
     state: "{{ 'restarted' if entry_dns_resolved_dropin.changed else 'started' }}"
 
-- name: "Переключение: DNS ENTRY сервера — этап 25"
+- name: "Переключение: DNS ENTRY сервера - этап 25"
   ansible.builtin.file:
     path: /etc/resolv.conf
     src: /run/systemd/resolve/stub-resolv.conf
@@ -270,18 +270,18 @@
 # хостера в обход systemd-resolved. Без этого шага системные запросы (getent,
 # Python socket.getaddrinfo) идут напрямую к DNS хостера через NSS-модуль
 # dns, минуя локальный Unbound и политику no-logs, и блокируются строгим UFW.
-- name: "Настройка: DNS ENTRY сервера — этап 26"
+- name: "Настройка: DNS ENTRY сервера - этап 26"
   ansible.builtin.lineinfile:
     path: /etc/nsswitch.conf
     regexp: '^hosts:'
     line: 'hosts:          files resolve [!UNAVAIL=return] dns'
 
-- name: "Очистка: DNS ENTRY сервера — этап 27"
+- name: "Очистка: DNS ENTRY сервера - этап 27"
   ansible.builtin.command:
     argv: [/usr/bin/resolvectl, flush-caches]
   changed_when: false
 
-- name: "Проверка: DNS ENTRY сервера — этап 28"
+- name: "Проверка: DNS ENTRY сервера - этап 28"
   ansible.builtin.command:
     argv: [/usr/bin/getent, ahostsv4, example.com]
   register: entry_dns_system_resolution
@@ -292,7 +292,7 @@
     - entry_dns_system_resolution.rc == 0
     - entry_dns_system_resolution.stdout | trim | length > 0
   # При entry_dns_default_via_exit дефолтная ветка резолвится через EXIT, чья
-  # роль exit_dns выполняется позже в отдельном play — на этом шаге EXIT ещё
+  # роль exit_dns выполняется позже в отдельном play - на этом шаге EXIT ещё
   # не готов. Сквозная проверка перенесена в отдельный play после play EXIT
   # (playbooks/site.yml, "Проверка DNS зарубежной ветки через EXIT").
   when: not (entry_dns_default_via_exit | default(false) | bool)

@@ -1,8 +1,13 @@
 [Interface]
 PrivateKey = {{ vault_awg_entry_exit_private_key }}
 Address = {{ entry_exit_tunnel_address }}
-MTU = {{ entry_awg1_mtu }}
+ListenPort = {{ awg3_transit_listen_port }}
+MTU = {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
 Table = off
+{% if awg3_peer_tunnel_address | default('') | length > 0 %}
+PostUp = ip -4 route replace {{ awg3_peer_tunnel_address }}/32 dev %i
+PostDown = ip -4 route del {{ awg3_peer_tunnel_address }}/32 dev %i 2>/dev/null || true
+{% endif %}
 Jc = {{ entry_awg1_obfuscation.jc }}
 Jmin = {{ entry_awg1_obfuscation.jmin }}
 Jmax = {{ entry_awg1_obfuscation.jmax }}
@@ -15,6 +20,19 @@ H2 = {{ entry_awg1_obfuscation.h2 }}
 H3 = {{ entry_awg1_obfuscation.h3 }}
 H4 = {{ entry_awg1_obfuscation.h4 }}
 I1 = {{ entry_awg1_obfuscation.i1 }}
+I2 = {{ entry_awg1_obfuscation.i2 }}
+I3 = {{ entry_awg1_obfuscation.i3 }}
+I4 = {{ entry_awg1_obfuscation.i4 }}
+I5 = {{ entry_awg1_obfuscation.i5 }}
+HeaderProtectionKey = {{ vault_awg3_header_protection_key }}
+ContentPaddingAddition = {{ awg3_content_padding_addition }}
+RekeyAfterTime = {{ awg3_rekey_after_time }}
+RekeyTimeout = {{ awg3_rekey_timeout }}
+RejectAfterTime = {{ awg3_reject_after_time }}
+KeepaliveTimeout = {{ awg3_keepalive_timeout }}
+MaxHandshakeAttempts = {{ awg3_max_handshake_attempts }}
+RandomTrailers = {{ 'on' if awg3_random_trailers | bool else 'off' }}
+DisableCookies = {{ 'on' if awg3_disable_cookies | bool else 'off' }}
 
 [Peer]
 #_Name = exit

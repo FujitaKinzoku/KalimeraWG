@@ -1,0 +1,58 @@
+---
+- name: Настройка FRONT сервера
+  hosts: front
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений о FRONT сервере
+      ansible.builtin.setup:
+
+    - name: Определение внешнего интерфейса FRONT
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        ip -4 route show default | awk 'NR == 1 {print $5}'
+      args:
+        executable: /bin/bash
+      register: front_wan_interface_probe
+      changed_when: false
+
+    - name: Выбор внешнего интерфейса FRONT
+      ansible.builtin.set_fact:
+        exit_wan_interface: "{{ front_wan_interface_probe.stdout | trim }}"
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
+    - role: front
+      when: awg_adoption_mode == 'apply'
+    - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: runtime_secrets
+      when:
+        - awg_adoption_mode == 'apply'
+        - runtime_secrets_enabled | default(false) | bool
+    - role: health
+      when: awg_adoption_mode == 'apply'
+  post_tasks:
+    - name: Фиксация целостности после автономного применения FRONT
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-managed-integrity, seal]
+      changed_when: false
+      no_log: true
+      when: awg_adoption_mode == 'apply'

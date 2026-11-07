@@ -11,7 +11,9 @@ usage() {
 managed_files() {
     local path
     while IFS= read -r path; do
-        [[ -f "$path" ]] && printf '%s\n' "$path"
+        if [[ -f "$path" ]]; then
+            printf '%s\n' "$path"
+        fi
     done <<'EOF'
 /etc/sysctl.d/90-awg-managed.conf
 {{ security_journald_dropin_path | default('/etc/systemd/journald.conf.d/zz-kalimerawg-no-logs.conf') }}
@@ -22,6 +24,7 @@ managed_files() {
 /etc/ssh/sshd_config.d/00-awg-managed.conf
 /etc/profile.d/kalimera-shell-tools.sh
 /usr/local/sbin/awg-health
+/usr/local/sbin/kalimera-test
 /usr/local/sbin/server-audit
 /usr/local/sbin/awg-managed-integrity
 /usr/local/sbin/awg-kernel-guard
@@ -39,6 +42,10 @@ managed_files() {
 /etc/systemd/system/awg-quick@.service.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/{{ awg3_transit_service_name | default('awg3-transit.service') }}.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/sing-box.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/{{ front_backend_service_name | default('kalimera-front-backend.service') }}.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/{{ front_xray_service_name | default('xray.service') }}.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/nginx.service.d/90-kalimerawg-runtime-secrets.conf
+/etc/systemd/system/certbot.service.d/90-kalimerawg-runtime-secrets.conf
 /etc/systemd/system/awg-telegram-monitor.service.d/90-kalimerawg-runtime-secrets.conf
 {% endif %}
 {% if awg_node_role == 'entry' %}
@@ -51,8 +58,22 @@ managed_files() {
 /usr/local/sbin/awg-local-peer-apply
 /etc/systemd/system/awg-entry-routing.service
 /etc/systemd/system/awg-local-peer-apply.service
+{% if front_backend_enabled | default(false) | bool %}
+/etc/systemd/system/{{ front_backend_service_name | default('kalimera-front-backend.service') }}
+{{ front_backend_config_path | default('/etc/sing-box/front-backend.json') }}
 {% endif %}
-{% if awg3_transit_enabled | default(false) | bool or awg_node_role == 'exit' %}
+{% endif %}
+{% if awg_node_role == 'front' %}
+/etc/systemd/system/{{ front_xray_service_name | default('xray.service') }}
+{{ front_xray_config_path | default('/usr/local/etc/xray/config.json') }}
+{{ front_xray_base_config_path | default('/usr/local/etc/xray/config.base.json') }}
+{{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
+{{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
+{{ front_vless_user_command_path | default('/usr/local/sbin/vless-user') }}
+{{ front_nginx_site_path | default('/etc/nginx/sites-available/front-relay.conf') }}
+/etc/letsencrypt/renewal-hooks/deploy/90-kalimerawg-front
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool %}
 {{ awg3_transit_setup_path }}
 {{ awg3_transit_restart_path | default('/usr/local/sbin/awg3-transit-restart') }}
 /etc/systemd/system/{{ awg3_transit_service_name }}

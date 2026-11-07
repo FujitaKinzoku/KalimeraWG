@@ -51,7 +51,7 @@ PY
 }
 
 apply_directory() {
-    local iface="$1" directory="$2" required="$3" peer_file public_key preshared_key allowed_ip
+    local iface="$1" directory="$2" required="$3" tool="$4" peer_file public_key preshared_key allowed_ip
     if ! ip link show "$iface" >/dev/null 2>&1; then
         [[ "$required" == false ]] && return 0
         echo "Обязательный интерфейс $iface отсутствует; peers не применены." >&2
@@ -67,7 +67,7 @@ for peer_file in "$directory"/*.peer; do
     psk_file="$(mktemp /run/awg-local-peer-psk.XXXXXX)"
     chmod 0600 "$psk_file"
     printf '%s\n' "$preshared_key" >"$psk_file"
-    awg set "$iface" peer "$public_key" \
+    "$tool" set "$iface" peer "$public_key" \
         preshared-key "$psk_file" allowed-ips "$allowed_ip"
     rm -f "$psk_file"
     psk_file=""
@@ -80,18 +80,18 @@ validate_directory {{ awg_legacy_local_peer_dir | quote }}
 {% if entry_mobile_client_available | default(false) | bool %}
 validate_directory {{ awg_mobile_local_peer_dir | quote }}
 {% endif %}
-apply_directory {{ entry_client_interface | quote }} {{ awg_local_peer_dir | quote }} true
+apply_directory {{ entry_client_interface | quote }} {{ awg_local_peer_dir | quote }} true /usr/bin/awg
 {% if entry_legacy_client_available | default(false) | bool %}
 legacy_required=false
 if systemctl is-enabled --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     legacy_required=true
 fi
-apply_directory {{ entry_legacy_client_interface | quote }} {{ awg_legacy_local_peer_dir | quote }} "$legacy_required"
+apply_directory {{ entry_legacy_client_interface | quote }} {{ awg_legacy_local_peer_dir | quote }} "$legacy_required" /usr/bin/awg
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
 mobile_required=false
-if systemctl is-enabled --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+if systemctl is-enabled --quiet {{ awg3_mobile_service_name | quote }}; then
     mobile_required=true
 fi
-apply_directory {{ entry_mobile_client_interface | quote }} {{ awg_mobile_local_peer_dir | quote }} "$mobile_required"
+apply_directory {{ entry_mobile_client_interface | quote }} {{ awg_mobile_local_peer_dir | quote }} "$mobile_required" {{ awg3_mobile_tools_binary_path | quote }}
 {% endif %}

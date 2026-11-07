@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Интерактивный production-оркестратор ENTRY и EXIT без раскрытия секретов."""
+"""Интерактивный production-оркестратор ENTRY, EXIT и необязательного FRONT."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -230,6 +231,82 @@ def migrate_production_inventory(production: Path) -> bool:
     changed = False
     all_changed = False
 
+    hosts_path = production / "hosts.yml"
+    front_path = production / "group_vars" / "front.yml"
+    hosts_document = load_yaml(hosts_path) if hosts_path.is_file() else {}
+    front_hosts = (
+        hosts_document.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    front_present = isinstance(front_hosts, dict) and bool(front_hosts)
+    legacy_front = bool(entry_vars.get("front_relay_enabled", False)) or front_present
+    if legacy_front:
+        front_vars = load_yaml(front_path) if front_path.is_file() else {}
+        origin_domain = str(front_vars.get("front_origin_domain", "")).strip()
+        client_domain = str(front_vars.get("front_client_domain", "")).strip()
+        cdn_ready = bool(
+            front_vars.get("front_cdn_state") == "ready"
+            or (client_domain and client_domain != origin_domain)
+        )
+        access_modes = front_vars.get("front_access_modes")
+        if not isinstance(access_modes, list) or not access_modes:
+            access_modes = ["direct", "cdn"] if cdn_ready else ["direct"]
+        front_defaults: dict[str, object] = {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_active_id": str(front_vars.get("front_active_id", "front-1")),
+            "front_replacement_state": "active",
+            "front_access_modes": access_modes,
+            "front_cdn_state": "ready" if cdn_ready else "not_configured",
+            "front_direct_domain": str(
+                front_vars.get("front_direct_domain", origin_domain)
+            ),
+            "front_cdn_domain": str(
+                front_vars.get("front_cdn_domain", client_domain if cdn_ready else "")
+            ),
+            "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
+            "awg3_transit_enabled": False,
+        }
+        front_changed = False
+        for key, value in front_defaults.items():
+            if key not in front_vars:
+                front_vars[key] = value
+                front_changed = True
+        for key, value in {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_subscription_enabled": False,
+            "front_vless_encryption_enabled": True,
+            "front_xhttp_disguise_enabled": True,
+            "awg3_transit_enabled": False,
+        }.items():
+            if front_vars.get(key) != value:
+                front_vars[key] = value
+                front_changed = True
+        entry_front_defaults: dict[str, object] = {
+            "front_enabled": True,
+            "front_relay_enabled": True,
+            "front_backend_enabled": True,
+            "reality_fallback_enabled": True,
+            "reality_fallback_direct_client_enabled": False,
+        }
+        for key, value in entry_front_defaults.items():
+            if entry_vars.get(key) != value:
+                entry_vars[key] = value
+                changed = True
+        if front_changed:
+            yaml_write(front_path, front_vars)
+            changed = True
+        if front_changed or changed:
+            print(
+                "Production inventory обновлён: FRONT переведён на модель "
+                "front_enabled/access_modes/cdn_state с отдельным backend ENTRY."
+            )
+
     awg3_defaults_path = (
         production.parents[1] / "roles" / "awg3_transit" / "defaults" / "main.yml"
     )
@@ -244,6 +321,25 @@ def migrate_production_inventory(production: Path) -> bool:
                 "Production inventory обновлён: текущая проверенная сборка AWG3 "
                 "закреплена для воспроизводимых повторных deploy."
             )
+    # Отдельной сборки mobile AWG 3.1 больше нет - интерфейс поднимает
+    # kernel-модуль, поэтому и закреплять для него нечего. Оставшиеся в
+    # inventory ключи прежней сборки безвредны и просто перестают читаться.
+    mobile_build_keys = (
+        "awg3_mobile_go_version",
+        "awg3_mobile_go_archives",
+        "awg3_mobile_go_source_version",
+        "awg3_mobile_go_source_commit",
+        "awg3_mobile_tools_source_version",
+        "awg3_mobile_tools_source_commit",
+    )
+    if all_path.is_file() and any(key in all_vars for key in mobile_build_keys):
+        for key in mobile_build_keys:
+            all_vars.pop(key, None)
+        all_changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль, "
+            "закрепление отдельной сборки убрано."
+        )
     if (
         entry_vars.get("entry_ru_tun_stack") == "mixed"
         and entry_vars.get("entry_ru_endpoint_independent_nat") is False
@@ -255,6 +351,9 @@ def migrate_production_inventory(production: Path) -> bool:
 
     old_mobile_public_port = entry_vars.pop("entry_mobile_client_public_port", None)
     old_mobile_internal_port = entry_vars.pop("entry_mobile_client_internal_port", None)
+    old_mobile_i1_mode = entry_vars.pop("entry_mobile_i1_mode", None)
+    if old_mobile_i1_mode is not None:
+        changed = True
     if old_mobile_public_port is not None or old_mobile_internal_port is not None:
         entry_vars["entry_mobile_legacy_public_port"] = int(
             old_mobile_public_port if old_mobile_public_port is not None else 53
@@ -275,10 +374,40 @@ def migrate_production_inventory(production: Path) -> bool:
         entry_vars["entry_mobile_client_listen_port"] = 8443
         changed = True
 
-    if entry_vars.get("entry_mobile_i1_mode") == "quic-ios-test":
-        entry_vars["entry_mobile_i1_mode"] = "quic-ios"
+    if (
+        entry_vars.get("entry_mobile_client_available", False)
+        and (
+            entry_vars.get("entry_mobile_profile_generation") != "awg3.1"
+            or not awg_mobile_awg3_profile_is_complete(
+                entry_vars.get("entry_mobile_awg_obfuscation")
+            )
+        )
+    ):
+        entry_vars.update(
+            {
+                "entry_mobile_profile_generation": "awg3.1",
+                "entry_mobile_awg_obfuscation": awg_mobile_awg3_obfuscation(),
+            }
+        )
         changed = True
-        print("Production inventory обновлён: проверенный QUIC-профиль iOS закреплён как основной.")
+        print(
+            "Production inventory обновлён: профиль mobile заменён на mobile/AWG3+. "
+            "Ранее выданные mobile-конфиги нужно выпустить заново."
+        )
+
+    # Переход mobile/AWG3+ с отдельного userspace-движка на kernel-модуль.
+    # Отдельно от блока выше: имя службы меняется без смены профиля, поэтому
+    # переиздавать клиентские конфиги не требуется.
+    if (
+        entry_vars.get("entry_mobile_client_available", False)
+        and entry_vars.get("entry_mobile_service_name") != MOBILE_SERVICE_NAME
+    ):
+        entry_vars["entry_mobile_service_name"] = MOBILE_SERVICE_NAME
+        changed = True
+        print(
+            "Production inventory обновлён: mobile/AWG3+ переведён на kernel-модуль "
+            "AmneziaWG; ранее выданные конфиги остаются действительными."
+        )
 
     cps_changed = False
     for document, profile_names in (
@@ -323,7 +452,7 @@ def migrate_production_inventory(production: Path) -> bool:
 
 
 def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
-    """Добавить отсутствующий mobile-профиль в существующий production inventory."""
+    """Добавить отсутствующий mobile/AWG3+-профиль в production inventory."""
     entry_path = production / "group_vars" / "entry.yml"
     vault_path = production / "group_vars" / "all" / "vault.yml"
     if not entry_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
@@ -392,7 +521,8 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
         "entry_mobile_legacy_public_port": 53,
         "entry_mobile_legacy_internal_port": 39746,
         "entry_mobile_client_mtu": 1380,
-        "entry_mobile_i1_mode": "quic-ios",
+        "entry_mobile_service_name": MOBILE_SERVICE_NAME,
+        "entry_mobile_profile_generation": "awg3.1",
     }
     mobile_network_keys = {
         "entry_mobile_client_address",
@@ -409,7 +539,7 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
                 entry_vars[key] = value
                 entry_changed = True
     if not isinstance(entry_vars.get("entry_mobile_awg_obfuscation"), dict):
-        entry_vars["entry_mobile_awg_obfuscation"] = awg_mobile_quic_obfuscation()
+        entry_vars["entry_mobile_awg_obfuscation"] = awg_mobile_awg3_obfuscation()
         entry_changed = True
 
     vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
@@ -426,6 +556,9 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
     vault_changed = False
     if not vault_document.get("vault_awg_entry_mobile_private_key"):
         vault_document["vault_awg_entry_mobile_private_key"] = awg_private_key()
+        vault_changed = True
+    if not vault_document.get("vault_awg_entry_mobile_header_protection_key"):
+        vault_document["vault_awg_entry_mobile_header_protection_key"] = awg_private_key()
         vault_changed = True
     if not isinstance(vault_document.get("vault_entry_mobile_client_peers"), list):
         vault_document["vault_entry_mobile_client_peers"] = []
@@ -449,10 +582,542 @@ def enable_mobile_profile(production: Path, vault_password: Path) -> bool:
 
     if entry_changed or vault_changed:
         print(
-            "Production inventory обновлён: добавлен отдельный mobile AWG "
+            "Production inventory обновлён: добавлен отдельный mobile/AWG3+ "
             f"{mobile_network} на UDP/8443; интерфейс пока выключен."
         )
     return entry_changed or vault_changed
+
+
+def ensure_mobile_awg3_vault_material(
+    production: Path, vault_password: Path
+) -> bool:
+    """Добавить отдельный HeaderProtectionKey при переходе на mobile/AWG3+."""
+    entry_path = production / "group_vars" / "entry.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not entry_path.is_file() or not vault_path.is_file():
+        return False
+    entry_vars = load_yaml(entry_path)
+    if not entry_vars.get("entry_mobile_client_available", False):
+        return False
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    if not vault_secret:
+        fail("Файл пароля Ansible Vault пуст")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    if document.get("vault_awg_entry_mobile_header_protection_key"):
+        return False
+    document["vault_awg_entry_mobile_header_protection_key"] = awg_private_key()
+    encrypted = vault_lib.encrypt(yaml.safe_dump(document, sort_keys=False).encode())
+    temporary = vault_path.with_name(f".{vault_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        secure_write(temporary, encrypted)
+        os.replace(temporary, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    print("Production Vault обновлён: создан отдельный HeaderProtectionKey mobile/AWG3+.")
+    return True
+
+
+_DOMAIN_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def enable_front_profile(production: Path, vault_password: Path) -> bool:
+    """Добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) к production inventory.
+
+    В отличие от enable_mobile_profile это добавляет НОВЫЙ хост, а не просто
+    флаги существующему - требует интерактивных данных подключения. См.
+    docs/front-relay.md для ручных шагов (DNS/CDN), которые нужны отдельно.
+    """
+    hosts_path = production / "hosts.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    if not hosts_path.is_file() or not entry_path.is_file() or not vault_password.is_file():
+        fail("Для включения FRONT-релея нужны production inventory и пароль Vault")
+
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.setdefault("all", {}).setdefault("children", {})
+    if "front" in children and children["front"].get("hosts"):
+        print("FRONT-релей уже подключён к production inventory; повторное включение не требуется.")
+        return False
+
+    ui_panel(
+        "FRONT-РЕЛЕЙ: CDN-ФРОНТИРОВАННЫЙ VLESS ДЛЯ РЕЖИМА БЕЛЫХ СПИСКОВ",
+        [
+            "Отдельная VPS с Nginx+Xray-core и служебным каналом до ENTRY.",
+            "Прямой режим работает без CDN. CDN-режим включается только после",
+            "подтверждения готового внешнего CDN-ресурса.",
+        ],
+        "cyan",
+    )
+    front_host = prompt("IP-адрес или DNS-имя FRONT сервера")
+    if not front_host:
+        fail("Необходимо указать адрес FRONT сервера")
+    require_public_endpoint(front_host, "Адрес FRONT сервера")
+    # Постоянный публичный IPv4, а не front_host как есть (может быть
+    # DNS-именем) - нужен для изолированного UFW-правила на ENTRY, тем же
+    # способом, что security_interserver_peer_ipv4 для пары ENTRY/EXIT.
+    front_public_ipv4 = resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
+    front_user = prompt("Пользователь SSH FRONT сервера", "root")
+    front_port = prompt_port("Текущий SSH-порт FRONT сервера", 22)
+    front_new_port = prompt_port("Новый управляемый SSH-порт FRONT сервера", 56777)
+    if front_new_port < 1024:
+        fail("Управляемый SSH-порт FRONT должен находиться в диапазоне 1024–65535")
+    front_password = getpass.getpass("Пароль SSH FRONT сервера (ввод скрыт): ")
+    if not front_password:
+        fail("Начальный пароль SSH FRONT не может быть пустым")
+
+    front_origin_domain = prompt("Origin-домен FRONT (A-запись уже указывает на этот сервер)")
+    if not _DOMAIN_RE.match(front_origin_domain or ""):
+        fail("Origin-домен FRONT должен быть корректным DNS-именем")
+    front_certbot_email = prompt("E-mail для уведомлений Let's Encrypt/Certbot")
+    if not _EMAIL_RE.match(front_certbot_email or ""):
+        fail("Некорректный e-mail для Certbot")
+
+    ui_panel(
+        "РЕЖИМ ДОСТУПА FRONT",
+        [
+            "1 · прямой TLS+XHTTP через FRONT без CDN",
+            "2 · TLS+XHTTP только через уже готовый CDN",
+            "3 · оба варианта одновременно",
+        ],
+        "cyan",
+    )
+    access_choice = prompt("Выберите режим FRONT", "1")
+    access_modes_by_choice = {
+        "1": ["direct"],
+        "2": ["cdn"],
+        "3": ["direct", "cdn"],
+    }
+    if access_choice not in access_modes_by_choice:
+        fail("Выбран неподдерживаемый режим FRONT")
+    front_access_modes = access_modes_by_choice[access_choice]
+    front_direct_domain = front_origin_domain
+    front_cdn_domain = ""
+    front_cdn_state = "not_configured"
+    if "direct" in front_access_modes:
+        print(f"Домен прямого доступа FRONT: {front_origin_domain}")
+    if "cdn" in front_access_modes:
+        if not prompt_bool("CDN-ресурс уже создан и готов к проверке", False):
+            fail(
+                "CDN-режим нельзя включить до готовности ресурса. "
+                "Выберите прямой режим и добавьте CDN следующим deploy."
+            )
+        front_cdn_domain = prompt("Публичный домен готового CDN-ресурса")
+        if not _DOMAIN_RE.match(front_cdn_domain or ""):
+            fail("Публичный домен CDN должен быть корректным DNS-именем")
+        front_cdn_state = "ready"
+
+    entry_vars = load_yaml(entry_path)
+    entry_changed = False
+    for key, value in {
+        "front_enabled": True,
+        "front_relay_enabled": True,
+        "front_backend_enabled": True,
+        "reality_fallback_enabled": True,
+        "reality_fallback_direct_client_enabled": False,
+        "front_public_ipv4": front_public_ipv4,
+    }.items():
+        if entry_vars.get(key) != value:
+            entry_vars[key] = value
+            entry_changed = True
+    if entry_changed:
+        yaml_write(entry_path, entry_vars)
+
+    front_vars = {
+        "awg_node_role": "front",
+        "front_enabled": True,
+        "front_relay_enabled": True,
+        "front_active_id": "front-1",
+        "front_replacement_state": "active",
+        "front_access_modes": front_access_modes,
+        "front_cdn_state": front_cdn_state,
+        "front_direct_domain": front_direct_domain,
+        "front_cdn_domain": front_cdn_domain,
+        "front_client_domain": (
+            front_cdn_domain if front_access_modes == ["cdn"] else front_direct_domain
+        ),
+        "front_subscription_enabled": False,
+        "front_vless_encryption_enabled": True,
+        "front_xhttp_disguise_enabled": True,
+        "awg3_transit_enabled": False,
+        # Дефолт роли ("/api/stream") - общеизвестный путь и лёгкий
+        # fingerprint; путь генерируется здесь, потому что он должен быть
+        # постоянным (входит в клиентские ссылки и правила кэширования CDN),
+        # а не пересчитываться при каждом deploy.
+        "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+        "front_origin_domain": front_origin_domain,
+        "front_certbot_email": front_certbot_email,
+    }
+    yaml_write(front_path, front_vars)
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    front_password = bootstrap_key(
+        front_host,
+        front_user,
+        front_port,
+        front_password,
+        ssh_public,
+        "FRONT сервер",
+    )
+    front_automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+        front_host,
+        front_user,
+        front_port,
+        ssh_private,
+    )
+    if not front_automation_source_ipv4:
+        fail("FRONT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+    if front_user != "root":
+        vault_path = production / "group_vars" / "all" / "vault.yml"
+        vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+        vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+        try:
+            vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+        except Exception as error:
+            fail(f"Не удалось открыть Vault для FRONT: {type(error).__name__}")
+        if not isinstance(vault_document, dict):
+            fail("Production Vault должен содержать словарь переменных")
+        vault_document["vault_front_become_password"] = front_password
+        encrypted = vault_lib.encrypt(
+            yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
+        )
+        temporary = vault_path.with_name(
+            f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            secure_write(temporary, encrypted)
+            os.replace(temporary, vault_path)
+            vault_path.chmod(0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
+    front_host_vars: dict[str, object] = {
+        "ansible_host": front_host,
+        "ansible_user": front_user,
+        "ansible_port": front_port,
+        "ansible_become": True,
+        "ansible_ssh_private_key_file": str(ssh_private),
+        "ssh_listen_port": front_new_port,
+        "security_allow_ssh_port_change": front_port != front_new_port,
+        "security_automation_source_ipv4": front_automation_source_ipv4,
+    }
+    if front_user != "root":
+        front_host_vars["ansible_become_password"] = "{{ vault_front_become_password }}"
+    children["front"] = {"hosts": {"front-managed": front_host_vars}}
+    yaml_write(hosts_path, hosts_document)
+
+    print(
+        "Production inventory обновлён: добавлен FRONT-релей "
+        f"({front_origin_domain}); он будет применён текущим deploy."
+    )
+    return True
+
+
+def _front_replacement_state_root() -> Path:
+    return Path.home() / ".local" / "share" / "awg-iac" / "production" / "front-replacement"
+
+
+def _read_front_users_over_ssh(host_vars: dict[str, object]) -> dict[str, object]:
+    host = str(host_vars.get("ansible_host", ""))
+    user = str(host_vars.get("ansible_user", "kalimera"))
+    port = int(host_vars.get("ansible_port", 22))
+    identity = str(
+        host_vars.get(
+            "ansible_ssh_private_key_file",
+            Path.home() / ".ssh" / "awg-iac-production",
+        )
+    )
+    result = subprocess.run(
+        [
+            require_command("ssh"),
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=15",
+            "-o", "ConnectionAttempts=1",
+            "-o", "StrictHostKeyChecking=yes",
+            "-i", identity,
+            "-p", str(port),
+            f"{user}@{host}",
+            "sudo -n /usr/local/libexec/kalimera-admin-command vless-user backup",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(
+            "Не удалось получить зашифрованный реестр пользователей со старого "
+            "FRONT. Замена остановлена до изменения inventory."
+        )
+    try:
+        state = json.loads(result.stdout)
+    except ValueError:
+        fail("Старый FRONT вернул некорректный реестр VLESS-пользователей")
+    if (
+        not isinstance(state, dict)
+        or state.get("schema") != 1
+        or not isinstance(state.get("users"), list)
+        or not state["users"]
+    ):
+        fail("Реестр VLESS-пользователей старого FRONT не прошёл проверку")
+    return state
+
+
+def prepare_front_replacement(production: Path, vault_password: Path) -> bool:
+    """Подготовить новый FRONT, сохранив рабочий CDN-путь до commit."""
+    hosts_path = production / "hosts.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not all(path.is_file() for path in (hosts_path, entry_path, front_path, vault_path)):
+        fail("Для замены FRONT нужен полный production inventory")
+
+    hosts_document = load_yaml(hosts_path)
+    front_hosts = (
+        hosts_document.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    if not isinstance(front_hosts, dict) or len(front_hosts) != 1:
+        fail("Безопасная замена требует ровно один действующий FRONT")
+    front_vars = load_yaml(front_path)
+    if front_vars.get("front_replacement_state", "active") != "active":
+        fail("Замена FRONT уже подготовлена; используйте commit или rollback")
+
+    old_name, old_host_vars = next(iter(front_hosts.items()))
+    if not isinstance(old_host_vars, dict):
+        fail("Некорректные параметры действующего FRONT")
+    old_public_ipv4 = resolve_single_public_ipv4(
+        str(old_host_vars.get("ansible_host", "")), "Адрес действующего FRONT"
+    )
+    users_state = _read_front_users_over_ssh(old_host_vars)
+
+    ui_panel(
+        "БЕЗОПАСНАЯ ЗАМЕНА FRONT",
+        [
+            "Старый FRONT и его UFW-доступ сохраняются до отдельного commit.",
+            "Домен CDN, XHTTP path, UUID пользователей и backend ENTRY не меняются.",
+            "Для нового FRONT нужен новый origin-домен с готовой A-записью.",
+        ],
+        "cyan",
+    )
+    new_host = prompt("IP-адрес или DNS-имя нового FRONT")
+    require_public_endpoint(new_host, "Адрес нового FRONT")
+    new_public_ipv4 = resolve_single_public_ipv4(new_host, "Адрес нового FRONT")
+    if new_public_ipv4 == old_public_ipv4:
+        fail("Новый FRONT должен иметь другой публичный IPv4")
+    new_user = prompt("Пользователь SSH нового FRONT", "root")
+    new_port = prompt_port("Текущий SSH-порт нового FRONT", 22)
+    managed_port = prompt_port(
+        "Новый управляемый SSH-порт нового FRONT",
+        int(old_host_vars.get("ssh_listen_port", 56777)),
+    )
+    if managed_port < 1024:
+        fail("Управляемый SSH-порт FRONT должен быть не ниже 1024")
+    password = getpass.getpass("Пароль SSH нового FRONT (ввод скрыт): ")
+    if not password:
+        fail("Начальный пароль нового FRONT не может быть пустым")
+    new_origin = prompt("Новый origin-домен (A-запись уже указывает на новый FRONT)")
+    if not _DOMAIN_RE.match(new_origin or ""):
+        fail("Origin-домен нового FRONT должен быть корректным DNS-именем")
+    certbot_email = prompt(
+        "E-mail Certbot",
+        str(front_vars.get("front_certbot_email", "")),
+    )
+    if not _EMAIL_RE.match(certbot_email or ""):
+        fail("Некорректный e-mail для Certbot")
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    password = bootstrap_key(
+        new_host, new_user, new_port, password, ssh_public, "Новый FRONT сервер"
+    )
+    source_ipv4 = remote_observed_ssh_source_ipv4(
+        new_host, new_user, new_port, ssh_private
+    )
+    if not source_ipv4:
+        fail("Новый FRONT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+
+    backup_root = _front_replacement_state_root()
+    backup_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup_dir = backup_root / secrets.token_hex(8)
+    backup_dir.mkdir(mode=0o700)
+    for source in (hosts_path, entry_path, front_path, vault_path):
+        target = backup_dir / source.name
+        secure_write(target, source.read_bytes())
+    secure_write(
+        backup_root / "current.json",
+        json.dumps({"backup": str(backup_dir)}, ensure_ascii=False).encode("utf-8"),
+    )
+
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        vault_document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось открыть Vault для замены FRONT: {type(error).__name__}")
+    if not isinstance(vault_document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    vault_document["vault_front_vless_users"] = users_state
+    if new_user != "root":
+        vault_document["vault_front_become_password"] = password
+    encrypted = vault_lib.encrypt(
+        yaml.safe_dump(vault_document, sort_keys=False).encode("utf-8")
+    )
+    temporary_vault = vault_path.with_name(
+        f".{vault_path.name}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        secure_write(temporary_vault, encrypted)
+        os.replace(temporary_vault, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary_vault.unlink(missing_ok=True)
+
+    entry_vars = load_yaml(entry_path)
+    entry_vars.update(
+        {
+            "front_public_ipv4": new_public_ipv4,
+            "front_previous_public_ipv4": old_public_ipv4,
+            "front_replacement_state": "prepared",
+        }
+    )
+    yaml_write(entry_path, entry_vars)
+
+    modes = front_vars.get("front_access_modes", ["direct"])
+    front_vars.update(
+        {
+            "front_active_id": f"front-{secrets.token_hex(3)}",
+            "front_replacement_state": "prepared",
+            "front_previous_public_ipv4": old_public_ipv4,
+            "front_previous_origin_domain": front_vars.get("front_origin_domain", ""),
+            "front_origin_domain": new_origin,
+            "front_direct_domain": new_origin,
+            "front_client_domain": (
+                str(front_vars.get("front_cdn_domain", ""))
+                if modes == ["cdn"]
+                else new_origin
+            ),
+            "front_certbot_email": certbot_email,
+        }
+    )
+    yaml_write(front_path, front_vars)
+
+    replacement_host_vars: dict[str, object] = {
+        "ansible_host": new_host,
+        "ansible_user": new_user,
+        "ansible_port": new_port,
+        "ansible_become": True,
+        "ansible_ssh_private_key_file": str(ssh_private),
+        "ssh_listen_port": managed_port,
+        "security_allow_ssh_port_change": new_port != managed_port,
+        "security_automation_source_ipv4": source_ipv4,
+    }
+    if new_user != "root":
+        replacement_host_vars["ansible_become_password"] = "{{ vault_front_become_password }}"
+    hosts_document["all"]["children"]["front"]["hosts"] = {
+        old_name: replacement_host_vars
+    }
+    yaml_write(hosts_path, hosts_document)
+    print(
+        "Новый FRONT подготовлен в inventory. Старый FRONT останется разрешён "
+        "на ENTRY до --commit-front-replacement."
+    )
+    return True
+
+
+def rollback_front_replacement(production: Path) -> bool:
+    marker = _front_replacement_state_root() / "current.json"
+    if not marker.is_file():
+        fail("Резервная копия незавершённой замены FRONT не найдена")
+    try:
+        backup_dir = Path(json.loads(marker.read_text(encoding="utf-8"))["backup"])
+    except (OSError, ValueError, KeyError):
+        fail("Повреждён маркер резервной копии FRONT")
+    mapping = {
+        "hosts.yml": production / "hosts.yml",
+        "entry.yml": production / "group_vars" / "entry.yml",
+        "front.yml": production / "group_vars" / "front.yml",
+        "vault.yml": production / "group_vars" / "all" / "vault.yml",
+    }
+    for name, target in mapping.items():
+        source = backup_dir / name
+        if not source.is_file():
+            fail("Резервная копия FRONT неполна")
+        secure_write(target, source.read_bytes())
+    print(
+        "Inventory прежнего FRONT восстановлен; deploy повторно применит его "
+        "состояние. Маркер отката будет удалён только после успешной проверки."
+    )
+    return True
+
+
+def commit_front_replacement(production: Path) -> None:
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    entry_vars = load_yaml(entry_path)
+    front_vars = load_yaml(front_path)
+    if front_vars.get("front_replacement_state") != "prepared":
+        fail("Подготовленная замена FRONT не найдена")
+    if not prompt_bool(
+        "Новая VLESS-сессия через новый FRONT успешно проверена",
+        False,
+    ):
+        fail("Commit отменён; старый FRONT остаётся разрешён на ENTRY")
+    if "cdn" in front_vars.get("front_access_modes", []):
+        if not prompt_bool(
+            "CDN origin переключён на новый FRONT и клиентская сессия проверена",
+            False,
+        ):
+            fail("Commit отменён; старый FRONT остаётся разрешён на ENTRY")
+    previous = str(entry_vars.get("front_previous_public_ipv4", ""))
+    entry_vars["front_replacement_state"] = "active"
+    front_vars["front_replacement_state"] = "active"
+    yaml_write(entry_path, entry_vars)
+    yaml_write(front_path, front_vars)
+    # Старый адрес пока сохраняется в inventory, чтобы роль security могла
+    # удалить точное временное правило UFW. После успешного deploy поля будут
+    # удалены окончательно.
+    if not previous:
+        fail("В inventory отсутствует IPv4 прежнего FRONT")
+
+
+def finish_front_replacement(production: Path) -> None:
+    entry_path = production / "group_vars" / "entry.yml"
+    front_path = production / "group_vars" / "front.yml"
+    entry_vars = load_yaml(entry_path)
+    front_vars = load_yaml(front_path)
+    previous_ipv4 = str(entry_vars.get("front_previous_public_ipv4", "")).strip()
+    previous_origin = str(front_vars.get("front_previous_origin_domain", "")).strip()
+    for document in (entry_vars, front_vars):
+        document.pop("front_previous_public_ipv4", None)
+        document.pop("front_previous_origin_domain", None)
+    yaml_write(entry_path, entry_vars)
+    yaml_write(front_path, front_vars)
+    marker = _front_replacement_state_root() / "current.json"
+    marker.unlink(missing_ok=True)
+    print("Замена FRONT подтверждена; временный доступ прежнего FRONT удалён.")
+    if previous_ipv4:
+        previous_label = previous_ipv4
+        if previous_origin:
+            previous_label = f"{previous_origin} ({previous_ipv4})"
+        print(
+            f"Старый FRONT {previous_label} больше не входит в каскад. "
+            "Выключите или переустановите его после контрольной проверки нового FRONT."
+        )
 
 
 def prompt(label: str, default: str | None = None) -> str:
@@ -580,6 +1245,30 @@ def resolve_single_public_ipv4(value: str, label: str) -> str:
     return address
 
 
+def probe_reality_dest(host: str, port: int = 443, attempts: int = 3) -> bool:
+    """Проверить, что dest-сайт REALITY стабильно отвечает TLS 1.3 одним
+    и тем же сертификатом - та же логика (три пробы), что применяется
+    сервером при deploy и в reality-dest-switch."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    fingerprints: set[str] = set()
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=8) as sock:
+                with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+                    if tls_sock.version() != "TLSv1.3":
+                        return False
+                    der = tls_sock.getpeercert(binary_form=True)
+                    if not der:
+                        return False
+                    fingerprints.add(hashlib.sha256(der).hexdigest())
+        except (OSError, ssl.SSLError):
+            return False
+    return len(fingerprints) == 1
+
+
 def detect_local_public_ipv4(route_target: str) -> str:
     """Определить публичный IPv4 локального интерфейса по реальному маршруту.
 
@@ -657,6 +1346,19 @@ def cleanup_deployment(repo: Path, hosts: Path, vault_password: Path) -> None:
     ansible_playbook = shutil.which("ansible-playbook")
     if not ansible_playbook or not hosts.is_file() or not vault_password.is_file():
         return
+    try:
+        hosts_document = load_yaml(hosts)
+        all_vars_path = hosts.parent / "group_vars" / "all" / "main.yml"
+        all_vars = load_yaml(all_vars_path) if all_vars_path.is_file() else {}
+        recover_saved_admin_access(
+            hosts_document,
+            hosts,
+            str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
+        )
+    except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError):
+        # Cleanup остаётся best-effort даже для частично записанного inventory.
+        pass
     try:
         subprocess.run(
             [
@@ -754,6 +1456,7 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     all_path = production / "group_vars" / "all" / "main.yml"
     entry_path = production / "group_vars" / "entry.yml"
     exit_path = production / "group_vars" / "exit.yml"
+    front_path = production / "group_vars" / "front.yml"
     hosts_path = production / "hosts.yml"
     if not all(
         path.is_file()
@@ -774,11 +1477,14 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     children = hosts_document.get("all", {}).get("children", {})
     entry_hosts = children.get("entry", {}).get("hosts", {})
     exit_hosts = children.get("exit", {}).get("hosts", {})
+    front_hosts = children.get("front", {}).get("hosts", {})
     if not isinstance(entry_hosts, dict) or len(entry_hosts) != 1:
         fail("Пороговое хранилище требует ровно один ENTRY сервер")
     if not isinstance(exit_hosts, dict) or not exit_hosts:
         fail("Пороговое хранилище требует хотя бы один EXIT сервер")
-    active_hosts = list(entry_hosts) + list(exit_hosts)
+    if not isinstance(front_hosts, dict):
+        front_hosts = {}
+    active_hosts = list(entry_hosts) + list(exit_hosts) + list(front_hosts)
 
     changed = False
     shares = document.get("vault_runtime_secret_shares")
@@ -847,7 +1553,13 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
     )
 
     for share_index, host in enumerate(active_hosts, start=1):
-        host_group = entry_hosts if host in entry_hosts else exit_hosts
+        host_group = (
+            entry_hosts
+            if host in entry_hosts
+            else exit_hosts
+            if host in exit_hosts
+            else front_hosts
+        )
         host_values = host_group[host]
         if not isinstance(host_values, dict):
             host_values = {}
@@ -855,7 +1567,7 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         if host_values.get("runtime_secrets_share_index") != share_index:
             host_values["runtime_secrets_share_index"] = share_index
             changed = True
-        if host in exit_hosts:
+        if host in exit_hosts or host in front_hosts:
             advertise_ipv4 = host_values.get("ansible_host", host)
             if host_values.get("runtime_secrets_advertise_ipv4") != advertise_ipv4:
                 host_values["runtime_secrets_advertise_ipv4"] = advertise_ipv4
@@ -863,15 +1575,22 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
 
     existing_entry_vars = load_yaml(entry_path)
     existing_exit_vars = load_yaml(exit_path)
-    for path, index, peers in (
-        (entry_path, 1, "{{ groups['exit'] | default([]) }}"),
+    all_runtime_peers = (
+        "{{ ((groups['entry'] | default([])) + "
+        "(groups['exit'] | default([])) + (groups['front'] | default([]))) "
+        "| reject('equalto', inventory_hostname) | list }}"
+    )
+    group_runtime_values: list[tuple[Path, int, str]] = [
+        (entry_path, 1, all_runtime_peers),
         (
             exit_path,
             2,
-            "{{ (groups['entry'] | default([])) + "
-            "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}",
+            all_runtime_peers,
         ),
-    ):
+    ]
+    if front_hosts:
+        group_runtime_values.append((front_path, 3, all_runtime_peers))
+    for path, index, peers in group_runtime_values:
         values = load_yaml(path)
         if values.get("runtime_secrets_share_index") != index:
             values["runtime_secrets_share_index"] = index
@@ -879,11 +1598,11 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         if values.get("runtime_secrets_peer_inventory_hosts") != peers:
             values["runtime_secrets_peer_inventory_hosts"] = peers
             changed = True
-        advertise = (
-            existing_exit_vars.get("security_interserver_peer_ipv4")
-            if index == 1
-            else existing_entry_vars.get("security_interserver_peer_ipv4")
-        )
+        advertise = None
+        if index == 1:
+            advertise = existing_exit_vars.get("security_interserver_peer_ipv4")
+        elif index == 2:
+            advertise = existing_entry_vars.get("security_interserver_peer_ipv4")
         if not advertise:
             advertise = (
                 "{{ entry_public_endpoint | default(ansible_host) }}"
@@ -959,11 +1678,15 @@ def ensure_admin_account_material(
         fail("Production Vault должен содержать словарь переменных")
 
     all_vars = load_yaml(all_path)
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.get("all", {}).get("children", {})
+    front_hosts = children.get("front", {}).get("hosts", {})
+    has_front = isinstance(front_hosts, dict) and bool(front_hosts)
     passwords_delivered = all_vars.get("security_account_passwords_delivered")
     redeliver_undelivered = bool(
         regenerate_undelivered and passwords_delivered is False
     )
-    required = (
+    required: list[tuple[str, str | None, str]] = [
         (
             "vault_entry_kalimera_password_hash",
             "vault_entry_kalimera_password",
@@ -976,7 +1699,18 @@ def ensure_admin_account_material(
             "EXIT · kalimera",
         ),
         ("vault_exit_root_password_hash", None, "EXIT · root"),
-    )
+    ]
+    if has_front:
+        required.extend(
+            [
+                (
+                    "vault_front_kalimera_password_hash",
+                    "vault_front_kalimera_password",
+                    "FRONT · kalimera",
+                ),
+                ("vault_front_root_password_hash", None, "FRONT · root"),
+            ]
+        )
     passwords_for_delivery: dict[str, str] = {}
     vault_changed = False
     admin_material_changed = False
@@ -1011,7 +1745,6 @@ def ensure_admin_account_material(
                 vault_document[automation_password_key] = password
                 admin_material_changed = True
 
-    hosts_document = load_yaml(hosts_path)
     changed = vault_changed
     transition_required = admin_material_changed or not bool(
         all_vars.get("security_manage_admin_account", False)
@@ -1038,8 +1771,7 @@ def ensure_admin_account_material(
             all_vars[key] = value
             changed = True
 
-    children = hosts_document.get("all", {}).get("children", {})
-    host_mappings = (
+    host_mappings: list[tuple[object, str, str]] = [
         (
             children.get("entry", {}).get("hosts", {}),
             "{{ vault_entry_kalimera_password_hash }}",
@@ -1050,10 +1782,18 @@ def ensure_admin_account_material(
             "{{ vault_exit_kalimera_password_hash }}",
             "{{ vault_exit_root_password_hash }}",
         ),
-    )
+    ]
+    if has_front:
+        host_mappings.append(
+            (
+                front_hosts,
+                "{{ vault_front_kalimera_password_hash }}",
+                "{{ vault_front_root_password_hash }}",
+            )
+        )
     for hosts, admin_hash, root_hash in host_mappings:
         if not isinstance(hosts, dict) or len(hosts) != 1:
-            fail("Для миграции учётных записей требуется один ENTRY и один EXIT")
+            fail("Для миграции учётных записей требуется по одному хосту каждой активной роли")
         values = next(iter(hosts.values()))
         if not isinstance(values, dict):
             fail("Некорректные host variables production inventory")
@@ -1116,7 +1856,11 @@ def remove_bootstrap_become_passwords(
     if not isinstance(document, dict):
         fail("Production Vault должен содержать словарь переменных")
     changed = False
-    for key in ("vault_entry_become_password", "vault_exit_become_password"):
+    for key in (
+        "vault_entry_become_password",
+        "vault_exit_become_password",
+        "vault_front_become_password",
+    ):
         if key in document:
             del document[key]
             changed = True
@@ -1151,9 +1895,39 @@ AWG_CLIENT_PROFILES = {
     },
 }
 
+# Mobile/AWG3+ поднимается kernel-модулем через awg-quick, как и остальные
+# клиентские интерфейсы; имя интерфейса задано ролью entry (awg-mobile).
+MOBILE_SERVICE_NAME = "awg-quick@awg-mobile.service"
+
+AWG3_MOBILE_FEATURE_DEFAULTS = {
+    "content_padding_addition": "8-32",
+    "rekey_after_time": "120-180",
+    "rekey_timeout": "5-8",
+    "reject_after_time": "180-240",
+    "keepalive_timeout": "10-15",
+    "max_handshake_attempts": "18-24",
+    "persistent_keepalive": "22-30",
+    "random_trailers": True,
+    "disable_cookies": False,
+}
+
 AWG_QUIC_INITIAL_SIZE = 1200
 AWG_CPS_RANDOM_TAG_MAX = 1000
 AWG_MINIMUM_OUTER_PMTU = 1280
+
+# Границы размера коротких CPS-подписей I2-I5 общего профиля: пара диапазонов
+# на ключ, из которых на каждый вызов разыгрываются нижняя и верхняя граница.
+# Сами границы тоже случайны намеренно - репозиторий публичный, и постоянные
+# литералы делали бы структуру профиля одинаковой во всех установках.
+# Единственный источник правды: тесты читают эту же таблицу. Закреплённый в
+# тесте отдельной копией предел уже успел устареть молча и отбраковывал 7%
+# честных профилей, роняя CI на пустом месте.
+AWG_SHORT_SIGNATURE_BOUNDS: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    "i2": ((80, 110), (170, 220)),
+    "i3": ((50, 75), (140, 180)),
+    "i4": ((35, 55), (110, 145)),
+    "i5": ((22, 40), (80, 110)),
+}
 
 
 def random_between(bounds: tuple[int, int]) -> int:
@@ -1251,8 +2025,14 @@ def validate_awg_obfuscation(
             fail(f"{name.upper()} AWG превышает минимальный внешний PMTU")
 
 
-def awg_quic_initial_signature() -> str:
-    """Создать индивидуальный QUIC Initial-подобный I1 размером 1200 байт.
+def awg_quic_initial_signature(target_size: int = AWG_QUIC_INITIAL_SIZE) -> str:
+    """Создать индивидуальный QUIC Initial-подобный I1 заданного размера.
+
+    Размер по умолчанию (1200 байт) используется общим профилем
+    (`awg_server_obfuscation`, KeeneticOS/mobile/transit до переопределения).
+    Явный `target_size` позволяет профилям с большим запасом MTU (например,
+    межсерверному AWG3+) использовать более крупный I1 без изменения этого
+    общего значения для остальных профилей.
 
     Доступные upstream-теги AWG не умеют вычислять QUIC AEAD, поэтому пакет не
     выдаётся за полноценное QUIC-соединение. При этом его открытая структура
@@ -1265,7 +2045,7 @@ def awg_quic_initial_signature() -> str:
     dcid_size = random_between((8, 20))
     scid_size = random_between((8, 20))
     fixed_size = 10 + dcid_size + scid_size
-    protected_size = AWG_QUIC_INITIAL_SIZE - fixed_size
+    protected_size = target_size - fixed_size
     if not 64 <= protected_size < 16384:
         fail("Не удалось сформировать безопасный размер QUIC-подобной AWG-сигнатуры")
     encoded_length = 0x4000 | protected_size
@@ -1298,20 +2078,49 @@ def awg_message_padding() -> tuple[int, int, int]:
     return s1, s2, s3
 
 
+def awg_random_header_ranges() -> list[str]:
+    """Создать 4 непересекающихся диапазона H1-H4 со случайной шириной сетки.
+
+    Раньше сетка была всегда одна и та же: ровно 4 диапазона по ровно
+    500 000 000 каждый, с одних и тех же стартовых смещений при абсолютно
+    любом вызове - сама эта структура (не только числа внутри неё)
+    одинакова для любой установки этого (публичного) репозитория. Здесь
+    ширина каждого слота выбирается заново при каждом вызове. Непересечение
+    гарантируется тем, что курсор продвигается на всю зарезервированную
+    ширину слота, а не только на использованную его часть - поэтому не
+    может нарушиться независимо от того, какая ширина выпала. Худший случай
+    (стартовый отступ 100 000 000 + 4 слота по 400 000 000) даёт максимум
+    около 1.7 млрд - с явным запасом внутри допустимых для H1-H4
+    [1, 2 147 483 647].
+    """
+    cursor = 1 + secrets.randbelow(100_000_000)
+    ranges = []
+    for _ in range(4):
+        width = random_between((150_000_000, 400_000_000))
+        offset = secrets.randbelow(int(width * 0.4) + 1)
+        span = random_between((max(1, int(width * 0.1)), int(width * 0.4)))
+        start = cursor + offset
+        end = start + span
+        ranges.append(f"{start}-{end}")
+        cursor += width
+    secrets.SystemRandom().shuffle(ranges)
+    return ranges
+
+
+def awg_short_signature_size_bounds(key: str) -> tuple[int, int]:
+    """Разыграть границы размера короткой CPS-подписи I2-I5."""
+    low, high = AWG_SHORT_SIGNATURE_BOUNDS[key]
+    return random_between(low), random_between(high)
+
+
 def awg_server_obfuscation() -> dict[str, object]:
     """Создать постоянный профиль AWG2 для KeeneticOS 5.1.x."""
-    header_ranges = []
-    for bucket in range(4):
-        bucket_start = 1 + bucket * 500_000_000
-        start = bucket_start + secrets.randbelow(200_000_001)
-        end = start + random_between((50_000_000, 200_000_000))
-        header_ranges.append(f"{start}-{end}")
-    secrets.SystemRandom().shuffle(header_ranges)
+    header_ranges = awg_random_header_ranges()
     s1, s2, s3 = awg_message_padding()
     result = {
-        "jc": 6,
-        "jmin": 64,
-        "jmax": 192,
+        "jc": random_between((4, 8)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((150, 230)),
         "s1": s1,
         "s2": s2,
         "s3": s3,
@@ -1323,11 +2132,11 @@ def awg_server_obfuscation() -> dict[str, object]:
         "h2": header_ranges[1],
         "h3": header_ranges[2],
         "h4": header_ranges[3],
-        "i1": awg_quic_initial_signature(),
-        "i2": awg_quic_short_signature((96, 192)),
-        "i3": awg_quic_short_signature((64, 160)),
-        "i4": awg_quic_short_signature((48, 128)),
-        "i5": awg_quic_short_signature((32, 96)),
+        "i1": awg_quic_initial_signature(random_between((1200, 1252))),
+        "i2": awg_quic_short_signature(awg_short_signature_size_bounds("i2")),
+        "i3": awg_quic_short_signature(awg_short_signature_size_bounds("i3")),
+        "i4": awg_quic_short_signature(awg_short_signature_size_bounds("i4")),
+        "i5": awg_quic_short_signature(awg_short_signature_size_bounds("i5")),
     }
     validate_awg_obfuscation(result)
     return result
@@ -1338,9 +2147,9 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
     headers = secrets.SystemRandom().sample(range(5, 2_147_483_648), 4)
     s1, s2, _ = awg_message_padding()
     result = {
-        "jc": 4,
-        "jmin": 64,
-        "jmax": 96,
+        "jc": random_between((3, 6)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((90, 130)),
         "s1": s1,
         "s2": s2,
         "s3": 0,
@@ -1359,111 +2168,74 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
     return result
 
 
-def awg_mobile_dns_obfuscation() -> dict[str, object]:
-    """Профиль, подтверждённый официальным AmneziaWG 2.0.2 для iOS.
-
-    I1 имеет форму DNS-ответа: два случайных байта ID, затем ответ A для
-    icloud.com. I2-I5 намеренно пусты: текущие мобильные клиенты принимают эти
-    поля не одинаково, а сервер и клиент обязаны иметь идентичный профиль.
-    """
-    result = {
-        "jc": 5,
-        "jmin": 10,
-        "jmax": 50,
-        "s1": 134,
-        "s2": 79,
-        "s3": 17,
-        "s4": 0,
-        "h1": "1134731367-1758702570",
-        "h2": "1999989254-2027383437",
-        "h3": "2041897377-2054735816",
-        "h4": "2083840314-2084318622",
-        "i1": (
-            "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001"
-            "c00c000100010000105a00044d583737>"
-        ),
-        "i2": "",
-        "i3": "",
-        "i4": "",
-        "i5": "",
-    }
+def awg_mobile_awg3_obfuscation() -> dict[str, object]:
+    """Создать полный профиль маскировки mobile/AWG3+ для AWG 3.1."""
+    result = awg_server_obfuscation()
+    result.update({
+        "jc": random_between((3, 7)),
+        "jmin": random_between((6, 14)),
+        "jmax": random_between((35, 70)),
+    })
     validate_awg_obfuscation(result)
+    if any(int(result[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
+        fail("Mobile/AWG3+ требует S1-S4 не меньше 12")
+    if any(not str(result[f"i{index}"]) for index in range(1, 6)):
+        fail("Mobile/AWG3+ требует полный набор I1-I5")
     return result
 
 
-def awg_mobile_quic_obfuscation() -> dict[str, object]:
-    """Создать экспериментальный iOS-профиль с QUIC Initial-подобным I1.
-
-    Проверенные iOS-параметры J/S/H сохраняются без изменений. Меняется только
-    I1; I2-I5 остаются пустыми, чтобы испытание проверяло одну переменную.
-    Итоговый пакет занимает ровно 1200 байт и не превышает mobile MTU.
-    """
-    result = awg_mobile_dns_obfuscation()
-    result["i1"] = awg_quic_initial_signature()
-    validate_awg_obfuscation(result)
-    return result
-
-
-def set_mobile_i1_mode(production: Path, mode: str) -> bool:
-    """Переключить I1 mobile-интерфейса без изменения порта, ключей и пиров."""
-    entry_path = production / "group_vars" / "entry.yml"
-    if not entry_path.is_file():
-        fail("Не найдены переменные ENTRY сервера production inventory")
-    entry_vars = load_yaml(entry_path)
-    profile = entry_vars.get("entry_mobile_awg_obfuscation")
-    if not isinstance(profile, dict):
-        fail("В production inventory отсутствует профиль mobile AWG")
-
-    if mode == "quic-ios-test":
-        mode = "quic-ios"
-    current_mode_raw = str(entry_vars.get("entry_mobile_i1_mode", "dns-ios"))
-    current_mode = "quic-ios" if current_mode_raw == "quic-ios-test" else current_mode_raw
-    if mode == "quic-ios":
-        # Повторный --resume не должен незаметно менять I1 и ломать уже
-        # выданный конфиг. Новая сигнатура создаётся только при фактическом
-        # переходе в QUIC-режим.
-        if current_mode == mode and isinstance(profile.get("i1"), str):
-            if current_mode_raw != mode:
-                entry_vars["entry_mobile_i1_mode"] = mode
-                yaml_write(entry_path, entry_vars)
-                return True
+def awg_mobile_awg3_profile_is_complete(value: object) -> bool:
+    """Проверить полноту сохранённого профиля без вывода его значений."""
+    if not isinstance(value, dict):
+        return False
+    required = (
+        "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
+        "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4", "i5",
+    )
+    if any(key not in value for key in required):
+        return False
+    try:
+        if any(int(value[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
             return False
-        new_profile = awg_mobile_quic_obfuscation()
-        message = (
-            "Mobile I1 переключён в подтверждённый QUIC Initial-подобный режим. "
-            "UDP-порт и ключи не изменены."
-        )
-    elif mode == "dns-ios":
-        new_profile = awg_mobile_dns_obfuscation()
-        message = "Mobile I1 возвращён в подтверждённый DNS-подобный режим iOS."
-    else:
-        fail(f"Неизвестный режим mobile I1: {mode}")
-
-    changed = current_mode_raw != mode
-    for key in ("jc", "jmin", "jmax", "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4"):
-        # Для эксперимента J/S/H должны оставаться ровно такими, какими они
-        # уже были согласованы между сервером и существующими клиентами.
-        new_profile[key] = profile[key]
-    for index in range(1, 6):
-        key = f"i{index}"
-        value = new_profile[key]
-        if profile.get(key) != value:
-            profile[key] = value
-            changed = True
-    entry_vars["entry_mobile_i1_mode"] = mode
-    if changed:
-        yaml_write(entry_path, entry_vars)
-        print(message)
-        print(
-            "Создайте новый тестовый конфиг командой "
-            "'vpn-user ИМЯ mobile': ранее выданные mobile-конфиги имеют другой I1."
-        )
-    return changed
+    except (TypeError, ValueError):
+        return False
+    return all(str(value[f"i{index}"]).strip() for index in range(1, 6))
 
 
 def awg3_transit_obfuscation() -> dict[str, object]:
+    """Создать профиль обфускации межсерверного AWG3+ (ENTRY-EXIT).
+
+    Jc/Jmin/Jmax и границы I2-I5 переопределены относительно общего
+    `awg_server_obfuscation()` в сторону большей энтропии/размера: это
+    длинный высоконагруженный туннель без клиентского MTU-ограничения
+    (в отличие от KeeneticOS/mobile), а сами эти поля - junk и
+    handshake-смежные пакеты, а не поле, применяемое к каждому
+    транспортному пакету, поэтому увеличение почти не стоит пропускной
+    способности (см. docs/awg3.md). I1 не переопределяется - у него уже
+    нет своего "потолка на профиль", он и так тянется к общему защитному
+    пределу `+28 <= 1280` в `validate_awg_obfuscation` (используется её
+    MTU-независимый дефолт, а не фактический согласованный MTU канала -
+    профиль должен оставаться безопасным даже при самом низком допустимом
+    MTU), поэтому отдельное значение для transit не добавило бы запаса.
+    """
     result = awg_server_obfuscation()
-    result.update({"jc": 8, "jmin": 64, "jmax": 256})
+    result.update({
+        "jc": random_between((8, 16)),
+        "jmin": random_between((48, 80)),
+        "jmax": random_between((384, 640)),
+        "i2": awg_quic_short_signature(
+            (random_between((80, 112)), random_between((340, 430)))
+        ),
+        "i3": awg_quic_short_signature(
+            (random_between((50, 78)), random_between((280, 360)))
+        ),
+        "i4": awg_quic_short_signature(
+            (random_between((38, 58)), random_between((220, 290)))
+        ),
+        "i5": awg_quic_short_signature(
+            (random_between((25, 40)), random_between((160, 220)))
+        ),
+    })
     validate_awg_obfuscation(result)
     return result
 
@@ -1593,10 +2365,12 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     """Выбрать новые AWG-пакеты и проверенный manifest остальных компонентов."""
     all_vars_path = production / "group_vars" / "all" / "main.yml"
     entry_vars_path = production / "group_vars" / "entry.yml"
+    exit_vars_path = production / "group_vars" / "exit.yml"
     stable_entry_path = repo / "inventory" / "example" / "group_vars" / "entry.yml"
     awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
     variables = load_yaml(all_vars_path)
     entry_variables = load_yaml(entry_vars_path)
+    exit_variables = load_yaml(exit_vars_path)
     stable_entry = load_yaml(stable_entry_path)
     awg3_defaults = load_yaml(awg3_defaults_path)
 
@@ -1610,8 +2384,28 @@ def prepare_component_update(repo: Path, production: Path) -> None:
         if key not in awg3_defaults:
             fail(f"Проверенный manifest AWG3 не содержит {key}")
         variables[key] = awg3_defaults[key]
+    # Профиль обфускации межсерверного канала - как и версии пакетов выше,
+    # часть проверенного manifest этого выпуска репозитория, а не только
+    # первичной установки. Пересоздаётся заново (свежие Jc/Jmin/Jmax/S1-S4/
+    # H1-H4/I1-I5 - см. awg3_transit_obfuscation()) и записывается
+    # одинаково на ENTRY и EXIT, иначе стороны разойдутся и handshake
+    # перестанет собираться.
+    transit_obfuscation = awg3_transit_obfuscation()
+    entry_variables["awg3_transit_obfuscation"] = transit_obfuscation
+    exit_variables["awg3_transit_obfuscation"] = transit_obfuscation
+    # Остальные четыре профиля обфускации (общий/Keenetic 5.1.x, запасной
+    # awg1 - тот же transit_obfuscation, что и выше, используется только
+    # когда userspace AWG3+ выключен, легаси-Keenetic до 5.1, mobile/AWG3+)
+    # живут только на ENTRY и тоже никогда не обновлялись после первой
+    # установки - тот же класс проблемы, что уже был у transit до этой
+    # сессии, чинится тем же способом.
+    entry_variables["entry_awg0_obfuscation"] = awg_server_obfuscation()
+    entry_variables["entry_awg1_obfuscation"] = transit_obfuscation
+    entry_variables["entry_legacy_awg_obfuscation"] = awg_legacy_server_obfuscation()
+    entry_variables["entry_mobile_awg_obfuscation"] = awg_mobile_awg3_obfuscation()
     yaml_write(all_vars_path, variables)
     yaml_write(entry_vars_path, entry_variables)
+    yaml_write(exit_vars_path, exit_variables)
 
 
 def restore_file(path: Path, content: bytes | None) -> None:
@@ -1801,21 +2595,22 @@ def remote_observed_ssh_source_ipv4(
 def verify_saved_inventory_access(hosts_document: dict) -> None:
     """Не запускать resume и cleanup через уже недоступную учётную запись."""
     inaccessible: list[str] = []
-    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
-        variables = hosts_document["all"]["children"][group]["hosts"][name]
-        if variables.get("ansible_connection") == "local":
-            continue
-        private_key = Path(str(variables["ansible_ssh_private_key_file"]))
-        if not ssh_connection_works(
-            str(variables["ansible_host"]),
-            str(variables["ansible_user"]),
-            int(variables["ansible_port"]),
-            private_key,
-        ):
-            inaccessible.append(
-                f"{name}: {variables['ansible_user']}@{variables['ansible_host']}:"
-                f"{variables['ansible_port']}"
-            )
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            private_key = Path(str(variables["ansible_ssh_private_key_file"]))
+            if not ssh_connection_works(
+                str(variables["ansible_host"]),
+                str(variables["ansible_user"]),
+                int(variables["ansible_port"]),
+                private_key,
+            ):
+                inaccessible.append(
+                    f"{name}: {variables['ansible_user']}@{variables['ansible_host']}:"
+                    f"{variables['ansible_port']}"
+                )
     if inaccessible:
         fail(
             "Сохранённый управляющий SSH-канал недоступен:\n  - "
@@ -1826,33 +2621,106 @@ def verify_saved_inventory_access(hosts_document: dict) -> None:
         )
 
 
+def recover_saved_admin_access(
+    hosts_document: dict,
+    hosts_path: Path,
+    admin_user: str = "kalimera",
+    root_login_finalized: bool = False,
+) -> list[str]:
+    """Исправить inventory, если root уже закрыт, а kalimera доступен.
+
+    Финальная SSH-политика может успеть примениться непосредственно перед
+    прерыванием deploy. Тогда новый сеанс root уже запрещён, хотя inventory
+    ещё содержит промежуточного пользователя root. Менять канал можно только
+    после отдельной успешной проверки того же ключа как ``kalimera``.
+    """
+    recovered: list[str] = []
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            private_key_value = variables.get("ansible_ssh_private_key_file")
+            host_value = variables.get("ansible_host")
+            port_value = variables.get("ansible_port")
+            if not private_key_value or not host_value or port_value is None:
+                continue
+            private_key = Path(str(private_key_value))
+            host = str(host_value)
+            current_user = str(variables.get("ansible_user", admin_user))
+            current_port = int(port_value)
+            current_login_expected = not (
+                root_login_finalized and current_user == "root"
+            )
+            if current_login_expected and ssh_connection_works(
+                host, current_user, current_port, private_key
+            ):
+                continue
+
+            candidate_ports = [current_port]
+            managed_port = int(variables.get("ssh_listen_port", current_port))
+            if managed_port not in candidate_ports:
+                candidate_ports.append(managed_port)
+            recovered_port = next(
+                (
+                    port
+                    for port in candidate_ports
+                    if ssh_connection_works(host, admin_user, port, private_key)
+                ),
+                None,
+            )
+            if recovered_port is None:
+                continue
+
+            variables["ansible_user"] = admin_user
+            variables["ansible_port"] = recovered_port
+            variables["ansible_become"] = True
+            variables["ansible_become_method"] = "sudo"
+            variables["ansible_become_password"] = (
+                "{{ vault_" + group + "_kalimera_password }}"
+            )
+            if recovered_port != current_port:
+                variables["security_previous_ssh_port"] = current_port
+                variables["security_allow_ssh_port_change"] = False
+            recovered.append(name)
+
+    if recovered:
+        yaml_write(hosts_path, hosts_document)
+        print(
+            "Production inventory восстановлен через подтверждённый SSH-доступ "
+            f"{admin_user}: " + ", ".join(recovered) + "."
+        )
+    return recovered
+
+
 def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> bool:
     """Актуализировать ``from=`` по уже проверенному управляющему SSH-сеансу."""
     changed = False
     observed_values: set[str] = set()
-    for group, name in (("entry", "entry-managed"), ("exit", "exit-managed")):
-        variables = hosts_document["all"]["children"][group]["hosts"][name]
-        if variables.get("ansible_connection") == "local":
-            continue
-        observed = remote_observed_ssh_source_ipv4(
-            str(variables["ansible_host"]),
-            str(variables["ansible_user"]),
-            int(variables["ansible_port"]),
-            Path(str(variables["ansible_ssh_private_key_file"])),
-        )
-        if not observed:
-            fail(
-                f"{name} не подтвердил исходный IPv4 проверенного SSH-сеанса. "
-                "Конфигурация не изменялась."
+    children = hosts_document["all"]["children"]
+    for group in ("entry", "exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if variables.get("ansible_connection") == "local":
+                continue
+            observed = remote_observed_ssh_source_ipv4(
+                str(variables["ansible_host"]),
+                str(variables["ansible_user"]),
+                int(variables["ansible_port"]),
+                Path(str(variables["ansible_ssh_private_key_file"])),
             )
-        observed_values.add(observed)
-        if variables.get("security_automation_source_ipv4") != observed:
-            variables["security_automation_source_ipv4"] = observed
-            changed = True
+            if not observed:
+                fail(
+                    f"{name} не подтвердил исходный IPv4 проверенного SSH-сеанса. "
+                    "Конфигурация не изменялась."
+                )
+            observed_values.add(observed)
+            if variables.get("security_automation_source_ipv4") != observed:
+                variables["security_automation_source_ipv4"] = observed
+                changed = True
     if changed:
         yaml_write(hosts_path, hosts_document)
         print(
-            "Production inventory обновлён: фактический IPv4 служебного SSH — "
+            "Production inventory обновлён: фактический IPv4 служебного SSH - "
             + ", ".join(sorted(observed_values))
             + "."
         )
@@ -1861,10 +2729,50 @@ def refresh_saved_automation_sources(hosts_document: dict, hosts_path: Path) -> 
 
 def require_operator_ssh_confirmation() -> None:
     print("\nПеред удалением старого SSH-порта откройте отдельный терминал на своём компьютере.")
-    print("Проверьте вход пользователем kalimera по вашему закрытому ключу на ENTRY и EXIT через новые SSH-порты.")
-    print("Не подтверждайте этап, пока оба независимых SSH-сеанса не открылись.")
-    if not prompt_bool("Вход kalimera по административному ключу проверен на обоих серверах", False):
+    print("Проверьте вход пользователем kalimera по вашему закрытому ключу на всех активных серверах через новые SSH-порты.")
+    print("Не подтверждайте этап, пока все независимые SSH-сеансы не открылись.")
+    if not prompt_bool("Вход kalimera по административному ключу проверен на всех серверах", False):
         fail("Установка безопасно остановлена: старые SSH-порты сохранены, Fail2Ban не включён")
+
+
+def show_front_deploy_state(production: Path) -> None:
+    """Показать оператору выбранную топологию FRONT до изменения серверов."""
+    hosts_path = production / "hosts.yml"
+    front_path = production / "group_vars" / "front.yml"
+    if not hosts_path.is_file():
+        return
+    hosts = load_yaml(hosts_path)
+    front_hosts = (
+        hosts.get("all", {})
+        .get("children", {})
+        .get("front", {})
+        .get("hosts", {})
+    )
+    if not isinstance(front_hosts, dict) or not front_hosts:
+        ui_panel(
+            "FRONT И CDN",
+            [
+                "FRONT: не включён",
+                "CDN: не используется",
+                "Пользовательский VLESS: отсутствует",
+            ],
+            "yellow",
+        )
+        return
+    front_vars = load_yaml(front_path) if front_path.is_file() else {}
+    modes = front_vars.get("front_access_modes", ["direct"])
+    mode_text = ", ".join(str(mode) for mode in modes)
+    cdn_state = str(front_vars.get("front_cdn_state", "not_configured"))
+    ui_panel(
+        "FRONT И CDN",
+        [
+            f"FRONT: включён ({front_vars.get('front_active_id', 'front-1')})",
+            f"Режимы доступа: {mode_text}",
+            f"CDN: {cdn_state}",
+            "VLESS: только через FRONT; прямой inbound ENTRY отключён",
+        ],
+        "cyan",
+    )
 
 
 def show_deployment_summary(production: Path) -> None:
@@ -1872,9 +2780,12 @@ def show_deployment_summary(production: Path) -> None:
     all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     entry_vars = load_yaml(production / "group_vars" / "entry.yml")
     exit_vars = load_yaml(production / "group_vars" / "exit.yml")
+    front_path = production / "group_vars" / "front.yml"
+    front_vars = load_yaml(front_path) if front_path.is_file() else {}
     children = hosts["all"]["children"]
     entry = children["entry"]["hosts"]["entry-managed"]
     exit_node = children["exit"]["hosts"]["exit-managed"]
+    front_nodes = children.get("front", {}).get("hosts", {})
     entry_public = str(entry_vars.get("entry_public_endpoint", entry["ansible_host"]))
     exit_public = str(exit_node["ansible_host"])
     proxy_enabled = bool(entry_vars.get("entry_ru_proxy_enabled", False))
@@ -1906,6 +2817,21 @@ def show_deployment_summary(production: Path) -> None:
             f"{entry_public}:{entry_vars.get('entry_awg0_listen_port')}/UDP",
         ),
     ]
+    if front_nodes:
+        front_name, front_node = next(iter(front_nodes.items()))
+        access_rows.append(
+            (
+                "SSH FRONT",
+                f"{admin_user}@{front_node['ansible_host']}:{front_node['ansible_port']}",
+            )
+        )
+        front_modes = ", ".join(front_vars.get("front_access_modes", ["direct"]))
+        access_rows.append(
+            (
+                "VLESS FRONT",
+                f"{front_modes}; CDN: {front_vars.get('front_cdn_state', 'not_configured')}",
+            )
+        )
     if entry_vars.get("entry_legacy_client_available", False):
         legacy_state = (
             "включён" if entry_vars.get("entry_legacy_client_enabled", False)
@@ -1927,14 +2853,14 @@ def show_deployment_summary(production: Path) -> None:
             (
                 "Мобильные клиенты",
                 f"{entry_public}:{entry_vars.get('entry_mobile_client_listen_port')}/UDP; "
-                f"QUIC-профиль; {mobile_state}",
+                f"AWG 3.1, полный профиль; {mobile_state}",
             )
         )
 
     transit_label = (
         "AWG 3+ userspace"
         if entry_vars.get("awg3_transit_enabled", False)
-        else "AmneziaWG"
+        else "AmneziaWG kernel"
     )
     access_rows.append(
         (
@@ -1946,6 +2872,13 @@ def show_deployment_summary(production: Path) -> None:
     architecture_rows: list[tuple[str, object]] = [
         ("Основной маршрут", "VPN-клиент → ENTRY → EXIT → Интернет"),
     ]
+    if front_nodes:
+        architecture_rows.append(
+            (
+                "VLESS-маршрут",
+                "клиент → FRONT → отдельный REALITY backend ENTRY → EXIT/RU",
+            )
+        )
     if proxy_enabled:
         architecture_rows.extend(
             [
@@ -1969,7 +2902,7 @@ def show_deployment_summary(production: Path) -> None:
             "UFW ENTRY",
             f"TCP/{entry['ansible_port']} SSH; "
             f"UDP/{entry_vars.get('entry_awg0_listen_port')} клиенты; "
-            f"UDP/{entry_vars.get('entry_mobile_client_listen_port')} mobile при включении; "
+            f"UDP/{entry_vars.get('entry_mobile_client_listen_port')} mobile/AWG3+ при включении; "
             f"UDP/{entry_vars.get('security_interserver_listen_port')} только от "
             f"{entry_vars.get('security_interserver_peer_ipv4')}",
         ),
@@ -1985,6 +2918,14 @@ def show_deployment_summary(production: Path) -> None:
         ),
         ("Fail2Ban", "включён после подтверждения нового SSH-доступа"),
     ]
+    if front_nodes:
+        front_node = next(iter(front_nodes.values()))
+        security_rows.append(
+            (
+                "UFW FRONT",
+                f"TCP/{front_node['ansible_port']} SSH; TCP/80 ACME; TCP/443 VLESS",
+            )
+        )
 
     mtu_rows: list[tuple[str, object]] = []
     if entry_vars.get("awg3_transit_enabled", False):
@@ -2059,7 +3000,7 @@ def show_deployment_summary(production: Path) -> None:
     ui_panel(
         "СЛЕДУЮЩИЕ ШАГИ",
         [
-            "1. Откройте новое SSH-соединение к обоим адресам из блока «ПОДКЛЮЧЕНИЯ».",
+            "1. Откройте новое SSH-соединение ко всем серверам из блока «ПОДКЛЮЧЕНИЯ».",
             "2. Безопасно перенесите первый файл клиента и импортируйте его в AmneziaWG.",
             "3. Проверьте handshake клиента и выполните awg-health --strict.",
             "Подсказки: kalimera-help · точный синтаксис: <команда> --help.",
@@ -2100,9 +3041,10 @@ def complete_ssh_transition(
     awg_package_lock: Path,
 ) -> bool:
     children = hosts_document["all"]["children"]
-    managed_hosts = (
-        ("entry", "entry-managed"),
-        ("exit", "exit-managed"),
+    managed_hosts = tuple(
+        (group, name)
+        for group in ("entry", "exit", "front")
+        for name in children.get(group, {}).get("hosts", {})
     )
     transitioning = []
     for group, name in managed_hosts:
@@ -2164,9 +3106,7 @@ def complete_ssh_transition(
             variables["ansible_become"] = True
             variables["ansible_become_method"] = "sudo"
             variables["ansible_become_password"] = (
-                "{{ vault_entry_kalimera_password }}"
-                if group == "entry"
-                else "{{ vault_exit_kalimera_password }}"
+                "{{ vault_" + group + "_kalimera_password }}"
             )
 
     require_operator_ssh_confirmation()
@@ -2194,17 +3134,32 @@ def main() -> None:
         help="обновить только оформление терминала и справку без изменения каскада",
     )
     parser.add_argument(
-        "--mobile-i1-mode",
-        choices=("dns-ios", "quic-ios", "quic-ios-test"),
-        help=(
-            "при --resume переключить только I1 mobile-интерфейса: "
-            "quic-ios или совместимый прежний dns-ios"
-        ),
-    )
-    parser.add_argument(
         "--enable-mobile",
         action="store_true",
         help="при --resume безопасно добавить отсутствующий mobile AWG UDP/8443",
+    )
+    parser.add_argument(
+        "--enable-front",
+        action="store_true",
+        help=(
+            "при --resume добавить FRONT-релей (CDN-фронтированный VLESS+XHTTP) "
+            "как отдельный хост - интерактивно запросит данные подключения"
+        ),
+    )
+    parser.add_argument(
+        "--replace-front",
+        action="store_true",
+        help="при --resume подготовить новый FRONT без отключения прежнего",
+    )
+    parser.add_argument(
+        "--commit-front-replacement",
+        action="store_true",
+        help="подтвердить проверенный новый FRONT и удалить доступ прежнего",
+    )
+    parser.add_argument(
+        "--rollback-front-replacement",
+        action="store_true",
+        help="восстановить inventory прежнего FRONT из защищённой копии",
     )
     parser.add_argument(
         "--update-components",
@@ -2215,17 +3170,41 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    if args.mobile_i1_mode and not args.resume:
-        parser.error("--mobile-i1-mode используется только вместе с --resume")
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
+    if args.enable_front and not args.resume:
+        parser.error("--enable-front используется только вместе с --resume")
+    if (args.replace_front or args.commit_front_replacement or args.rollback_front_replacement) and not args.resume:
+        parser.error("операции замены FRONT используются только вместе с --resume")
+    if sum(
+        bool(value)
+        for value in (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ) > 1:
+        parser.error("выберите только одну операцию FRONT")
     if args.update_components and not args.resume:
         parser.error("--update-components используется только вместе с --resume")
+    if args.update_components and any(
+        (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ):
+        parser.error("--update-components нельзя объединять с операциями FRONT")
     if args.terminal_only and (
         args.resume
         or args.summary
-        or args.mobile_i1_mode
         or args.enable_mobile
+        or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
         or args.update_components
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
@@ -2249,7 +3228,7 @@ def main() -> None:
             fail("Не найден production inventory или внешний пароль Ansible Vault")
         ansible(repo, hosts_path, vault_password, "playbooks/terminal.yml")
         print(
-            "Терминальный интерфейс ENTRY и EXIT обновлён без изменения SSH, "
+            "Терминальный интерфейс всех активных серверов обновлён без изменения SSH, "
             "AWG, UFW, DNS и маршрутизации."
         )
         return
@@ -2262,6 +3241,14 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        ensure_mobile_awg3_vault_material(production, vault_password)
+        if args.rollback_front_replacement:
+            rollback_front_replacement(production)
+        if args.enable_front:
+            enable_front_profile(production, vault_password)
+        if args.replace_front:
+            prepare_front_replacement(production, vault_password)
+        show_front_deploy_state(production)
         ensure_runtime_secret_material(production, vault_password)
         pending_account_passwords: dict[str, str] = {}
         ensure_admin_account_material(
@@ -2273,8 +3260,6 @@ def main() -> None:
         )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
-        if args.mobile_i1_mode:
-            set_mobile_i1_mode(production, args.mobile_i1_mode)
         update_saved_client_configs_cps(state_root / "clients")
         all_vars = load_yaml(all_vars_path)
         if (
@@ -2292,12 +3277,19 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        recover_saved_admin_access(
+            hosts_document,
+            hosts_path,
+            str(all_vars.get("security_admin_user", "kalimera")),
+            bool(all_vars.get("security_finalize_admin_access", False)),
+        )
         verify_saved_inventory_access(hosts_document)
         refresh_saved_automation_sources(hosts_document, hosts_path)
         if args.update_components:
             transitioning = [
                 variables
-                for group in ("entry", "exit")
+                for group in ("entry", "exit", "front")
+                if group in hosts_document["all"]["children"]
                 for variables in hosts_document["all"]["children"][group]["hosts"].values()
                 if variables.get("security_allow_ssh_port_change", False)
             ]
@@ -2321,7 +3313,8 @@ def main() -> None:
         component_backup: dict[Path, bytes | None] = {}
         if args.update_components:
             entry_vars_path = production / "group_vars" / "entry.yml"
-            for path in (all_vars_path, entry_vars_path, awg_package_lock):
+            exit_vars_path = production / "group_vars" / "exit.yml"
+            for path in (all_vars_path, entry_vars_path, exit_vars_path, awg_package_lock):
                 component_backup[path] = path.read_bytes() if path.is_file() else None
             prepare_component_update(repo, production)
         final_variables = {
@@ -2337,12 +3330,77 @@ def main() -> None:
         if transition_completed:
             final_variables.update({"awg_prepare_apt": False, "awg_restore_apt": True})
         try:
-            ansible(repo, hosts_path, vault_password, "playbooks/site.yml", final_variables)
+            try:
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
+            except SystemExit:
+                # Финальный прогон site.yml включает и отключение root
+                # (security_finalize_admin_access), и более поздние задачи,
+                # которым снова нужен SSH (например, Shamir-play). Если один
+                # из хостов успел перейти на kalimera именно в этом прогоне,
+                # а inventory на диске ещё содержит устаревший root, задача
+                # падает с "Permission denied (publickey)" даже при полностью
+                # исправном состоянии серверов. Проверяем это по-настоящему
+                # (реальное SSH-подключение внутри recover_saved_admin_access),
+                # а не считаем совпадением - и повторяем прогон один раз, если
+                # восстановление действительно что-то исправило.
+                hosts_document = load_yaml(hosts_path)
+                all_vars_current = load_yaml(all_vars_path)
+                recovered = recover_saved_admin_access(
+                    hosts_document,
+                    hosts_path,
+                    str(all_vars_current.get("security_admin_user", "kalimera")),
+                    bool(all_vars_current.get("security_finalize_admin_access", False)),
+                )
+                if not recovered:
+                    raise
+                print(
+                    "SSH-доступ подтверждён по kalimera после перехода: "
+                    + ", ".join(recovered)
+                    + ". Повторяю финальный прогон без вмешательства оператора."
+                )
+                ansible(
+                    repo, hosts_path, vault_password, "playbooks/site.yml", final_variables
+                )
             if awg_package_lock.is_file():
                 pin_resolved_awg_packages(all_vars_path, awg_package_lock)
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
             ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
             ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+            if args.commit_front_replacement:
+                commit_front_replacement(production)
+                try:
+                    ansible(
+                        repo,
+                        hosts_path,
+                        vault_password,
+                        "playbooks/entry.yml",
+                        final_variables,
+                    )
+                    ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
+                except SystemExit:
+                    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+                    front_vars = load_yaml(production / "group_vars" / "front.yml")
+                    entry_vars["front_replacement_state"] = "prepared"
+                    front_vars["front_replacement_state"] = "prepared"
+                    yaml_write(production / "group_vars" / "entry.yml", entry_vars)
+                    yaml_write(production / "group_vars" / "front.yml", front_vars)
+                    try:
+                        ansible(
+                            repo,
+                            hosts_path,
+                            vault_password,
+                            "playbooks/entry.yml",
+                            final_variables,
+                        )
+                    except SystemExit:
+                        pass
+                    fail(
+                        "Commit замены FRONT не прошёл проверку; прежний FRONT "
+                        "повторно разрешён на ENTRY"
+                    )
+                finish_front_replacement(production)
         except SystemExit as update_error:
             if not args.update_components:
                 raise
@@ -2379,8 +3437,19 @@ def main() -> None:
         update_saved_client_configs_mtu(state_root / "clients", mtu_result)
         cleanup_deployment(repo, hosts_path, vault_password)
         atexit.unregister(cleanup_callback)
+        if args.rollback_front_replacement:
+            (_front_replacement_state_root() / "current.json").unlink(missing_ok=True)
+            print("Откат FRONT применён и проверен; маркер восстановления удалён.")
         if args.update_components:
             print("Компоненты каскада обновлены транзакционно и успешно проверены.")
+        elif args.replace_front:
+            print(
+                "Новый FRONT применён. Для каждого direct-пользователя повторно "
+                "выполните 'vless-user export ИМЯ' на новом FRONT и импортируйте "
+                "JSON с новым origin-доменом. Затем проверьте direct/CDN VLESS-сессию, "
+                "переключите CDN origin и выполните "
+                "'kalimera-deploy --resume --commit-front-replacement'."
+            )
         else:
             print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)
@@ -2424,14 +3493,26 @@ def main() -> None:
         require_public_endpoint(entry_host, "Адрес удалённого ENTRY сервера")
     require_public_endpoint(exit_host, "Адрес EXIT сервера")
 
+    front_enabled = prompt_bool(
+        "Добавить отдельный FRONT для VLESS-доступа", False
+    )
+    front_host = ""
+    if front_enabled:
+        front_host = prompt("IP-адрес или DNS-имя FRONT сервера")
+        require_public_endpoint(front_host, "Адрес FRONT сервера")
+
     entry_user = prompt("Пользователь SSH ENTRY сервера", "root")
     exit_user = prompt("Пользователь SSH EXIT сервера", "root")
+    front_user = prompt("Пользователь SSH FRONT сервера", "root") if front_enabled else ""
     if local_entry and entry_user != "root":
         fail("Локальная установка ENTRY сервера должна выполняться от root")
     entry_current_port = prompt_port(
         "Текущий SSH-порт ENTRY сервера", detect_local_ssh_port() if local_entry else 22
     )
     exit_current_port = prompt_port("Текущий SSH-порт EXIT сервера", 22)
+    front_current_port = (
+        prompt_port("Текущий SSH-порт FRONT сервера", 22) if front_enabled else 22
+    )
 
     ui_section(
         2,
@@ -2440,7 +3521,12 @@ def main() -> None:
     )
     entry_new_port = prompt_port("Новый управляемый SSH-порт ENTRY сервера", 56777)
     exit_new_port = prompt_port("Новый управляемый SSH-порт EXIT сервера", 56777)
-    if entry_new_port < 1024 or exit_new_port < 1024:
+    front_new_port = (
+        prompt_port("Новый управляемый SSH-порт FRONT сервера", 56777)
+        if front_enabled
+        else 56777
+    )
+    if min(entry_new_port, exit_new_port, front_new_port) < 1024:
         fail("Управляемые SSH-порты должны находиться в диапазоне 1024–65535")
     client_awg_port = prompt_port("UDP-порт AWG для VPN-клиентов ENTRY сервера", 443)
     transit_awg_port = prompt_port(
@@ -2452,14 +3538,16 @@ def main() -> None:
         39744,
     )
     mobile_awg_port = prompt_port(
-        "UDP-порт мобильного AWG с QUIC-маскировкой",
+        "UDP-порт мобильного AWG 3.1",
         8443,
     )
     if client_awg_port == legacy_awg_port:
         fail("Основной и совместимый клиентские UDP-порты AWG на ENTRY должны различаться")
-    # На ENTRY клиентский kernel-интерфейс и userspace AWG3 не могут надёжно
-    # делить один сокет. Публичным портом каскада остаётся UDP/443 на EXIT, а
-    # локальный порт AWG3 на ENTRY выбирается отдельно и фильтруется по IP EXIT.
+    # Межсерверный интерфейс на ENTRY не может делить сокет с клиентскими - у
+    # каждого интерфейса свой ListenPort, независимо от того, поднимает его
+    # kernel-модуль или запасной userspace-движок. Публичным портом каскада
+    # остаётся UDP/443 на EXIT, а локальный порт межсерверного канала на ENTRY
+    # выбирается отдельно и фильтруется по IP EXIT.
     entry_transit_listen_port = 39745
     while entry_transit_listen_port in {client_awg_port, legacy_awg_port}:
         entry_transit_listen_port += 1
@@ -2479,7 +3567,16 @@ def main() -> None:
     if not local_entry:
         entry_password = getpass.getpass("Пароль SSH ENTRY сервера (ввод скрыт): ")
     exit_password = getpass.getpass("Пароль SSH EXIT сервера (ввод скрыт): ")
-    if (not local_entry and not entry_password) or not exit_password:
+    front_password = (
+        getpass.getpass("Пароль SSH FRONT сервера (ввод скрыт): ")
+        if front_enabled
+        else ""
+    )
+    if (
+        (not local_entry and not entry_password)
+        or not exit_password
+        or (front_enabled and not front_password)
+    ):
         fail("Начальные пароли SSH удалённых серверов не могут быть пустыми")
 
     print("Вставьте ПУБЛИЧНЫЙ ключ с вашего компьютера. Никогда не вставляйте закрытый ключ.")
@@ -2490,6 +3587,9 @@ def main() -> None:
     )
     exit_sudo = exit_user != "root" and prompt_bool(
         "Для sudo на EXIT сервере используется тот же пароль", True
+    )
+    front_sudo = front_enabled and front_user != "root" and prompt_bool(
+        "Для sudo на FRONT сервере используется тот же пароль", True
     )
 
     ui_section(
@@ -2524,7 +3624,101 @@ def main() -> None:
         proxy_password = getpass.getpass("Пароль SOCKS5, если требуется (ввод скрыт): ")
         if bool(proxy_username) != bool(proxy_password):
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
-        expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто — определить автоматически", "")
+        expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто - определить автоматически", "")
+
+    reality_fallback_enabled = front_enabled
+    reality_fallback_dest = "yandex.ru"
+    # yandex.ru первым - RU-правдоподобный, собственная инфраструктура
+    # Yandex (не CDN), стабильно проходит preflight-проверку сертификата на
+    # живом каскаде. www.microsoft.com исключён - отдаётся через Akamai
+    # (сторонний CDN), что на практике повышало долю сорванных
+    # REALITY-хендшейков. www.debian.org сюда намеренно не включён -
+    # резолвится в несколько IP (DNS round-robin) и не проходит
+    # preflight-проверку стабильности сертификата.
+    reality_candidates = [
+        "yandex.ru", "vk.ru", "vk.com", "kinopoisk.ru",
+        "market.yandex.ru", "maps.yandex.ru", "music.yandex.ru",
+        "dzen.ru", "tinkoff.ru",
+    ]
+    front_origin_domain = ""
+    front_certbot_email = ""
+    front_access_modes: list[str] = []
+    front_cdn_state = "not_configured"
+    front_direct_domain = ""
+    front_cdn_domain = ""
+    if front_enabled:
+        ui_panel(
+            "FRONT И СЛУЖЕБНЫЙ REALITY BACKEND",
+            [
+                "VLESS доступен только через отдельный FRONT.",
+                "Прямого пользовательского VLESS-inbound на ENTRY не будет.",
+                "RU-прокси и backend FRONT работают разными службами.",
+            ],
+            "cyan",
+        )
+        front_origin_domain = prompt(
+            "Origin-домен FRONT (A-запись указывает на FRONT)"
+        )
+        if not _DOMAIN_RE.match(front_origin_domain or ""):
+            fail("Origin-домен FRONT должен быть корректным DNS-именем")
+        front_certbot_email = prompt("E-mail для Let's Encrypt/Certbot")
+        if not _EMAIL_RE.match(front_certbot_email or ""):
+            fail("Некорректный e-mail для Certbot")
+        ui_panel(
+            "РЕЖИМ ДОСТУПА FRONT",
+            [
+                "1 · прямой TLS+XHTTP через FRONT без CDN",
+                "2 · TLS+XHTTP только через готовый CDN",
+                "3 · прямой доступ и готовый CDN одновременно",
+            ],
+            "cyan",
+        )
+        front_choice = prompt("Выберите режим FRONT", "1")
+        front_mode_map = {
+            "1": ["direct"],
+            "2": ["cdn"],
+            "3": ["direct", "cdn"],
+        }
+        if front_choice not in front_mode_map:
+            fail("Выбран неподдерживаемый режим FRONT")
+        front_access_modes = front_mode_map[front_choice]
+        if "direct" in front_access_modes:
+            front_direct_domain = front_origin_domain
+            print(f"Домен прямого доступа FRONT: {front_origin_domain}")
+        if "cdn" in front_access_modes:
+            if not prompt_bool("CDN-ресурс уже создан и готов", False):
+                fail(
+                    "Для чистой установки выберите direct, если CDN ещё не готов. "
+                    "CDN можно подключить отдельным обновлением inventory."
+                )
+            front_cdn_domain = prompt("Публичный домен готового CDN-ресурса")
+            if not _DOMAIN_RE.match(front_cdn_domain or ""):
+                fail("Публичный домен CDN должен быть корректным")
+            front_cdn_state = "ready"
+
+        print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
+        results = {host: probe_reality_dest(host) for host in reality_candidates}
+        ui_panel(
+            "КАНДИДАТЫ DEST-САЙТА REALITY",
+            [
+                f"{index} · {host} [{'OK' if results[host] else 'FAIL'}]"
+                for index, host in enumerate(reality_candidates, start=1)
+            ] + ["0 · указать свой домен"],
+            "cyan",
+        )
+        dest_choice = prompt("Номер кандидата или 0 для своего домена", "1")
+        if dest_choice == "0":
+            reality_fallback_dest = prompt("Домен маскировочного сайта")
+        elif dest_choice.isdigit() and 1 <= int(dest_choice) <= len(reality_candidates):
+            reality_fallback_dest = reality_candidates[int(dest_choice) - 1]
+        else:
+            fail("Выбран неподдерживаемый вариант dest-сайта REALITY")
+        if not results.get(reality_fallback_dest, probe_reality_dest(reality_fallback_dest)):
+            fail(
+                f"dest-сайт {reality_fallback_dest} не прошёл проверку TLS 1.3 - "
+                "выберите другой"
+            )
+        print(f"dest-сайт {reality_fallback_dest} проверен.")
 
     ui_section(
         5,
@@ -2574,7 +3768,7 @@ def main() -> None:
         print(f"Telegram-бот подтверждён: @{bot['username']}")
 
         telegram_chat = prompt(
-            "Числовой Telegram chat ID; Enter — определить автоматически"
+            "Числовой Telegram chat ID; Enter - определить автоматически"
         )
         if not telegram_chat:
             ui_panel(
@@ -2647,6 +3841,11 @@ def main() -> None:
     entry_public_ipv4 = resolve_single_public_ipv4(
         entry_public_endpoint, "AWG endpoint ENTRY сервера"
     )
+    front_public_ipv4 = (
+        resolve_single_public_ipv4(front_host, "Адрес FRONT сервера")
+        if front_enabled
+        else ""
+    )
     ui_section(
         6,
         "ПЕРВЫЙ VPN-КЛИЕНТ",
@@ -2661,7 +3860,7 @@ def main() -> None:
             "1 · максимальная производительность",
             "2 · сбалансированный",
             "3 · максимальная маскировка",
-            "4 · мобильный QUIC-профиль: отдельный интерфейс и UDP/8443",
+            "4 · mobile/AWG3+: полный профиль AWG 3.1 и отдельный UDP/8443",
             "5 · KeeneticOS 4.3.x: базовый ASC и отдельный интерфейс",
         ],
         "magenta",
@@ -2679,7 +3878,7 @@ def main() -> None:
         "Подсеть старых AWG-клиентов KeeneticOS 4.3.x", "10.67.0.0/24"
     )
     mobile_client_subnet_text = prompt(
-        "Подсеть мобильных AWG-клиентов с QUIC-маскировкой", "10.68.0.0/24"
+        "Подсеть клиентов mobile/AWG3+", "10.68.0.0/24"
     )
     transit_subnet_text = prompt("Подсеть AWG между ENTRY сервером и EXIT сервером", "10.77.0.0/24")
     try:
@@ -2775,6 +3974,15 @@ def main() -> None:
         ssh_public,
         "EXIT сервер",
     )
+    if front_enabled:
+        front_password = bootstrap_key(
+            front_host,
+            front_user,
+            front_current_port,
+            front_password,
+            ssh_public,
+            "FRONT сервер",
+        )
 
     # Не полагаться на адрес локального интерфейса: при SNAT, floating IP или
     # сложной сети хостинга удалённый sshd может видеть другой source IPv4.
@@ -2790,6 +3998,19 @@ def main() -> None:
             "Ограничение служебного ключа не применяется, чтобы не потерять доступ."
         )
     exit_automation_source_ipv4 = exit_observed_source_ipv4
+    front_automation_source_ipv4 = ""
+    if front_enabled:
+        front_automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+            front_host,
+            front_user,
+            front_current_port,
+            ssh_private,
+        )
+        if not front_automation_source_ipv4:
+            fail(
+                "FRONT сервер не подтвердил исходный IPv4 управляющего SSH-сеанса. "
+                "Конфигурация не изменялась."
+            )
     if local_entry:
         entry_automation_source_ipv4 = entry_public_ipv4
     else:
@@ -2806,6 +4027,8 @@ def main() -> None:
             )
         entry_automation_source_ipv4 = entry_observed_source_ipv4
     observed_sources = {entry_automation_source_ipv4, exit_automation_source_ipv4}
+    if front_automation_source_ipv4:
+        observed_sources.add(front_automation_source_ipv4)
     print(
         "Фактический IPv4 управляющего SSH подтверждён серверами: "
         + ", ".join(sorted(observed_sources))
@@ -2816,9 +4039,11 @@ def main() -> None:
     all_vars_path = staging / "group_vars" / "all" / "main.yml"
     entry_vars_path = staging / "group_vars" / "entry.yml"
     exit_vars_path = staging / "group_vars" / "exit.yml"
+    front_vars_path = staging / "group_vars" / "front.yml"
     all_vars = load_yaml(all_vars_path)
     entry_vars = load_yaml(entry_vars_path)
     exit_vars = load_yaml(exit_vars_path)
+    front_vars: dict[str, object] = {}
     client_mode = (
         "legacy" if client_profile_name == "old"
         else "mobile" if client_profile_name == "mobile"
@@ -2826,7 +4051,7 @@ def main() -> None:
     )
     client_server_obfuscation = awg_server_obfuscation()
     legacy_server_obfuscation = awg_legacy_server_obfuscation()
-    mobile_server_obfuscation = awg_mobile_quic_obfuscation()
+    mobile_server_obfuscation = awg_mobile_awg3_obfuscation()
     initial_server_obfuscation = (
         legacy_server_obfuscation if client_mode == "legacy"
         else mobile_server_obfuscation if client_mode == "mobile"
@@ -2848,6 +4073,13 @@ def main() -> None:
         "EXIT · kalimera": generate_account_password(),
         "EXIT · root": generate_account_password(),
     }
+    if front_enabled:
+        account_passwords.update(
+            {
+                "FRONT · kalimera": generate_account_password(),
+                "FRONT · root": generate_account_password(),
+            }
+        )
     account_password_hashes = {
         label: hash_account_password(password)
         for label, password in account_passwords.items()
@@ -2915,8 +4147,25 @@ def main() -> None:
             "entry_mobile_legacy_internal_port": 39746,
             "entry_mobile_client_mtu": 1380,
             "entry_mobile_awg_obfuscation": mobile_server_obfuscation,
-            "entry_mobile_i1_mode": "quic-ios",
-            "awg3_transit_enabled": True,
+            "entry_mobile_service_name": MOBILE_SERVICE_NAME,
+            "entry_mobile_profile_generation": "awg3.1",
+            "awg3_mobile_content_padding_addition": AWG3_MOBILE_FEATURE_DEFAULTS["content_padding_addition"],
+            "awg3_mobile_rekey_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_after_time"],
+            "awg3_mobile_rekey_timeout": AWG3_MOBILE_FEATURE_DEFAULTS["rekey_timeout"],
+            "awg3_mobile_reject_after_time": AWG3_MOBILE_FEATURE_DEFAULTS["reject_after_time"],
+            "awg3_mobile_keepalive_timeout": AWG3_MOBILE_FEATURE_DEFAULTS["keepalive_timeout"],
+            "awg3_mobile_max_handshake_attempts": AWG3_MOBILE_FEATURE_DEFAULTS["max_handshake_attempts"],
+            "awg3_mobile_persistent_keepalive": AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"],
+            "awg3_mobile_random_trailers": AWG3_MOBILE_FEATURE_DEFAULTS["random_trailers"],
+            "awg3_mobile_disable_cookies": AWG3_MOBILE_FEATURE_DEFAULTS["disable_cookies"],
+            # Межсерверный канал поднимает kernel-модуль AmneziaWG, а не
+            # отдельный userspace-движок: на одном и том же канале userspace
+            # терял 6.4-7.8% пакетов против 0.85% у kernel-модуля, и именно это
+            # выражалось в медленном зарубежном трафике. Полный набор полей 3.1
+            # kernel принимает (проверено реальными awg setconf/showconf).
+            # Запасной userspace-путь остаётся доступен через
+            # scripts/toggle-transit-engine.py для хостов, где DKMS не собирается.
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": entry_transit_listen_port,
             "awg3_transit_address": f"{entry_transit_ip}/32",
@@ -2931,12 +4180,22 @@ def main() -> None:
             "entry_proxy_server": proxy_host or "127.0.0.1",
             "entry_proxy_port": proxy_port or 1080,
             "entry_ru_proxy_expected_ip": expected_proxy_ip,
+            "reality_fallback_enabled": reality_fallback_enabled,
+            "reality_fallback_dest": reality_fallback_dest,
+            "front_enabled": front_enabled,
+            "front_relay_enabled": front_enabled,
+            "front_backend_enabled": front_enabled,
+            "reality_fallback_direct_client_enabled": False,
+            "front_public_ipv4": front_public_ipv4,
             "entry_dot_upstreams": dot_upstreams,
             "entry_dns_doh_server": doh_server,
             "entry_dns_doh_tls_name": doh_tls_name,
             "entry_dns_doh_path": doh_path,
             "runtime_secrets_share_index": 1,
-            "runtime_secrets_peer_inventory_hosts": "{{ groups['exit'] | default([]) }}",
+            "runtime_secrets_peer_inventory_hosts": (
+                "{{ ((groups['exit'] | default([])) + "
+                "(groups['front'] | default([]))) | list }}"
+            ),
             "runtime_secrets_advertise_ipv4": entry_public_ipv4,
         }
     )
@@ -2960,9 +4219,14 @@ def main() -> None:
             "exit_awg_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
             "exit_awg_subnet": str(transit_subnet),
             "exit_awg_obfuscation": transit_obfuscation,
-            "exit_manage_awg_config": False,
+            # Стороны транзита обязаны быть на одном движке - см. комментарий у
+            # ENTRY выше и таблицу движков в scripts/toggle-transit-engine.py.
+            # При kernel-модуле конфиг межсерверного интерфейса пишет роль exit,
+            # поэтому exit_manage_awg_config включён; при userspace его писала бы
+            # роль awg3_transit, и флаг был бы выключен.
+            "exit_manage_awg_config": True,
             "exit_peer_migration_policy": "explicit",
-            "awg3_transit_enabled": True,
+            "awg3_transit_enabled": False,
             "awg3_transit_interface": "awg3",
             "awg3_transit_listen_port": transit_awg_port,
             "awg3_transit_address": f"{exit_transit_ip}/{transit_subnet.prefixlen}",
@@ -2976,7 +4240,8 @@ def main() -> None:
             "runtime_secrets_share_index": 2,
             "runtime_secrets_peer_inventory_hosts": (
                 "{{ (groups['entry'] | default([])) + "
-                "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) }}"
+                "(groups['exit'] | default([]) | reject('equalto', inventory_hostname) | list) + "
+                "(groups['front'] | default([])) }}"
             ),
             "runtime_secrets_advertise_ipv4": exit_public_ipv4,
         }
@@ -2984,6 +4249,39 @@ def main() -> None:
     yaml_write(all_vars_path, all_vars)
     yaml_write(entry_vars_path, entry_vars)
     yaml_write(exit_vars_path, exit_vars)
+    if front_enabled:
+        front_vars.update(
+            {
+                "awg_node_role": "front",
+                "front_enabled": True,
+                "front_relay_enabled": True,
+                "front_active_id": "front-1",
+                "front_replacement_state": "active",
+                "front_access_modes": front_access_modes,
+                "front_cdn_state": front_cdn_state,
+                "front_origin_domain": front_origin_domain,
+                "front_direct_domain": front_direct_domain,
+                "front_cdn_domain": front_cdn_domain,
+                "front_client_domain": (
+                    front_cdn_domain
+                    if front_access_modes == ["cdn"]
+                    else front_direct_domain
+                ),
+                "front_certbot_email": front_certbot_email,
+                "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+                "front_subscription_enabled": False,
+                "front_vless_encryption_enabled": True,
+                "front_xhttp_disguise_enabled": True,
+                "awg3_transit_enabled": False,
+                "runtime_secrets_share_index": 3,
+                "runtime_secrets_peer_inventory_hosts": (
+                    "{{ (groups['entry'] | default([])) + "
+                    "(groups['exit'] | default([])) }}"
+                ),
+                "runtime_secrets_advertise_ipv4": front_public_ipv4,
+            }
+        )
+        yaml_write(front_vars_path, front_vars)
 
     host_vars = {
         "entry-managed": {
@@ -3013,6 +4311,20 @@ def main() -> None:
             "runtime_secrets_share_index": 2,
         },
     }
+    if front_enabled:
+        host_vars["front-managed"] = {
+            "ansible_host": front_host,
+            "ansible_user": front_user,
+            "ansible_port": front_current_port,
+            "ansible_become": True,
+            "ansible_ssh_private_key_file": str(ssh_private),
+            "ssh_listen_port": front_new_port,
+            "security_allow_ssh_port_change": front_current_port != front_new_port,
+            "security_automation_source_ipv4": front_automation_source_ipv4,
+            "security_admin_password_hash": "{{ vault_front_kalimera_password_hash }}",
+            "security_root_password_hash": "{{ vault_front_root_password_hash }}",
+            "runtime_secrets_share_index": 3,
+        }
     if local_entry:
         host_vars["entry-managed"]["ansible_connection"] = "local"
         host_vars["entry-managed"]["ansible_python_interpreter"] = "/usr/bin/python3"
@@ -3020,6 +4332,8 @@ def main() -> None:
         host_vars["entry-managed"]["ansible_become_password"] = "{{ vault_entry_become_password }}"
     if exit_sudo:
         host_vars["exit-managed"]["ansible_become_password"] = "{{ vault_exit_become_password }}"
+    if front_sudo:
+        host_vars["front-managed"]["ansible_become_password"] = "{{ vault_front_become_password }}"
 
     hosts_document = {
         "all": {
@@ -3029,12 +4343,17 @@ def main() -> None:
             }
         }
     }
+    if front_enabled:
+        hosts_document["all"]["children"]["front"] = {
+            "hosts": {"front-managed": host_vars["front-managed"]}
+        }
     hosts_path = staging / "hosts.yml"
     yaml_write(hosts_path, hosts_document)
 
     entry_private = awg_private_key()
     legacy_entry_private = awg_private_key()
     mobile_entry_private = awg_private_key()
+    mobile_header_protection_key = awg_private_key()
     transit_private = awg_private_key()
     exit_private = awg_private_key()
     transit_psk = awg_psk()
@@ -3046,6 +4365,8 @@ def main() -> None:
     )
     entry_exchange_private, entry_exchange_public = ssh_exchange_keypair()
     exit_exchange_private, exit_exchange_public = ssh_exchange_keypair()
+    if front_enabled:
+        front_exchange_private, front_exchange_public = ssh_exchange_keypair()
     vault_document: dict[str, object] = {
         "vault_entry_kalimera_password": account_passwords["ENTRY · kalimera"],
         "vault_entry_kalimera_password_hash": account_password_hashes["ENTRY · kalimera"],
@@ -3056,6 +4377,7 @@ def main() -> None:
         "vault_awg_entry_private_key": entry_private,
         "vault_awg_entry_legacy_private_key": legacy_entry_private,
         "vault_awg_entry_mobile_private_key": mobile_entry_private,
+        "vault_awg_entry_mobile_header_protection_key": mobile_header_protection_key,
         "vault_awg_entry_exit_private_key": transit_private,
         "vault_awg_entry_exit_peer_public_key": awg_public_key(exit_private),
         "vault_awg_exit_private_key": exit_private,
@@ -3109,10 +4431,26 @@ def main() -> None:
             "exit-managed": exit_exchange_public,
         },
     }
+    if front_enabled:
+        vault_document.update(
+            {
+                "vault_front_kalimera_password": account_passwords["FRONT · kalimera"],
+                "vault_front_kalimera_password_hash": account_password_hashes["FRONT · kalimera"],
+                "vault_front_root_password_hash": account_password_hashes["FRONT · root"],
+            }
+        )
+        vault_document["vault_runtime_exchange_private_keys"][
+            "front-managed"
+        ] = front_exchange_private
+        vault_document["vault_runtime_exchange_public_keys"][
+            "front-managed"
+        ] = front_exchange_public
     if entry_sudo:
         vault_document["vault_entry_become_password"] = entry_password
     if exit_sudo:
         vault_document["vault_exit_become_password"] = exit_password
+    if front_sudo:
+        vault_document["vault_front_become_password"] = front_password
     if telegram_enabled:
         vault_document["vault_telegram_bot_token"] = telegram_token
         vault_document["vault_telegram_chat_id"] = telegram_chat
@@ -3156,7 +4494,30 @@ def main() -> None:
             f"I5 = {obfuscation['i5']}\n"
         )
     elif client_mode == "mobile":
-        modern_signatures = f"I1 = {obfuscation['i1']}\n"
+        modern_signatures = (
+            f"I1 = {obfuscation['i1']}\nI2 = {obfuscation['i2']}\n"
+            f"I3 = {obfuscation['i3']}\nI4 = {obfuscation['i4']}\n"
+            f"I5 = {obfuscation['i5']}\n"
+        )
+    mobile_awg3_fields = ""
+    persistent_keepalive = "25"
+    if client_mode == "mobile":
+        mobile_awg3_fields = (
+            f"HeaderProtectionKey = {mobile_header_protection_key}\n"
+            f"ContentPaddingAddition = {AWG3_MOBILE_FEATURE_DEFAULTS['content_padding_addition']}\n"
+            f"RekeyAfterTime = {AWG3_MOBILE_FEATURE_DEFAULTS['rekey_after_time']}\n"
+            f"RekeyTimeout = {AWG3_MOBILE_FEATURE_DEFAULTS['rekey_timeout']}\n"
+            f"RejectAfterTime = {AWG3_MOBILE_FEATURE_DEFAULTS['reject_after_time']}\n"
+            f"KeepaliveTimeout = {AWG3_MOBILE_FEATURE_DEFAULTS['keepalive_timeout']}\n"
+            f"MaxHandshakeAttempts = {AWG3_MOBILE_FEATURE_DEFAULTS['max_handshake_attempts']}\n"
+            "RandomTrailers = "
+            f"{'on' if AWG3_MOBILE_FEATURE_DEFAULTS['random_trailers'] else 'off'}\n"
+            "DisableCookies = "
+            f"{'on' if AWG3_MOBILE_FEATURE_DEFAULTS['disable_cookies'] else 'off'}\n"
+        )
+        persistent_keepalive = str(
+            AWG3_MOBILE_FEATURE_DEFAULTS["persistent_keepalive"]
+        )
     client_config_text = (
         "[Interface]\n"
         f"PrivateKey = {client_private}\n"
@@ -3167,13 +4528,14 @@ def main() -> None:
         f"S1 = {obfuscation['s1']}\nS2 = {obfuscation['s2']}\n"
         f"{modern_padding}"
         f"H1 = {obfuscation['h1']}\nH2 = {obfuscation['h2']}\nH3 = {obfuscation['h3']}\nH4 = {obfuscation['h4']}\n"
-        f"{modern_signatures}\n"
+        f"{modern_signatures}"
+        f"{mobile_awg3_fields}\n"
         "[Peer]\n"
         f"PublicKey = {awg_public_key(client_server_private)}\n"
         f"PresharedKey = {client_psk}\n"
         f"Endpoint = {entry_public_endpoint}:{client_endpoint_port}\n"
         "AllowedIPs = 0.0.0.0/0, ::/0\n"
-        "PersistentKeepalive = 25\n"
+        f"PersistentKeepalive = {persistent_keepalive}\n"
     )
     secure_write(config_staging, client_config_text.encode())
 
@@ -3185,6 +4547,8 @@ def main() -> None:
     atexit.unregister(cleanup_staging)
     cleanup_callback = lambda: cleanup_deployment(repo, hosts_path, vault_password)
     atexit.register(cleanup_callback)
+
+    show_front_deploy_state(production)
 
     ui_step(
         "ПРЕДВАРИТЕЛЬНЫЙ АУДИТ",
@@ -3231,29 +4595,36 @@ def main() -> None:
             "SSH root через 127.0.0.1 не используется."
         )
     check_ssh(exit_host, "kalimera", exit_new_port, ssh_private)
+    if front_enabled:
+        check_ssh(front_host, "kalimera", front_new_port, ssh_private)
     require_operator_ssh_confirmation()
 
     all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
     all_vars["security_finalize_admin_access"] = True
     yaml_write(production / "group_vars" / "all" / "main.yml", all_vars)
 
-    for name, group, current, desired in (
+    transition_hosts = [
         ("entry-managed", "entry", entry_current_port, entry_new_port),
         ("exit-managed", "exit", exit_current_port, exit_new_port),
-    ):
+    ]
+    if front_enabled:
+        transition_hosts.append(
+            ("front-managed", "front", front_current_port, front_new_port)
+        )
+    for name, group, current, desired in transition_hosts:
         host_vars[name]["ansible_user"] = "kalimera"
         host_vars[name]["ansible_become"] = True
         host_vars[name]["ansible_become_method"] = "sudo"
         host_vars[name]["ansible_become_password"] = (
-            "{{ vault_entry_kalimera_password }}"
-            if group == "entry"
-            else "{{ vault_exit_kalimera_password }}"
+            "{{ vault_" + group + "_kalimera_password }}"
         )
         host_vars[name]["ansible_port"] = desired
         host_vars[name]["security_allow_ssh_port_change"] = False
         host_vars[name]["security_previous_ssh_port"] = current
     hosts_document["all"]["children"]["entry"]["hosts"]["entry-managed"] = host_vars["entry-managed"]
     hosts_document["all"]["children"]["exit"]["hosts"]["exit-managed"] = host_vars["exit-managed"]
+    if front_enabled:
+        hosts_document["all"]["children"]["front"]["hosts"]["front-managed"] = host_vars["front-managed"]
     yaml_write(hosts_path, hosts_document)
     remove_bootstrap_become_passwords(production, vault_password)
 
@@ -3283,7 +4654,7 @@ def main() -> None:
     cleanup_deployment(repo, hosts_path, vault_password)
     atexit.unregister(cleanup_callback)
 
-    ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")
+    ui_success("Все активные серверы настроены, проверены и готовы к работе.")
     show_deployment_summary(production)
     show_generated_account_passwords(account_passwords)
     mark_account_passwords_delivered(production)

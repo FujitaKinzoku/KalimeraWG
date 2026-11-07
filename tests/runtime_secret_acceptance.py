@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import grp
 import json
 import os
 import pathlib
@@ -56,6 +57,18 @@ def main() -> int:
         hidden_source = root / "persistent" / ".hidden-secret"
         hidden_source.write_text("hidden-acceptance-secret\n", encoding="utf-8")
         hidden_source.chmod(0o600)
+        linked_source = root / "persistent" / "linked-tree"
+        (linked_source / "archive").mkdir(parents=True, mode=0o700)
+        (linked_source / "live").mkdir(mode=0o700)
+        (linked_source / "archive" / "key.pem").write_text(
+            "linked-acceptance-secret\n", encoding="utf-8"
+        )
+        (linked_source / "live" / "key.pem").symlink_to("../archive/key.pem")
+        public_source = root / "persistent" / "public-tree"
+        (public_source / "rules").mkdir(parents=True, mode=0o700)
+        public_file = public_source / "rules" / "public.json"
+        public_file.write_text('{"version":1,"rules":[]}\n', encoding="utf-8")
+        public_file.chmod(0o644)
         local_share = root / "local.share"
         recovery_share = root / "recovery.share"
         identity = root / "identity"
@@ -86,6 +99,14 @@ def main() -> int:
             "mappings": [
                 {"source": str(source), "target": "test/secret.conf"},
                 {"source": str(hidden_source), "target": "test/.hidden-secret"},
+                {"source": str(linked_source), "target": "test/linked-tree"},
+                {
+                    "source": str(public_source),
+                    "target": "public-tree",
+                    "access_group": "nogroup",
+                    "traverse_paths": ["."],
+                    "read_paths": ["rules"],
+                },
             ],
         }
         config_path.write_text(json.dumps(config), encoding="ascii")
@@ -94,6 +115,18 @@ def main() -> int:
         recovery = ["--recovery-share-file", str(recovery_share)]
 
         run([str(secretctl), "adopt"], env=environment)
+        public_runtime = runtime / "public-tree" / "rules" / "public.json"
+        nogroup_gid = grp.getgrnam("nogroup").gr_gid
+        if (
+            runtime.stat().st_gid != nogroup_gid
+            or runtime.stat().st_mode & 0o777 != 0o710
+        ):
+            raise RuntimeError("runtime traversal policy was not applied")
+        if (
+            public_runtime.stat().st_gid != nogroup_gid
+            or not public_runtime.stat().st_mode & 0o040
+        ):
+            raise RuntimeError("runtime public subtree is not group-readable")
         first_seal = run([str(secretctl), "seal", *recovery], env=environment)
         if "changed" not in first_seal.stdout:
             raise RuntimeError("first seal was not reported as changed")
@@ -108,10 +141,23 @@ def main() -> int:
         run([str(secretctl), "unlock", *recovery], env=environment)
         run([str(secretctl), "verify"], env=environment)
         run([str(secretctl), "check", *recovery], env=environment)
+        if (
+            runtime.stat().st_gid != nogroup_gid
+            or runtime.stat().st_mode & 0o777 != 0o710
+        ):
+            raise RuntimeError("runtime traversal policy was lost after unlock")
+        if (
+            public_runtime.stat().st_gid != nogroup_gid
+            or not public_runtime.stat().st_mode & 0o040
+        ):
+            raise RuntimeError("runtime public subtree access was lost after unlock")
         if source.read_text(encoding="utf-8") != "acceptance-secret\n":
             raise RuntimeError("unlocked content does not match")
         if hidden_source.read_text(encoding="utf-8") != "hidden-acceptance-secret\n":
             raise RuntimeError("hidden unlocked content does not match")
+        linked_key = linked_source / "live" / "key.pem"
+        if not linked_key.is_symlink() or linked_key.read_text(encoding="utf-8") != "linked-acceptance-secret\n":
+            raise RuntimeError("safe relative symlink was not restored")
 
         hidden_source.unlink()
         hidden_source.write_text("plaintext-copy-must-fail\n", encoding="utf-8")

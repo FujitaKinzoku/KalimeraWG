@@ -1,0 +1,11 @@
+---
+- name: Перечитать systemd для backend FRONT
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Перечитать systemd для backend FRONT
+
+- name: Перезапустить backend FRONT
+  ansible.builtin.systemd_service:
+    name: "{{ front_backend_service_name }}"
+    state: restarted
+  listen: Перезапустить backend FRONT

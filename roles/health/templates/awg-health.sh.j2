@@ -104,21 +104,21 @@ fail2ban_sshd_policy_is_strict() {
         grep -Eq '^[[:space:]]*backend[[:space:]]*=[[:space:]]*systemd[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*banaction[[:space:]]*=[[:space:]]*ufw[[:space:]]*$' "$jail" &&
         grep -Eq '^[[:space:]]*usedns[[:space:]]*=[[:space:]]*no[[:space:]]*$' "$jail" &&
-        grep -Eq '^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*127\.0\.0\.1/8[[:space:]]+::1[[:space:]]*$' "$jail"
+        grep -Fqx {{ ('ignoreip = 127.0.0.1/8 ::1 ' ~ security_automation_source_ipv4) | quote }} "$jail"
 }
 
 ufw_logging_is_disabled() {
     ufw status verbose | grep -Eq '^Logging:[[:space:]]+off'
 }
 
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] and security_manage_admin_account | default(false) | bool %}
 managed_admin_is_ready() {
     id {{ security_admin_user | quote }} >/dev/null 2>&1 &&
         id -nG {{ security_admin_user | quote }} | tr ' ' '\n' | grep -Fxq sudo &&
         passwd -S {{ security_admin_user | quote }} | grep -Eq '^[^ ]+[[:space:]]+P[[:space:]]' &&
         passwd -S root | grep -Eq '^root[[:space:]]+P[[:space:]]' &&
         test -s {{ ('/home/' ~ security_admin_user ~ '/.ssh/authorized_keys') | quote }} &&
-        test -x {{ security_admin_command_path | quote }} &&
+        test -x {{ security_admin_command_path | default('/usr/local/libexec/kalimera-admin-command') | quote }} &&
         visudo -cf /etc/sudoers.d/90-kalimera-admin >/dev/null 2>&1 &&
         ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' /etc/sudoers.d/90-kalimera-admin
 }
@@ -132,11 +132,85 @@ runtime_secrets_are_healthy() {
 }
 
 runtime_secret_dependencies_are_loaded() {
+{% if awg_node_role == 'front' %}
+    systemctl cat {{ front_xray_service_name | default('xray.service') | quote }} |
+        grep -Fq 'LoadCredential=config.json:' &&
+        systemctl cat nginx.service |
+            grep -Fq 'Requires={{ runtime_secrets_service_name }}' &&
+        systemctl cat certbot.service |
+            grep -Fq 'Requires={{ runtime_secrets_service_name }}'
+{% elif awg_node_role == 'entry' and front_backend_enabled | default(false) | bool %}
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+{% if awg3_transit_enabled | default(false) | bool %}
+        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
+            grep -Fq 'LoadCredential=awg3.conf:' &&
+{% endif %}
+        systemctl cat {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} |
+            grep -Fq 'LoadCredential=front-backend.json:'
+{#
+   Юнита awg3-transit.service на чистом kernel-каскаде нет: роль awg3_transit
+   ставит его только для userspace-движка. На существующих каскадах файл
+   остался с прежнего движка, поэтому проверка без этого условия проходила на
+   них и падала только на чистой установке.
+#}
+{% elif awg3_transit_enabled | default(false) | bool %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:'
+{% else %}
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:'
+{% endif %}
 }
 {% endif %}
+
+{% if awg_node_role == 'entry' and entry_mobile_client_available | default(false) | bool %}
+mobile_awg31_profile_is_complete() {
+    local config
+    config="$({{ awg3_mobile_tools_binary_path | quote }} showconf {{ entry_mobile_client_interface | quote }} 2>/dev/null)" || return 1
+    for field in HeaderProtectionKey ContentPaddingAddition RekeyAfterTime \
+        RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts \
+        RandomTrailers DisableCookies I1 I2 I3 I4 I5; do
+        grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
+    done
+}
+{% endif %}
+
+{#
+   Проверка полноты профиля нужна в обоих режимах движка. Раньше она
+   определялась только при включённом userspace, и после перевода канала на
+   kernel-модуль молча переставала существовать - вместе с проверкой MTU это
+   оставляло без контроля ровно то, что переезд и менял.
+
+   Наборы полей различаются намеренно. У userspace проверяется весь набор -
+   он давно подтверждён на реальном showconf. В kernel-режиме из списка
+   исключены ContentPaddingAddition, RandomTrailers и DisableCookies: на
+   межсерверном канале они намеренно стоят в 0/off, а печатает ли kernel
+   showconf поля с нулевыми значениями, на живом канале пока не подтверждено.
+   Требовать их присутствия означало бы рисковать ложным FAIL на исправном
+   каскаде, а различающую силу они всё равно не несут - её дают
+   HeaderProtectionKey и I1-I5, которые никогда не совпадают с умолчанием.
+#}
+{% if awg3_transit_enabled | default(false) | bool %}
+{% set awg3_profile_tool = awg3_tools_binary_path %}
+{% set awg3_profile_fields = [
+       'HeaderProtectionKey', 'ContentPaddingAddition', 'RekeyAfterTime',
+       'RekeyTimeout', 'RejectAfterTime', 'KeepaliveTimeout',
+       'MaxHandshakeAttempts', 'RandomTrailers', 'DisableCookies',
+       'I1', 'I2', 'I3', 'I4', 'I5'] %}
+{% else %}
+{% set awg3_profile_tool = 'awg' %}
+{% set awg3_profile_fields = [
+       'HeaderProtectionKey', 'RekeyAfterTime', 'RekeyTimeout',
+       'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts',
+       'I1', 'I2', 'I3', 'I4', 'I5'] %}
+{% endif %}
+awg3_transit_profile_is_complete() {
+    local interface="$1" config
+    config="$({{ awg3_profile_tool | quote }} showconf "$interface" 2>/dev/null)" || return 1
+    for field in {{ awg3_profile_fields | join(' ') }}; do
+        grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
+    done
+}
 
 {% if awg_node_role == 'entry' %}
 dns_no_logs_policy_is_active() {
@@ -175,6 +249,7 @@ ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
 
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 ufw_matches_managed_snapshot() {
     local marker={{ security_ufw_policy_marker | quote }} expected actual status
     [[ -r "$marker" ]] || return 1
@@ -191,6 +266,7 @@ ufw_matches_managed_snapshot() {
     actual="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     [[ -n "$expected" && "$actual" == "$expected" ]]
 }
+{% endif %}
 
 interface_mtu_is() {
     local interface="$1" expected="$2" actual
@@ -203,19 +279,19 @@ aaaa_filtered() {
 }
 
 ufw_interserver_restricted() {
-    local interface="$1" peer="$2" port="$3"
-    iptables -w 10 -C ufw-user-input -i "$interface" -p udp \
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}"
+    iptables -w 10 -C ufw-user-input -i "$interface" -p "$proto" \
         -s "${peer}/32" --dport "$port" -j ACCEPT
 }
 
 ufw_interserver_has_no_broad_allow() {
-    local interface="$1" peer="$2" port="$3" rule
+    local interface="$1" peer="$2" port="$3" proto="${4:-udp}" rule
     while IFS= read -r rule; do
         [[ "$rule" == *"-s ${peer}/32"* ]] || return 1
     done < <(
         iptables -w 10 -S ufw-user-input |
             grep -F -- "-i ${interface}" |
-            grep -F -- '-p udp' |
+            grep -F -- "-p ${proto}" |
             grep -F -- "--dport ${port}" |
             grep -F -- '-j ACCEPT' || true
     )
@@ -264,9 +340,44 @@ udp_ru_bypass_absent() {
         grep -Eq -- '-p udp .*--match-set (force_ru|ru) dst .* -j RETURN'
 }
 
+{% if reality_fallback_enabled | default(false) | bool %}
+tcp_port_listening() {
+    local port="$1"
+    ss -H -ltn "( sport = :${port} )" | grep -q .
+}
+
+reality_dest_tls13() {
+    local host="$1" port="$2"
+    # "Protocol  : TLSv1.3" эхом повторяет запрошенную версию даже при
+    # провале хендшейка - надёжен только "New, TLSv1.3, Cipher is TLS_...".
+    timeout 10 openssl s_client -connect "${host}:${port}" -servername "$host" -tls1_3 </dev/null 2>/dev/null |
+        grep -Eq 'New,[[:space:]]*TLSv1\.3,[[:space:]]*Cipher is[[:space:]]*TLS_'
+}
+
+reality_ru_failover_synced() {
+    local config="$1" disabled_flag="$2" manual_flag="$3" expected current
+    expected=ru-socks
+    # Ручное отключение прокси оператором ставит собственный флаг, отличный от
+    # watchdog-флага; учитывать нужно оба, иначе REALITY продолжит слать
+    # RU-ветку в отключённый SOAX, пока ядро уже ходит напрямую.
+    { [[ -e "$disabled_flag" ]] || [[ -e "$manual_flag" ]]; } && expected=direct-entry
+    # Именно правило по российским подсетям, а не «первое правило с rule_set»:
+    # выше него стоит правило se-domain, ведущее в direct-exit, и по позиции
+    # проверка брала бы его.
+    current="$(jq -r '
+        [.route.rules[] | select((.rule_set? // []) | index("reality-ru-zone"))][0].outbound // empty
+    ' "$config")"
+    [[ "$current" == "$expected" ]]
+}
+{% endif %}
+
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+# В этом блоке находятся только проверки ядра и сетевого профиля AWG.
+# FRONT получает общие политики security, operations и no-logs, но не
+# использует модуль AmneziaWG и межсерверный sysctl-профиль.
 check 'модуль AmneziaWG' modprobe -n amneziawg
 check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
@@ -278,6 +389,7 @@ check 'systemd journal хранится только в RAM' journald_is_volatil
 check 'постоянный rsyslog отключён' rsyslog_is_disabled
 check 'coredump не сохраняются' coredump_storage_is_disabled
 check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+{% endif %}
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
     ufw_interserver_restricted \
@@ -290,7 +402,7 @@ check 'UFW не разрешает межсерверный AWG для всех 
     {{ security_interserver_peer_ipv4 | quote }} \
     {{ security_interserver_listen_port | quote }}
 {% endif %}
-{% if awg_enable_fail2ban | bool %}
+{% if awg_enable_fail2ban | default(true) | bool %}
 check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
 check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
 check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
@@ -298,20 +410,22 @@ check 'состояние Fail2Ban хранится только в RAM' fail2ba
 printf 'OK   включение Fail2Ban намеренно отложено\n'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
-{% if security_manage_admin_account | default(false) | bool %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] and security_manage_admin_account | default(false) | bool %}
 check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
+{% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
-check 'AWG получает конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
+check 'защищённые службы получают конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
 check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
-{% if awg_telegram_monitor_enabled | bool %}
+{% if awg_telegram_monitor_enabled | default(false) | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
     printf 'OK   запуск мониторинга Telegram отложен до финальной проверки\n'
 else
     check 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
 fi
+{% endif %}
 {% endif %}
 
 {% if awg_node_role == 'entry' %}
@@ -337,13 +451,14 @@ else
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
-    check 'служба мобильного AWG' systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service
-    check 'мобильный интерфейс AWG' ip link show {{ entry_mobile_client_interface | quote }}
-    check 'состояние мобильного AWG доступно' awg show {{ entry_mobile_client_interface | quote }}
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
+    check 'служба mobile/AWG3+' systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}
+    check 'мобильный интерфейс AWG 3.1' ip link show {{ entry_mobile_client_interface | quote }}
+    check 'состояние mobile/AWG3+ доступно' {{ awg3_mobile_tools_binary_path | quote }} show {{ entry_mobile_client_interface | quote }}
+    check 'полный профиль AWG 3.1 применён' mobile_awg31_profile_is_complete
     check 'MTU мобильного AWG применён' interface_mtu_is {{ entry_mobile_client_interface | quote }} {{ entry_mobile_client_mtu | int }}
     check 'внешний UDP/8443 мобильного AWG открыт напрямую' {{ entry_mobile_firewall_path | quote }} check
-elif systemctl is-failed --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+elif systemctl is-failed --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'служба мобильного AWG не завершилась с ошибкой' false
 else
     printf 'OK   мобильный интерфейс AWG намеренно неактивен\n'
@@ -359,8 +474,11 @@ check 'состояние AWG до EXIT сервера доступно' awg sho
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
 check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_transit_effective_mtu | int }}
+check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% else %}
 check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_interface | quote }} 180
+check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
+check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% endif %}
 check 'согласование локальных VPN-пиров' systemctl is-active --quiet awg-local-peer-apply.service
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
@@ -381,7 +499,7 @@ if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.ser
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'DNS мобильных клиентов по UDP' dig +time=3 +tries=1 @{{ entry_mobile_client_listen_address }} example.com A
 fi
 {% endif %}
@@ -411,7 +529,7 @@ check 'обычные и legacy-клиенты взаимно изолирова
     {{ entry_legacy_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
-if systemctl is-active --quiet awg-quick@{{ entry_mobile_client_interface }}.service; then
+if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'цепочка маршрутизации мобильного интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -j AWG_RU_PROXY
     check 'принудительный DNS мобильного интерфейса' iptables -w 10 -t nat -C PREROUTING -i {{ entry_mobile_client_interface | quote }} -s {{ entry_mobile_client_subnet | quote }} -p udp --dport 53 -j DNAT --to-destination {{ (entry_mobile_client_listen_address ~ ':53') | quote }}
 fi
@@ -475,6 +593,50 @@ check 'watchdog российского прокси намеренно откл�
 check 'правило policy routing для mark 0x2 отсутствует' rule_absent {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
 check 'российские назначения идут напрямую через ENTRY сервер' route_uses_interface {{ entry_dns_doh_server | quote }} 0x0 {{ entry_wan_interface | quote }}
 {% endif %}
+{% if reality_fallback_enabled | default(false) | bool %}
+check 'rule-set REALITY для ru-domain/se-domain корректен' jq -e . {{ reality_fallback_ru_rule_set_path | quote }}
+check 'rule-set REALITY для российских подсетей корректен' jq -e . {{ reality_fallback_ru_zone_rule_set_path | quote }}
+check 'dest-сайт REALITY поддерживает TLS 1.3' reality_dest_tls13 {{ reality_fallback_dest | quote }} {{ reality_fallback_dest_port | int }}
+{% if front_backend_enabled | default(false) | bool %}
+check 'отдельная служба backend FRONT активна' systemctl is-active --quiet {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}
+check 'backend FRONT прослушивает служебный порт' tcp_port_listening {{ reality_fallback_port | int }}
+check 'backend FRONT содержит только служебный peer' \
+    jq -e '.inbounds[] | select(.tag == "front-reality-in") | (.users | length == 1) and (.users[0].name == "front-service")' \
+    {{ front_backend_config_path | default('/etc/sing-box/front-backend.json') | quote }}
+{% else %}
+check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }} {{ entry_ru_proxy_manual_disabled_flag | quote }}
+{% if entry_ru_proxy_manual_disabled_flag is defined %}
+# REALITY живёт внутри того же процесса sing-box, что и российский прокси,
+# поэтому при ручном отключении прокси служба останавливается целиком и
+# запасной транспорт вместе с ней. Требовать здесь слушающий порт нельзя:
+# health запускается с --strict во время deploy и блокировал бы установку в
+# штатном для оператора режиме. Известное ограничение, см. docs/front-relay.md.
+if [[ ! -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
+    check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+else
+    printf 'OK   запасной транспорт REALITY остановлен вместе с отключённым прокси\n'
+fi
+{% else %}
+check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
+{% endif %}
+{% endif %}
+{% if front_relay_enabled | default(false) | bool %}
+{% if not (front_backend_enabled | default(false) | bool) %}
+check 'REALITY-инбаунд содержит uuid FRONT-релея' jq -e '.inbounds[] | select(.tag == "reality-in") | .users | any(.name == "front-relay")' {{ sing_box_config_path | quote }}
+{% endif %}
+check 'UFW ограничивает REALITY адресом FRONT-релея' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+check 'UFW не разрешает REALITY для всех адресов' \
+    ufw_interserver_has_no_broad_allow \
+    {{ entry_wan_interface | quote }} {{ front_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% if front_replacement_state | default('active') == 'prepared' %}
+check 'прежний FRONT сохранён до подтверждения замены' \
+    ufw_interserver_restricted \
+    {{ entry_wan_interface | quote }} {{ front_previous_public_ipv4 | quote }} {{ reality_fallback_port | int }} tcp
+{% endif %}
+{% endif %}
+{% endif %}
 {% elif awg_node_role == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'служба AWG 3+ EXIT сервера' systemctl is-active --quiet {{ awg3_transit_service_name | quote }}
@@ -490,8 +652,11 @@ check 'состояние AWG EXIT сервера доступно' awg show {{ 
 {% if awg3_transit_enabled | default(false) | bool %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180 {{ awg3_tools_binary_path | quote }}
 check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_transit_effective_mtu | int }}
+check 'полный профиль AWG 3+ EXIT сервера применён' awg3_transit_profile_is_complete {{ exit_awg_interface | quote }}
 {% else %}
 check 'свежий handshake EXIT–ENTRY' handshake_recent {{ exit_awg_interface | quote }} 180
+check 'MTU межсерверного интерфейса EXIT применён' interface_mtu_is {{ exit_awg_interface | quote }} {{ awg3_shared_effective_mtu | default(exit_awg_mtu, true) | int }}
+check 'полный профиль AWG 3+ EXIT сервера применён' awg3_transit_profile_is_complete {{ exit_awg_interface | quote }}
 {% endif %}
 check 'ограниченный NAT EXIT сервера' iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
 check 'изоляция клиентов EXIT сервера' iptables -w 10 -C FORWARD -i {{ exit_awg_interface | quote }} -o {{ exit_awg_interface | quote }} -j DROP
@@ -505,6 +670,326 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 {% if entry_dns_default_via_exit | default(false) | bool %}
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
 check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
+{% endif %}
+{% elif awg_node_role == 'front' %}
+nginx_no_logs_policy_is_active() {
+    local effective
+    effective="$(nginx -T 2>&1)" || return 1
+    grep -Eq '^[[:space:]]*access_log[[:space:]]+off;' <<<"$effective" &&
+        grep -Eq '^[[:space:]]*error_log[[:space:]]+/dev/null[[:space:]]+crit;' <<<"$effective" &&
+        ! find /var/log/nginx -type f -size +0c -print -quit 2>/dev/null | grep -q .
+}
+
+check 'UFW активен' ufw_active
+check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check 'журналирование UFW отключено' ufw_logging_is_disabled
+check 'systemd journal хранится только в RAM' journald_is_volatile
+check 'постоянный rsyslog отключён' rsyslog_is_disabled
+check 'coredump не сохраняются' coredump_storage_is_disabled
+check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+# Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво - только
+# когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
+# поэтому проверка established-соединения всегда падала бы, а health
+# запускается с --strict и заблокировал бы установку. Проверяем то, что
+# обязано быть верно всегда: reality-порт ENTRY доступен с FRONT.
+front_entry_reality_reachable() {
+    timeout 5 bash -c \
+        'exec 3<>/dev/tcp/{{ front_entry_address }}/{{ front_entry_reality_port }}'
+}
+
+front_vless_users_are_consistent() {
+    local state_ids active_ids
+    state_ids="$(jq -r '.users[].id' {{ front_vless_users_path | quote }} | sort)" || return 1
+    active_ids="$(jq -r '.inbounds[0].settings.clients[].id' {{ front_xray_config_path | quote }} | sort)" || return 1
+    [[ -n "$state_ids" && "$state_ids" == "$active_ids" ]] &&
+        {{ front_vless_user_command_path | quote }} list >/dev/null
+}
+
+front_vless_encryption_is_enabled() {
+    jq -e '
+        .inbounds[0].settings.decryption |
+        type == "string" and
+        startswith("mlkem768x25519plus.native.600s.")
+    ' {{ front_xray_config_path | quote }} >/dev/null 2>&1 &&
+        jq -e '
+            .encryption |
+            type == "string" and
+            startswith("mlkem768x25519plus.native.0rtt.")
+        ' {{ front_vless_client_settings_path | quote }} >/dev/null 2>&1
+}
+
+front_xray_permissions_are_restricted() {
+    local state_dir resolved mode numeric_mode
+    state_dir={{ front_xray_state_dir | quote }}
+    resolved="$(readlink -f -- "$state_dir")" || return 1
+    [[ -d "$resolved" ]] || return 1
+{% if runtime_secrets_enabled | default(false) | bool %}
+    [[ "$resolved" == {{ (runtime_secrets_runtime_root ~ '/xray') | quote }} ]] || return 1
+{% endif %}
+    [[ "$(stat -Lc %U -- "$state_dir")" == root ]] || return 1
+    mode="$(stat -Lc %a -- "$state_dir")" || return 1
+    numeric_mode=$((8#$mode))
+    (( (numeric_mode & 0022) == 0 )) &&
+        ! systemctl cat {{ front_xray_service_name | quote }} |
+            grep -Fq 'ReadWritePaths='
+}
+
+front_tls_endpoint_ready() {
+    local domain="$1"
+    getent ahostsv4 "$domain" >/dev/null 2>&1 &&
+        printf '' | timeout 10 openssl s_client \
+            -connect "${domain}:443" -servername "$domain" \
+            -verify_return_error >/dev/null 2>&1
+}
+
+# Живая проверка того, из-за чего CDN-доступ пропал целиком: Yandex Cloud
+# CDN отвечает 413 на любой GET с телом (а POST у него выключен), и пакеты
+# аплинка не доходили даже до nginx, хотя TLS endpoint CDN был жив. Запрос
+# уходит на домен из второго аргумента и строится из того же
+# client-settings.json, из которого vless-user собирает клиентские JSON: GET,
+# id сессии, номер пакета и паддинг там же, где их кладёт клиент, и нагрузка
+# по uplinkDataPlacement - заголовками <ключ>-N по uplinkChunkSize, cookie
+# или, для устаревшего профиля, телом (тогда CDN вернёт 413 и проверка
+# упадёт так же, как упали клиенты). Проба не меньше любого настоящего
+# пакета: те же заголовки браузера, что добавляет Xray, наибольшие длина
+# куска и паддинг, а нагрузка на 48 байт больше scMaxEachPostBytes. Иначе
+# предел заголовков CDN между размером пробы и размером пакета клиента
+# прошёл бы проверку, а клиенты упирались бы в него.
+# К пути добавляется случайный сегмент: Xray и nginx сравнивают путь по
+# префиксу, а уникальный URL не даёт CDN закешировать ответ пробы по адресу,
+# который используют настоящие клиенты. Сессия пробы без нисходящего потока
+# удаляется самим Xray через 30 секунд. URL и cookie передаются curl через
+# stdin, а не аргументами, и не печатаются.
+front_uplink_probe_request() {
+    local variant="$1" domain="$2" settings out path placement data_key chunk bytes
+    local session_placement session_key seq_placement seq_key obfs
+    local padding_placement padding_key padding_header padding_bytes
+    local padding_low padding_high now chrome
+    local padding payload payload_len session nonce query='' cookies='' part i
+    local -a fields=() headers=()
+    [[ "$variant" == valid || "$variant" == invalid ]] || return 1
+    [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || return 1
+    settings={{ front_vless_client_settings_path | quote }}
+    # При наличии extra Xray берёт из xhttpSettings снаружи только host, path
+    # и mode; отсутствующие поля заменяются встроенными значениями Xray-core.
+    out="$(jq -er '
+        [.xhttp.path] + (
+            (.xhttp.extra // .xhttp) | [
+                (.uplinkDataPlacement // "auto"),
+                (.uplinkDataKey // ""),
+                (.uplinkChunkSize // ""),
+                (.scMaxEachPostBytes // 1000000),
+                (.sessionIDPlacement // "path"),
+                (.sessionIDKey // ""),
+                (.seqPlacement // "path"),
+                (.seqKey // ""),
+                (.xPaddingObfsMode // false),
+                (.xPaddingPlacement // "queryInHeader"),
+                (.xPaddingKey // "x_padding"),
+                (.xPaddingHeader // "X-Padding"),
+                (.xPaddingBytes // "100-1000")
+            ]
+        ) | map(tostring) | .[]
+    ' "$settings")" || return 1
+    mapfile -t fields <<<"$out"
+    [[ -n "${fields[13]+set}" && -z "${fields[14]+set}" ]] || return 1
+    # Значения попадают в кавычки конфигурации curl: кавычка или обратная
+    # косая черта в них означали бы повреждённый профиль.
+    [[ "${fields[*]}" != *[\"\\]* ]] || return 1
+    path="${fields[0]%/}"
+    placement="${fields[1]}"
+    data_key="${fields[2]}"
+    chunk="${fields[3]##*-}"
+    bytes="${fields[4]##*-}"
+    session_placement="${fields[5]}"
+    session_key="${fields[6]}"
+    seq_placement="${fields[7]}"
+    seq_key="${fields[8]}"
+    obfs="${fields[9]}"
+    padding_placement="${fields[10]}"
+    padding_key="${fields[11]}"
+    padding_header="${fields[12]}"
+    padding_bytes="${fields[13]}"
+    [[ "$path" == /* ]] || return 1
+    # Больше 64 КБ на пакет через заголовки CDN не пропустит в любом случае.
+    [[ "$bytes" =~ ^[0-9]+$ ]] || return 1
+    (( bytes > 0 && bytes <= 65536 )) || return 1
+    if [[ -z "$chunk" ]]; then
+        # Встроенные размеры Xray-core (GetNormalizedUplinkChunkSize).
+        if [[ "$placement" == cookie ]]; then chunk=3072; else chunk=4000; fi
+    fi
+    [[ "$chunk" =~ ^[0-9]+$ ]] || return 1
+    (( chunk >= 64 )) || return 1
+    [[ "$padding_bytes" =~ ^([0-9]+)(-([0-9]+))?$ ]] || return 1
+    padding_low="${BASH_REMATCH[1]}"
+    padding_high="${BASH_REMATCH[3]:-$padding_low}"
+    (( padding_high > 0 && padding_high >= padding_low )) || return 1
+    # Наибольшая допустимая длина. Символ X кодируется в HPACK ровно одним
+    # байтом, поэтому такая строка проходит и проверку длины repeat-x, и
+    # проверку tokenish в Xray (splithttp/xpadding.go, IsPaddingValid).
+    printf -v padding '%*s' "$padding_high" ''
+    padding="${padding// /X}"
+    session="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$session" =~ ^[0-9a-f]{32}$ && "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+    # base64url без паддинга, как в Xray (RawURLEncoding). Порядок наборов
+    # tr выбран так, чтобы второй не начинался с дефиса и не стал ключом.
+    # 48 байт (64 символа) сверх наибольшего пакета - запас на случайную
+    # длину паддинга tokenish и версии в заголовках настоящего клиента.
+    # Сервер FRONT принимает такой пакет: scMaxEachPostBytes у него не задан,
+    # и действует встроенный предел 1 000 000 байт.
+    payload="$(head -c "$(( bytes + 48 ))" /dev/urandom | base64 -w0 | tr '/+' '_-' | tr -d '=')"
+    payload_len="$(printf '%s' "$payload" | wc -c)"
+    (( payload_len > 1 )) || return 1
+    if [[ "$variant" == invalid ]]; then
+        # Тот же размер, но последний символ заведомо не base64url: дошедший
+        # до Xray пакет обязан получить 400. Именно последний: Xray склеивает
+        # куски <ключ>-0, <ключ>-1, ... до первого отсутствующего, поэтому
+        # если CDN или nginx выбросили или обрезали любой кусок, испорченный
+        # символ до Xray не дойдёт, остаток декодируется, ответ будет 200, и
+        # проверка упадёт.
+        payload="${payload:0:payload_len-1}."
+    fi
+    now="$(date -u +%s)" || return 1
+    [[ "$now" =~ ^[0-9]+$ ]] || return 1
+    # Версия Chrome по той же формуле, что у Xray (ChromeVersion: Chrome 144
+    # от 13.01.2026 = день 20466 эпохи Unix, новая версия каждые 35 дней).
+    chrome=$(( 144 + (now / 86400 - 20466 - 35) / 35 ))
+    # Заголовки, которые Xray-core v26.7.28 без явного User-Agent добавляет к
+    # каждому пакету: маскировка под fetch() из Chrome (common/utils/browser.go,
+    # applyMasqueradedHeaders) и Accept-Encoding, который HTTP/2-транспорт Go
+    # (golang.org/x/net/http2) ставит сам. Без них проба была бы примерно на
+    # 0,5 КБ меньше настоящего пакета. Свои User-Agent и Accept curl при этом
+    # не добавляет.
+    headers+=(
+        "Sec-CH-UA: \"Not?A_Brand\";v=\"99\", \"Chromium\";v=\"$chrome\", \"Google Chrome\";v=\"$chrome\""
+        'Sec-CH-UA-Mobile: ?0'
+        'Sec-CH-UA-Platform: "Windows"'
+        'DNT: 1'
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chrome.0.0.0 Safari/537.36"
+        'Accept-Language: en-US,en;q=0.9'
+        'Sec-Fetch-Mode: cors'
+        'Sec-Fetch-Dest: empty'
+        'Sec-Fetch-Site: same-origin'
+        'Priority: u=1, i'
+        'Cache-Control: no-cache'
+        'Pragma: no-cache'
+        'Accept: */*'
+        'Accept-Encoding: gzip'
+    )
+
+    case "$session_placement" in
+        path) path+="/$session" ;;
+        cookie) cookies+="${cookies:+; }${session_key:-x_session}=$session" ;;
+        query) query+="${query:+&}${session_key:-x_session}=$session" ;;
+        header) headers+=("${session_key:-X-Session}: $session") ;;
+        *) return 1 ;;
+    esac
+    case "$seq_placement" in
+        path) path+="/0" ;;
+        cookie) cookies+="${cookies:+; }${seq_key:-x_seq}=0" ;;
+        query) query+="${query:+&}${seq_key:-x_seq}=0" ;;
+        header) headers+=("${seq_key:-X-Seq}: 0") ;;
+        *) return 1 ;;
+    esac
+    path+="/$nonce"
+    if [[ "$obfs" == true ]]; then
+        case "$padding_placement" in
+            cookie) cookies+="${cookies:+; }$padding_key=$padding" ;;
+            query) query+="${query:+&}$padding_key=$padding" ;;
+            header) headers+=("$padding_header: $padding") ;;
+            *) headers+=("$padding_header: https://$domain$path?$padding_key=$padding") ;;
+        esac
+    else
+        headers+=("Referer: https://$domain$path?x_padding=$padding")
+    fi
+    case "$placement" in
+        header|cookie)
+            for (( i = 0; i * chunk < payload_len; i++ )); do
+                part="${payload:i*chunk:chunk}"
+                if [[ "$placement" == header ]]; then
+                    headers+=("${data_key:-X-Data}-$i: $part")
+                else
+                    cookies+="${cookies:+; }${data_key:-x_data}_$i=$part"
+                fi
+            done
+            ;;
+    esac
+
+    {
+        printf 'url = "https://%s%s%s"\n' "$domain" "$path" "${query:+?$query}"
+        # Внутри кавычек конфигурации curl кавычку и обратную косую черту
+        # (они есть в Sec-CH-UA) нужно экранировать обратной косой чертой.
+        printf '%s\n' "${headers[@]}" |
+            sed 's/["\\]/\\&/g; s/^/header = "/; s/$/"/'
+        if [[ -n "$cookies" ]]; then
+            printf 'cookie = "%s"\n' "$cookies"
+        fi
+        case "$placement" in
+            header|cookie) ;;
+            *) printf 'request = "GET"\ndata-binary = "%s"\n' "$payload" ;;
+        esac
+    } | curl --silent --ipv4 --max-time 20 --output /dev/null \
+        --write-out '%{http_code}' --config -
+}
+
+# $1 - домен, через который идёт проба: домен CDN или, пока замена FRONT не
+# подтверждена, origin-домен этого FRONT.
+front_uplink_reaches_xray() {
+    local domain="$1" placement status
+    placement="$(jq -er '(.xhttp.extra // .xhttp).uplinkDataPlacement // "auto"' \
+        {{ front_vless_client_settings_path | quote }})" || return 1
+    status="$(front_uplink_probe_request valid "$domain")" || return 1
+    [[ "$status" == 200 ]] || return 1
+    case "$placement" in
+        header|cookie)
+            # Пустая нагрузка декодируется без ошибки, и Xray отвечает на неё
+            # тем же 200, поэтому 200 выше ничего не доказывает, если CDN или
+            # nginx вырезали заголовки по дороге. Пакет той же длины с
+            # испорченным последним символом обязан дойти до Xray целиком и
+            # получить 400.
+            status="$(front_uplink_probe_request invalid "$domain")" || return 1
+            [[ "$status" == 400 ]]
+            ;;
+    esac
+}
+
+check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
+check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
+check 'синтаксис Nginx FRONT-релея' nginx -t
+check 'реестр VLESS-пользователей согласован с Xray' front_vless_users_are_consistent
+check 'VLESS Encryption ML-KEM-768 включён на FRONT и в клиентских JSON' \
+    front_vless_encryption_is_enabled
+check 'Xray не может изменять каталог конфигурации' front_xray_permissions_are_restricted
+check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
+check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
+    openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if 'direct' in front_access_modes %}
+check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_ready {{ front_direct_domain | quote }}
+{% endif %}
+{% if 'cdn' in front_access_modes %}
+check 'TLS endpoint CDN доступен' front_tls_endpoint_ready {{ front_cdn_domain | quote }}
+{% if front_xhttp_mode | default('packet-up') == 'packet-up' %}
+{% if front_replacement_state | default('active') == 'prepared' %}
+# До commit замены CDN origin по-прежнему указывает на старый FRONT
+# (оператор переключает его после --replace-front), и проба через CDN
+# проверила бы не этот сервер, а старый FRONT без аплинка в заголовках
+# провалил бы её и сорвал замену. Поэтому до commit тот же пакет уходит прямо
+# на origin-домен этого FRONT: проверяются его nginx и Xray, но не CDN. После
+# commit FRONT не перенастраивается, и проба через CDN включится при
+# следующем обычном deploy.
+check 'аплинк packet-up без тела доходит до Xray нового FRONT (напрямую, до commit замены)' \
+    front_uplink_reaches_xray {{ front_origin_domain | quote }}
+{% else %}
+check 'аплинк packet-up через CDN доходит до Xray (GET без тела)' \
+    front_uplink_reaches_xray {{ front_cdn_domain | quote }}
+{% endif %}
+{% endif %}
+{% endif %}
+{% if front_entry_reality_stopped | default(false) | bool %}
+printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
+{% else %}
+check 'REALITY-порт ENTRY доступен с FRONT' front_entry_reality_reachable
 {% endif %}
 {% endif %}
 

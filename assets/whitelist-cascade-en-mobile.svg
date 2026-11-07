@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="1060" viewBox="0 0 390 1060" role="img" aria-labelledby="title desc">
+  <title id="title">Mobile KalimeraWG ingress diagram</title>
+  <desc id="desc">Three paths through AWG, FRONT, or a CDN converge at ENTRY and use one routing policy.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+    .title { fill: #f0f6fc; font-size: 22px; font-weight: 600; }
+    .section { fill: #8b949e; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+    .label { fill: #f0f6fc; font-size: 17px; font-weight: 600; }
+    .detail { fill: #8b949e; font-size: 14px; }
+    .path { fill: #f0f6fc; font-size: 16px; font-weight: 600; }
+    .arrow { fill: #8b949e; font-size: 21px; }
+    .node { fill: #161b22; stroke: #30363d; stroke-width: 1.5; }
+    .core { fill: #172536; stroke: #58a6ff; stroke-width: 2; }
+    .route { fill: #2a2118; stroke: #d29922; stroke-width: 2; }
+    .exit { fill: #17251c; stroke: #3fb950; stroke-width: 2; }
+    .verified { fill: #142826; stroke: #2f9b91; stroke-width: 2; }
+    .divider { stroke: #30363d; stroke-width: 1; }
+  </style>
+
+  <rect width="390" height="1060" rx="14" fill="#0d1117"/>
+  <text x="20" y="36" class="title">KalimeraWG · ingress</text>
+  <text x="20" y="68" class="section">1. CLIENT PATHS</text>
+
+  <text x="25" y="101" class="label">Primary AWG</text>
+  <rect x="25" y="114" width="340" height="62" rx="7" class="node"/>
+  <text x="195" y="140" text-anchor="middle" class="path">Client  →  ENTRY</text>
+  <text x="195" y="162" text-anchor="middle" class="detail">AWG 3+ · UDP/443 or 8443</text>
+
+  <text x="25" y="215" class="label">FRONT without CDN</text>
+  <rect x="25" y="228" width="340" height="62" rx="7" class="node"/>
+  <text x="195" y="254" text-anchor="middle" class="path">Client  →  FRONT  →  ENTRY</text>
+  <text x="195" y="276" text-anchor="middle" class="detail">TLS + VLESS/XHTTP</text>
+
+  <text x="25" y="329" class="label">Reachable CDN</text>
+  <rect x="25" y="342" width="340" height="70" rx="7" class="verified"/>
+  <text x="195" y="369" text-anchor="middle" class="path">Client → CDN → FRONT → ENTRY</text>
+  <text x="195" y="393" text-anchor="middle" class="detail">validated while an allowlist was active</text>
+
+  <line x1="20" y1="440" x2="370" y2="440" class="divider"/>
+  <text x="20" y="473" class="section">2. POLICY AFTER ENTRY</text>
+
+  <rect x="25" y="492" width="340" height="58" rx="7" class="core"/>
+  <text x="195" y="528" text-anchor="middle" class="label">ENTRY</text>
+  <text x="195" y="573" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="590" width="340" height="66" rx="7" class="route"/>
+  <text x="195" y="617" text-anchor="middle" class="label">RU traffic</text>
+  <text x="195" y="641" text-anchor="middle" class="detail">SOCKS5 / TUN or WAN ENTRY</text>
+
+  <text x="195" y="686" text-anchor="middle" class="detail">remaining and forced traffic</text>
+  <rect x="25" y="703" width="340" height="66" rx="7" class="node"/>
+  <text x="195" y="730" text-anchor="middle" class="label">ENTRY  →  AWG 3+  →  EXIT</text>
+  <text x="195" y="754" text-anchor="middle" class="detail">dedicated transit tunnel</text>
+
+  <line x1="20" y1="797" x2="370" y2="797" class="divider"/>
+  <text x="20" y="830" class="section">3. SHARED PROTECTION</text>
+  <rect x="25" y="849" width="340" height="82" rx="7" class="node"/>
+  <text x="195" y="881" text-anchor="middle" class="label">Key-only SSH · UFW · Fail2Ban</text>
+  <text x="195" y="909" text-anchor="middle" class="detail">no-logs · 2-of-N secrets · integrity checks</text>
+
+  <rect x="25" y="962" width="340" height="66" rx="7" class="exit"/>
+  <text x="195" y="989" text-anchor="middle" class="label">One cascade policy</text>
+  <text x="195" y="1013" text-anchor="middle" class="detail">shared by AWG, FRONT, and CDN ingress</text>
+</svg>

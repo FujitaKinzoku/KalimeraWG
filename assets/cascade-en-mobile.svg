@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="1120" viewBox="0 0 390 1120" role="img" aria-labelledby="title desc">
+  <title id="title">Mobile KalimeraWG routing diagram</title>
+  <desc id="desc">A vertical diagram of client ingress, the primary EXIT route, and the RU traffic policy.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+    .title { fill: #f0f6fc; font-size: 22px; font-weight: 600; }
+    .section { fill: #8b949e; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+    .label { fill: #f0f6fc; font-size: 18px; font-weight: 600; }
+    .detail { fill: #8b949e; font-size: 14px; }
+    .arrow { fill: #8b949e; font-size: 21px; }
+    .node { fill: #161b22; stroke: #30363d; stroke-width: 1.5; }
+    .core { fill: #172536; stroke: #58a6ff; stroke-width: 2; }
+    .route { fill: #2a2118; stroke: #d29922; stroke-width: 2; }
+    .exit { fill: #17251c; stroke: #3fb950; stroke-width: 2; }
+    .divider { stroke: #30363d; stroke-width: 1; }
+  </style>
+
+  <rect width="390" height="1120" rx="14" fill="#0d1117"/>
+  <text x="20" y="36" class="title">KalimeraWG · routing</text>
+  <text x="20" y="68" class="section">1. CLIENT INGRESS</text>
+
+  <rect x="25" y="86" width="340" height="66" rx="7" class="node"/>
+  <text x="195" y="113" text-anchor="middle" class="label">VPN client</text>
+  <text x="195" y="137" text-anchor="middle" class="detail">AWG · UDP/443 or 8443</text>
+  <text x="195" y="177" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="194" width="340" height="66" rx="7" class="core"/>
+  <text x="195" y="221" text-anchor="middle" class="label">ENTRY</text>
+  <text x="195" y="245" text-anchor="middle" class="detail">DNS and routing</text>
+
+  <line x1="20" y1="288" x2="370" y2="288" class="divider"/>
+  <text x="20" y="321" class="section">2. PRIMARY ROUTE</text>
+  <rect x="25" y="340" width="340" height="58" rx="7" class="core"/>
+  <text x="195" y="376" text-anchor="middle" class="label">ENTRY</text>
+  <text x="195" y="421" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="438" width="340" height="66" rx="7" class="node"/>
+  <text x="195" y="465" text-anchor="middle" class="label">AWG 3+</text>
+  <text x="195" y="489" text-anchor="middle" class="detail">dedicated transit tunnel</text>
+  <text x="195" y="527" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="544" width="340" height="58" rx="7" class="exit"/>
+  <text x="195" y="580" text-anchor="middle" class="label">EXIT</text>
+  <text x="195" y="625" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="642" width="340" height="58" rx="7" class="node"/>
+  <text x="195" y="678" text-anchor="middle" class="label">Internet</text>
+
+  <line x1="20" y1="728" x2="370" y2="728" class="divider"/>
+  <text x="20" y="761" class="section">3. RU POLICY</text>
+  <rect x="25" y="780" width="340" height="58" rx="7" class="core"/>
+  <text x="195" y="816" text-anchor="middle" class="label">ENTRY</text>
+  <text x="195" y="861" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="878" width="340" height="66" rx="7" class="route"/>
+  <text x="195" y="905" text-anchor="middle" class="label">RU traffic</text>
+  <text x="195" y="929" text-anchor="middle" class="detail">domains · networks · ports</text>
+  <text x="195" y="967" text-anchor="middle" class="arrow">↓</text>
+  <rect x="25" y="984" width="340" height="50" rx="7" class="node"/>
+  <text x="195" y="1016" text-anchor="middle" class="label">SOCKS5 / TUN</text>
+  <text x="195" y="1058" text-anchor="middle" class="detail">or</text>
+  <rect x="25" y="1073" width="340" height="34" rx="7" class="node"/>
+  <text x="195" y="1096" text-anchor="middle" class="detail">WAN ENTRY · fail-open</text>
+</svg>

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import json
 import os
 import pty
 import re
@@ -25,6 +26,291 @@ SPEC.loader.exec_module(MODULE)
 
 
 class InteractiveDeployTests(unittest.TestCase):
+    def test_front_replacement_prepare_transfers_users_and_preserves_cdn(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            all_root = production / "group_vars" / "all"
+            all_root.mkdir(parents=True)
+            password_path = root / "vault.pass"
+            password_path.write_bytes(b"test-vault-password\n")
+            home = root / "home"
+            ssh_root = home / ".ssh"
+            ssh_root.mkdir(parents=True)
+            (ssh_root / "awg-iac-production").write_text("private", encoding="ascii")
+            (ssh_root / "awg-iac-production.pub").write_text(
+                "ssh-ed25519 AAAAtest controller\n", encoding="ascii"
+            )
+            MODULE.yaml_write(
+                production / "hosts.yml",
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {"ansible_host": "9.9.9.9"}
+                                }
+                            },
+                            "front": {
+                                "hosts": {
+                                    "front-managed": {
+                                        "ansible_host": "8.8.8.8",
+                                        "ansible_user": "kalimera",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            MODULE.yaml_write(
+                production / "group_vars" / "entry.yml",
+                {
+                    "front_public_ipv4": "8.8.8.8",
+                    "front_replacement_state": "active",
+                },
+            )
+            MODULE.yaml_write(production / "group_vars" / "exit.yml", {})
+            MODULE.yaml_write(all_root / "main.yml", {})
+            MODULE.yaml_write(
+                production / "group_vars" / "front.yml",
+                {
+                    "front_replacement_state": "active",
+                    "front_origin_domain": "old-origin.example.invalid",
+                    "front_direct_domain": "old-origin.example.invalid",
+                    "front_cdn_domain": "edge.example.invalid",
+                    "front_client_domain": "edge.example.invalid",
+                    "front_access_modes": ["direct", "cdn"],
+                    "front_xhttp_path": "/preserved-path",
+                    "front_certbot_email": "old@example.invalid",
+                },
+            )
+            vault = VaultLib(
+                [("default", VaultSecret(b"test-vault-password"))]
+            )
+            vault_path = all_root / "vault.yml"
+            vault_path.write_bytes(
+                vault.encrypt(yaml.safe_dump({"existing": "value"}).encode("utf-8"))
+            )
+            users = {
+                "schema": 1,
+                "users": [
+                    {
+                        "name": "phone",
+                        "id": "11111111-1111-4111-8111-111111111111",
+                        "mode": "cdn",
+                    },
+                    {
+                        "name": "laptop",
+                        "id": "22222222-2222-4222-8222-222222222222",
+                        "mode": "direct",
+                    },
+                ],
+            }
+            replacement_root = root / "replacement"
+
+            with (
+                mock.patch.object(MODULE.Path, "home", return_value=home),
+                mock.patch.object(
+                    MODULE,
+                    "_front_replacement_state_root",
+                    return_value=replacement_root,
+                ),
+                mock.patch.object(
+                    MODULE, "_read_front_users_over_ssh", return_value=users
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "prompt",
+                    side_effect=[
+                        "1.1.1.1",
+                        "root",
+                        "new-origin.example.invalid",
+                        "new@example.invalid",
+                    ],
+                ),
+                mock.patch.object(MODULE, "prompt_port", side_effect=[22, 56779]),
+                mock.patch.object(MODULE.getpass, "getpass", return_value="password"),
+                mock.patch.object(MODULE, "bootstrap_key", return_value=""),
+                mock.patch.object(
+                    MODULE,
+                    "remote_observed_ssh_source_ipv4",
+                    return_value="4.4.4.4",
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.prepare_front_replacement(production, password_path)
+                )
+
+            children = MODULE.load_yaml(production / "hosts.yml")["all"]["children"]
+            replacement = children["front"]["hosts"]["front-managed"]
+            self.assertEqual(replacement["ansible_host"], "1.1.1.1")
+            self.assertEqual(replacement["ansible_user"], "root")
+            self.assertEqual(replacement["ansible_port"], 22)
+            self.assertEqual(replacement["ssh_listen_port"], 56779)
+            self.assertEqual(replacement["security_automation_source_ipv4"], "4.4.4.4")
+
+            entry = MODULE.load_yaml(production / "group_vars" / "entry.yml")
+            front = MODULE.load_yaml(production / "group_vars" / "front.yml")
+            self.assertEqual(entry["front_public_ipv4"], "1.1.1.1")
+            self.assertEqual(entry["front_previous_public_ipv4"], "8.8.8.8")
+            self.assertEqual(front["front_replacement_state"], "prepared")
+            self.assertEqual(front["front_origin_domain"], "new-origin.example.invalid")
+            self.assertEqual(front["front_direct_domain"], "new-origin.example.invalid")
+            self.assertEqual(front["front_cdn_domain"], "edge.example.invalid")
+            self.assertEqual(front["front_xhttp_path"], "/preserved-path")
+
+            decrypted = yaml.safe_load(vault.decrypt(vault_path.read_bytes()))
+            self.assertEqual(decrypted["vault_front_vless_users"], users)
+            marker = json.loads(
+                (replacement_root / "current.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(Path(marker["backup"]).is_dir())
+
+            shares = [
+                f"kalimerawgruntimev1-{index}-{'a' * 64}"
+                for index in range(1, 6)
+            ]
+            exchange_counter = iter(range(1, 4))
+
+            def exchange_keypair() -> tuple[str, str]:
+                index = next(exchange_counter)
+                return f"private-{index}", f"ssh-ed25519 public-{index} exchange"
+
+            with (
+                mock.patch.object(MODULE.Path, "home", return_value=home),
+                mock.patch.object(MODULE, "split_runtime_secret", return_value=shares),
+                mock.patch.object(
+                    MODULE, "ssh_exchange_keypair", side_effect=exchange_keypair
+                ),
+            ):
+                self.assertTrue(
+                    MODULE.ensure_runtime_secret_material(production, password_path)
+                )
+
+            protected_children = MODULE.load_yaml(production / "hosts.yml")["all"][
+                "children"
+            ]
+            protected_front = protected_children["front"]["hosts"]["front-managed"]
+            self.assertEqual(protected_front["runtime_secrets_share_index"], 3)
+            self.assertEqual(
+                protected_front["runtime_secrets_advertise_ipv4"], "1.1.1.1"
+            )
+            protected_vault = yaml.safe_load(vault.decrypt(vault_path.read_bytes()))
+            self.assertEqual(protected_vault["vault_front_vless_users"], users)
+            self.assertEqual(
+                set(protected_vault["vault_runtime_exchange_private_keys"]),
+                {"entry-managed", "exit-managed", "front-managed"},
+            )
+
+    def test_front_replacement_commit_and_finish_are_two_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = Path(temporary) / "production"
+            (production / "group_vars").mkdir(parents=True)
+            entry_path = production / "group_vars" / "entry.yml"
+            front_path = production / "group_vars" / "front.yml"
+            MODULE.yaml_write(
+                entry_path,
+                {
+                    "front_replacement_state": "prepared",
+                    "front_previous_public_ipv4": "198.51.100.20",
+                },
+            )
+            MODULE.yaml_write(
+                front_path,
+                {
+                    "front_replacement_state": "prepared",
+                    "front_previous_public_ipv4": "198.51.100.20",
+                    "front_previous_origin_domain": "old.example.invalid",
+                    "front_access_modes": ["direct"],
+                },
+            )
+            with mock.patch.object(MODULE, "prompt_bool", return_value=True):
+                MODULE.commit_front_replacement(production)
+            self.assertEqual(
+                MODULE.load_yaml(entry_path)["front_replacement_state"], "active"
+            )
+            self.assertIn(
+                "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
+            )
+            with (
+                mock.patch.object(
+                    MODULE, "_front_replacement_state_root", return_value=Path(temporary)
+                ),
+                mock.patch("builtins.print") as output,
+            ):
+                (Path(temporary) / "current.json").write_text("{}", encoding="utf-8")
+                MODULE.finish_front_replacement(production)
+            self.assertTrue(
+                any(
+                    "old.example.invalid (198.51.100.20)" in str(call)
+                    for call in output.call_args_list
+                )
+            )
+            self.assertNotIn(
+                "front_previous_public_ipv4", MODULE.load_yaml(entry_path)
+            )
+            self.assertNotIn(
+                "front_previous_origin_domain", MODULE.load_yaml(front_path)
+            )
+
+    def test_front_replacement_rollback_restores_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = root / "production"
+            group_vars = production / "group_vars"
+            (group_vars / "all").mkdir(parents=True)
+            backup = root / "backup"
+            backup.mkdir()
+            expected = {
+                "hosts.yml": b"all: {children: {front: {hosts: {old: {}}}}}\n",
+                "entry.yml": b"front_public_ipv4: 198.51.100.20\n",
+                "front.yml": b"front_replacement_state: active\n",
+                "vault.yml": b"encrypted-vault-placeholder\n",
+            }
+            for name, content in expected.items():
+                (backup / name).write_bytes(content)
+            marker_root = root / "state"
+            marker_root.mkdir()
+            (marker_root / "current.json").write_text(
+                json.dumps({"backup": str(backup)}), encoding="utf-8"
+            )
+            with mock.patch.object(
+                MODULE, "_front_replacement_state_root", return_value=marker_root
+            ):
+                MODULE.rollback_front_replacement(production)
+            self.assertEqual((production / "hosts.yml").read_bytes(), expected["hosts.yml"])
+            self.assertEqual((group_vars / "entry.yml").read_bytes(), expected["entry.yml"])
+            self.assertEqual((group_vars / "front.yml").read_bytes(), expected["front.yml"])
+            self.assertEqual((group_vars / "all" / "vault.yml").read_bytes(), expected["vault.yml"])
+            self.assertTrue((marker_root / "current.json").is_file())
+
+    def test_component_update_cannot_be_combined_with_front_operation(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "deploy",
+                    "--repo-root",
+                    str(Path(__file__).parents[1]),
+                    "--resume",
+                    "--update-components",
+                    "--replace-front",
+                ],
+            ),
+            self.assertRaises(SystemExit) as error,
+        ):
+            MODULE.main()
+        self.assertEqual(error.exception.code, 2)
+
     def test_remote_observed_source_uses_ssh_connection_ipv4(self) -> None:
         with (
             mock.patch.object(MODULE, "require_command", return_value="ssh"),
@@ -71,6 +357,120 @@ class InteractiveDeployTests(unittest.TestCase):
         with mock.patch.object(MODULE, "ssh_connection_works", return_value=False):
             with self.assertRaisesRegex(SystemExit, "Ansible и аварийная очистка не запускались"):
                 MODULE.verify_saved_inventory_access(hosts)
+
+    def test_saved_inventory_recovers_confirmed_kalimera_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "entry": {
+                            "hosts": {
+                                "entry-managed": {"ansible_connection": "local"}
+                            }
+                        },
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+
+            def connection_works(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                self.assertEqual(host, "198.51.100.20")
+                self.assertEqual(port, 56777)
+                self.assertEqual(private_key, Path("/root/.ssh/automation"))
+                return user == "kalimera"
+
+            with mock.patch.object(
+                MODULE, "ssh_connection_works", side_effect=connection_works
+            ):
+                recovered = MODULE.recover_saved_admin_access(
+                    hosts, hosts_path, root_login_finalized=True
+                )
+
+            self.assertEqual(recovered, ["exit-managed"])
+            updated = MODULE.load_yaml(hosts_path)["all"]["children"]["exit"][
+                "hosts"
+            ]["exit-managed"]
+            self.assertEqual(updated["ansible_user"], "kalimera")
+            self.assertEqual(updated["ansible_port"], 56777)
+            self.assertTrue(updated["ansible_become"])
+            self.assertEqual(updated["ansible_become_method"], "sudo")
+            self.assertEqual(
+                updated["ansible_become_password"],
+                "{{ vault_exit_kalimera_password }}",
+            )
+
+    def test_finalized_root_is_not_probed_before_admin_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 56777,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            with mock.patch.object(
+                MODULE, "ssh_connection_works", return_value=True
+            ) as connection:
+                MODULE.recover_saved_admin_access(
+                    hosts, hosts_path, root_login_finalized=True
+                )
+            self.assertEqual(connection.call_count, 1)
+            self.assertEqual(connection.call_args.args[1], "kalimera")
+
+    def test_saved_inventory_does_not_change_without_verified_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            hosts_path = Path(temporary) / "hosts.yml"
+            hosts = {
+                "all": {
+                    "children": {
+                        "exit": {
+                            "hosts": {
+                                "exit-managed": {
+                                    "ansible_host": "198.51.100.20",
+                                    "ansible_user": "root",
+                                    "ansible_port": 22,
+                                    "ssh_listen_port": 56777,
+                                    "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    "security_allow_ssh_port_change": True,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            MODULE.yaml_write(hosts_path, hosts)
+            before = hosts_path.read_bytes()
+            with mock.patch.object(MODULE, "ssh_connection_works", return_value=False):
+                self.assertEqual(
+                    MODULE.recover_saved_admin_access(hosts, hosts_path), []
+                )
+            self.assertEqual(hosts_path.read_bytes(), before)
 
     def test_resume_refreshes_observed_automation_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -263,11 +663,16 @@ class InteractiveDeployTests(unittest.TestCase):
             example = repo / "inventory" / "example"
             all_vars_path = production / "group_vars" / "all" / "main.yml"
             entry_vars_path = production / "group_vars" / "entry.yml"
+            exit_vars_path = production / "group_vars" / "exit.yml"
             stable_entry_path = example / "group_vars" / "entry.yml"
             awg3_defaults_path = repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
+            awg3_mobile_defaults_path = (
+                repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+            )
             all_vars_path.parent.mkdir(parents=True)
             stable_entry_path.parent.mkdir(parents=True)
             awg3_defaults_path.parent.mkdir(parents=True)
+            awg3_mobile_defaults_path.parent.mkdir(parents=True)
             MODULE.yaml_write(
                 all_vars_path,
                 {
@@ -280,6 +685,18 @@ class InteractiveDeployTests(unittest.TestCase):
                 {
                     "entry_sing_box_version": "1.0.0",
                     "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+                    "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_awg0_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_awg1_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_legacy_awg_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                    "entry_mobile_awg_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+                },
+            )
+            MODULE.yaml_write(
+                exit_vars_path,
+                {
+                    "exit_awg_subnet": "10.77.1.0/24",
+                    "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
                 },
             )
             MODULE.yaml_write(
@@ -302,16 +719,52 @@ class InteractiveDeployTests(unittest.TestCase):
                     "awg3_tools_source_commit": "b" * 40,
                 },
             )
-
             MODULE.prepare_component_update(repo, production)
 
             all_vars = MODULE.load_yaml(all_vars_path)
             entry_vars = MODULE.load_yaml(entry_vars_path)
+            exit_vars = MODULE.load_yaml(exit_vars_path)
             self.assertEqual(all_vars["awg_package_version_mode"], "candidate")
             self.assertNotIn("awg_package_versions", all_vars)
             self.assertEqual(entry_vars["entry_sing_box_version"], "2.0.0")
             self.assertEqual(entry_vars["entry_sing_box_packages"]["x86_64"]["url"], "new")
             self.assertEqual(all_vars["awg3_go_source_commit"], "a" * 40)
+            # Отдельной сборки mobile больше нет: интерфейс поднимает
+            # kernel-модуль, закреплять для него нечего.
+            self.assertNotIn("awg3_mobile_go_source_commit", all_vars)
+            # Профиль обфускации межсерверного канала - тоже часть
+            # закреплённого manifest этого выпуска репозитория (не только
+            # первичной установки, см. awg3_transit_obfuscation()) и должен
+            # обновиться при --update-components точно так же, как версии
+            # пакетов выше, иначе уже развёрнутый каскад никогда не получит
+            # улучшения профиля. Jc/Jmin/Jmax - диапазон (сама структура
+            # генерации вариативна, не только значения), поэтому проверяем
+            # границы, а не точное число. Старое значение jc/jmin/jmax=1/1/1
+            # во всех файлах-фикстурах подтверждает, что оно было реально
+            # заменено, а не просто оставлено как было.
+            transit = entry_vars["awg3_transit_obfuscation"]
+            self.assertTrue(8 <= transit["jc"] <= 16)
+            self.assertTrue(48 <= transit["jmin"] <= 80)
+            self.assertTrue(384 <= transit["jmax"] <= 640)
+            self.assertEqual(transit, exit_vars["awg3_transit_obfuscation"])
+            # Остальные четыре профиля (общий/Keenetic 5.1.x, запасной awg1,
+            # легаси-Keenetic, mobile/AWG3+) живут только на ENTRY, но тоже
+            # должны обновиться - тот же класс проблемы, что был у transit
+            # до этой сессии.
+            for key in (
+                "entry_awg0_obfuscation",
+                "entry_legacy_awg_obfuscation",
+                "entry_mobile_awg_obfuscation",
+            ):
+                self.assertNotEqual(
+                    entry_vars[key],
+                    {"jc": 1, "jmin": 1, "jmax": 1},
+                    f"{key} не был перегенерирован",
+                )
+            # awg1 - тот же объект, что и transit (запасной kernel-канал
+            # использует тот же согласованный профиль, что и userspace AWG3+).
+            self.assertEqual(entry_vars["entry_awg1_obfuscation"], transit)
+            self.assertEqual(exit_vars["exit_awg_subnet"], "10.77.1.0/24")
 
     def test_failed_component_update_restores_inventory_and_runs_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -321,6 +774,7 @@ class InteractiveDeployTests(unittest.TestCase):
             production = repo / "inventory" / "production"
             all_vars_path = production / "group_vars" / "all" / "main.yml"
             entry_vars_path = production / "group_vars" / "entry.yml"
+            exit_vars_path = production / "group_vars" / "exit.yml"
             vault_path = production / "group_vars" / "all" / "vault.yml"
             hosts_path = production / "hosts.yml"
             stable_entry_path = (
@@ -329,7 +783,11 @@ class InteractiveDeployTests(unittest.TestCase):
             awg3_defaults_path = (
                 repo / "roles" / "awg3_transit" / "defaults" / "main.yml"
             )
+            awg3_mobile_defaults_path = (
+                repo / "roles" / "awg3_mobile" / "defaults" / "main.yml"
+            )
             awg3_defaults_path.parent.mkdir(parents=True)
+            awg3_mobile_defaults_path.parent.mkdir(parents=True)
             stable_entry_path.parent.mkdir(parents=True)
             original_all = {
                 "awg_package_version_mode": "pinned",
@@ -344,9 +802,15 @@ class InteractiveDeployTests(unittest.TestCase):
             original_entry = {
                 "entry_sing_box_version": "1.0.0",
                 "entry_sing_box_packages": {"x86_64": {"url": "old"}},
+                "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
+            }
+            original_exit = {
+                "exit_awg_subnet": "10.77.1.0/24",
+                "awg3_transit_obfuscation": {"jc": 1, "jmin": 1, "jmax": 1},
             }
             MODULE.yaml_write(all_vars_path, original_all)
             MODULE.yaml_write(entry_vars_path, original_entry)
+            MODULE.yaml_write(exit_vars_path, original_exit)
             MODULE.yaml_write(
                 stable_entry_path,
                 {
@@ -363,6 +827,19 @@ class InteractiveDeployTests(unittest.TestCase):
                 "awg3_tools_source_commit": "b" * 40,
             }
             MODULE.yaml_write(awg3_defaults_path, awg3_manifest)
+            MODULE.yaml_write(
+                awg3_mobile_defaults_path,
+                {
+                    "awg3_mobile_go_version": "1.25.12",
+                    "awg3_mobile_go_archives": {
+                        "x86_64": {"checksum": "sha256:mobile-go"}
+                    },
+                    "awg3_mobile_go_source_version": "v3.1",
+                    "awg3_mobile_go_source_commit": "c" * 40,
+                    "awg3_mobile_tools_source_version": "v3.1",
+                    "awg3_mobile_tools_source_commit": "d" * 40,
+                },
+            )
             MODULE.yaml_write(
                 hosts_path,
                 {
@@ -437,6 +914,11 @@ class InteractiveDeployTests(unittest.TestCase):
 
             self.assertEqual(MODULE.load_yaml(all_vars_path), original_all)
             self.assertEqual(MODULE.load_yaml(entry_vars_path), original_entry)
+            # exit.yml должен откатиться вместе с entry.yml - оба хранят одну и
+            # ту же общую awg3_transit_obfuscation, а неудавшийся
+            # --update-components не должен оставить стороны канала
+            # рассинхронизированными (одна на новом профиле, другая на старом).
+            self.assertEqual(MODULE.load_yaml(exit_vars_path), original_exit)
             self.assertEqual(package_lock.read_text(encoding="utf-8"), original_lock)
             self.assertEqual(ansible_run.call_count, 3)
             rollback_extra = ansible_run.call_args_list[1].args[4]
@@ -446,6 +928,236 @@ class InteractiveDeployTests(unittest.TestCase):
                 rollback_extra["awg_package_transaction_id"],
                 ansible_run.call_args_list[0].args[4]["awg_package_transaction_id"],
             )
+
+    def test_final_deploy_retries_once_after_recovering_stale_ssh_access(self) -> None:
+        """root может отключиться на хосте прямо во время финального site.yml -
+        та же самая гонка, что чинит recover_saved_admin_access для --resume,
+        только на этот раз она бьёт по самому финальному прогону, а не по
+        входу в него. Ожидается один автоматический повтор без участия
+        оператора, если восстановление реально нашло рабочий kalimera."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            home = root / "home"
+            production = repo / "inventory" / "production"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            vault_path = production / "group_vars" / "all" / "vault.yml"
+            hosts_path = production / "hosts.yml"
+            (production / "group_vars").mkdir(parents=True)
+            # security_finalize_admin_access ещё False на входе в прогон -
+            # то же самое сочетание, что и в реальности: complete_ssh_transition
+            # (замокан ниже) ничего не поменял, а root на самом деле отключается
+            # только внутри самого мокнутого site.yml - предварительная проверка
+            # recover_saved_admin_access перед complete_ssh_transition должна
+            # честно увидеть рабочий root и ничего не трогать, чтобы гонку
+            # действительно ловил именно новый код повтора, а не она сама.
+            MODULE.yaml_write(
+                all_vars_path,
+                {
+                    "security_admin_authorized_keys": ["ssh-ed25519 fixture"],
+                    "security_require_admin_authorized_key": True,
+                    "security_admin_user": "kalimera",
+                    "security_finalize_admin_access": False,
+                },
+            )
+            MODULE.yaml_write(
+                hosts_path,
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {
+                                        "ansible_host": "198.51.100.20",
+                                        "ansible_user": "root",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                        "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            vault_path.write_text("$ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
+            vault_password = home / ".config" / "awg-iac" / "production-vault.pass"
+            vault_password.parent.mkdir(parents=True)
+            vault_password.write_text("fixture\n", encoding="utf-8")
+
+            state = {"root_finalized": False}
+
+            def connection_works(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                if user == "root":
+                    return not state["root_finalized"]
+                return user == "kalimera"
+
+            def ansible_side_effect(
+                repo_arg: Path,
+                inventory_arg: Path,
+                vault_arg: Path,
+                playbook: str,
+                extra_vars: dict[str, object] | None = None,
+            ) -> None:
+                if playbook == "playbooks/site.yml" and not state["root_finalized"]:
+                    # Имитирует security-роль, которая внутри этого же прогона
+                    # финализирует отключение root, после чего более поздняя
+                    # задача того же прогона (например, чтение SSH host key
+                    # для Shamir-play) падает по устаревшим данным подключения.
+                    state["root_finalized"] = True
+                    raise SystemExit(
+                        "exit-managed: Permission denied (publickey)"
+                    )
+                return None
+
+            with (
+                mock.patch.object(Path, "home", return_value=home),
+                mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_mobile_awg3_vault_material"),
+                mock.patch.object(MODULE, "show_front_deploy_state"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "update_saved_client_configs_cps"),
+                mock.patch.object(MODULE, "update_saved_client_configs_mtu"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
+                mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
+                mock.patch.object(
+                    MODULE, "ssh_connection_works", side_effect=connection_works
+                ),
+                mock.patch.object(
+                    MODULE, "ansible", side_effect=ansible_side_effect
+                ) as ansible_run,
+                mock.patch.object(MODULE, "cleanup_deployment"),
+                mock.patch.object(MODULE, "show_deployment_summary"),
+                mock.patch.object(MODULE.atexit, "register"),
+                mock.patch.object(MODULE.atexit, "unregister"),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["interactive_deploy.py", "--repo-root", str(repo), "--resume"],
+                ),
+            ):
+                MODULE.main()
+
+            site_yml_calls = [
+                call
+                for call in ansible_run.call_args_list
+                if call.args[3] == "playbooks/site.yml"
+            ]
+            self.assertEqual(len(site_yml_calls), 2)
+            updated = MODULE.load_yaml(hosts_path)["all"]["children"]["exit"][
+                "hosts"
+            ]["exit-managed"]
+            self.assertEqual(updated["ansible_user"], "kalimera")
+
+    def test_final_deploy_does_not_mask_unrelated_ssh_failure(self) -> None:
+        """Если recover_saved_admin_access ничего не восстановила (проблема
+        не в этой конкретной гонке root/kalimera), повтор не выполняется и
+        оригинальная ошибка доходит до оператора как есть - иначе можно было
+        бы случайно замаскировать по-настоящему сломанный сервер под "просто
+        повторить"."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            home = root / "home"
+            production = repo / "inventory" / "production"
+            all_vars_path = production / "group_vars" / "all" / "main.yml"
+            vault_path = production / "group_vars" / "all" / "vault.yml"
+            hosts_path = production / "hosts.yml"
+            (production / "group_vars").mkdir(parents=True)
+            MODULE.yaml_write(
+                all_vars_path,
+                {
+                    "security_admin_authorized_keys": ["ssh-ed25519 fixture"],
+                    "security_require_admin_authorized_key": True,
+                    "security_admin_user": "kalimera",
+                    "security_finalize_admin_access": True,
+                },
+            )
+            MODULE.yaml_write(
+                hosts_path,
+                {
+                    "all": {
+                        "children": {
+                            "entry": {
+                                "hosts": {
+                                    "entry-managed": {"ansible_connection": "local"}
+                                }
+                            },
+                            "exit": {
+                                "hosts": {
+                                    "exit-managed": {
+                                        "ansible_host": "198.51.100.20",
+                                        "ansible_user": "root",
+                                        "ansible_port": 56777,
+                                        "ssh_listen_port": 56777,
+                                        "ansible_ssh_private_key_file": "/root/.ssh/automation",
+                                    }
+                                }
+                            },
+                        }
+                    }
+                },
+            )
+            vault_path.write_text("$ANSIBLE_VAULT;1.1;AES256\n", encoding="utf-8")
+            vault_password = home / ".config" / "awg-iac" / "production-vault.pass"
+            vault_password.parent.mkdir(parents=True)
+            vault_password.write_text("fixture\n", encoding="utf-8")
+
+            def connection_never_recovers(
+                host: str, user: str, port: int, private_key: Path
+            ) -> bool:
+                return False
+
+            with (
+                mock.patch.object(Path, "home", return_value=home),
+                mock.patch.object(MODULE, "migrate_production_inventory"),
+                mock.patch.object(MODULE, "ensure_mobile_awg3_vault_material"),
+                mock.patch.object(MODULE, "show_front_deploy_state"),
+                mock.patch.object(MODULE, "ensure_runtime_secret_material"),
+                mock.patch.object(MODULE, "ensure_admin_account_material"),
+                mock.patch.object(MODULE, "update_saved_client_configs_cps"),
+                mock.patch.object(MODULE, "verify_saved_inventory_access"),
+                mock.patch.object(MODULE, "refresh_saved_automation_sources"),
+                mock.patch.object(MODULE, "complete_ssh_transition", return_value=False),
+                mock.patch.object(
+                    MODULE, "ssh_connection_works", side_effect=connection_never_recovers
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "ansible",
+                    side_effect=SystemExit("exit-managed: Permission denied (publickey)"),
+                ) as ansible_run,
+                mock.patch.object(MODULE, "cleanup_deployment"),
+                mock.patch.object(MODULE.atexit, "register"),
+                mock.patch.object(MODULE.atexit, "unregister"),
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    ["interactive_deploy.py", "--repo-root", str(repo), "--resume"],
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    SystemExit, "Permission denied"
+                ):
+                    MODULE.main()
+
+            # Без подтверждённого kalimera-доступа повтор не выполняется -
+            # ошибка не маскируется, если проблема не в этой конкретной гонке.
+            site_yml_calls = [
+                call
+                for call in ansible_run.call_args_list
+                if call.args[3] == "playbooks/site.yml"
+            ]
+            self.assertEqual(len(site_yml_calls), 1)
 
     def test_terminal_only_updates_role_without_full_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -702,7 +1414,11 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(migrated["entry_mobile_client_listen_port"], 8443)
             self.assertEqual(migrated["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(migrated["entry_mobile_legacy_internal_port"], 39746)
-            self.assertEqual(migrated["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", migrated)
+            self.assertEqual(migrated["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(migrated["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
+            for index in range(1, 6):
+                self.assertTrue(migrated["entry_mobile_awg_obfuscation"][f"i{index}"])
             self.assertNotIn("entry_mobile_client_public_port", migrated)
             self.assertNotIn("entry_mobile_client_internal_port", migrated)
             self.assertEqual(
@@ -757,12 +1473,17 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(entry["entry_mobile_client_subnet"], "10.68.0.0/24")
             self.assertEqual(entry["entry_mobile_client_address"], "10.68.0.1/24")
             self.assertEqual(entry["entry_mobile_client_listen_port"], 8443)
-            self.assertEqual(entry["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", entry)
+            self.assertEqual(entry["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(entry["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertIn("entry_mobile_awg_obfuscation", entry)
+            for index in range(1, 6):
+                self.assertTrue(entry["entry_mobile_awg_obfuscation"][f"i{index}"])
 
             decrypted = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
             mobile_private = decrypted["vault_awg_entry_mobile_private_key"]
             self.assertTrue(mobile_private)
+            self.assertTrue(decrypted["vault_awg_entry_mobile_header_protection_key"])
             self.assertEqual(decrypted["vault_entry_mobile_client_peers"], [])
             self.assertEqual(entry_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(vault_path.stat().st_mode & 0o777, 0o600)
@@ -774,6 +1495,85 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(
                 repeated["vault_awg_entry_mobile_private_key"], mobile_private
             )
+
+    def test_resume_repairs_partial_mobile_awg31_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            production = Path(directory) / "production"
+            entry_path = production / "group_vars" / "entry.yml"
+            entry_path.parent.mkdir(parents=True)
+            entry_path.write_text(
+                "entry_mobile_client_available: true\n"
+                "entry_mobile_profile_generation: awg3.1\n"
+                "entry_mobile_service_name: awg-quick@awg-mobile.service\n"
+                "entry_mobile_awg_obfuscation:\n"
+                "  s1: 8\n"
+                "  i1: '<b 0x01>'\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(MODULE.migrate_production_inventory(production))
+            migrated = yaml.safe_load(entry_path.read_text(encoding="utf-8"))
+            profile = migrated["entry_mobile_awg_obfuscation"]
+            self.assertTrue(MODULE.awg_mobile_awg3_profile_is_complete(profile))
+            self.assertFalse(MODULE.migrate_production_inventory(production))
+
+    def test_mobile_awg31_obfuscation_profile_is_pinned(self) -> None:
+        # Значения сверены напрямую с исходником закреплённых версий (не по
+        # пересказу документации): amneziawg-go v3.1.20260814, commit
+        # 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1 (device/uapi.go,
+        # device/noise-types.go, device/obf.go, device/obf_rand.go,
+        # device/obf_bytes.go) и amneziawg-tools v3.1.20260812, commit
+        # ee0f0a9aa34ff0a0da4b3433b9512781cfe02843 (src/config.c). Jc/Jmin/Jmax
+        # и S1-S4 не имеют протокольного предела кроме uint32/uint16,
+        # HeaderProtectionKey требует S1-S4 >= HeaderCipherNonceSize (12),
+        # H1-H4 не пересекаются, I1-I5 - валидная цепочка тегов <b 0xHEX>/<r N>.
+        # Любое отклонение от этих чисел должно быть осознанным изменением с
+        # повторной сверкой протокола, а не случайным дрейфом.
+        defaults = yaml.safe_load(
+            (
+                MODULE_PATH.parents[2] / "roles" / "entry" / "defaults" / "main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        profile = defaults["entry_mobile_awg_obfuscation"]
+        self.assertEqual(
+            profile,
+            {
+                "jc": 5,
+                "jmin": 10,
+                "jmax": 50,
+                "s1": 32,
+                "s2": 48,
+                "s3": 24,
+                "s4": 16,
+                "h1": "100000001-250000000",
+                "h2": "600000001-750000000",
+                "h3": "1100000001-1250000000",
+                "h4": "1600000001-1750000000",
+                "i1": "<b 0xc30000000108><r 8><b 0x08><r 8><b 0x004496><r 1000><r 174>",
+                "i2": "<b 0x40><r 127>",
+                "i3": "<b 0x41><r 95>",
+                "i4": "<b 0x42><r 63>",
+                "i5": "<b 0x43><r 47>",
+            },
+        )
+        for key in ("s1", "s2", "s3", "s4"):
+            self.assertGreaterEqual(
+                profile[key],
+                12,
+                f"{key} должен быть >= HeaderCipherNonceSize (12) для HeaderProtectionKey",
+            )
+        ranges = {
+            key: tuple(int(part) for part in profile[key].split("-"))
+            for key in ("h1", "h2", "h3", "h4")
+        }
+        for key, (lo, hi) in ranges.items():
+            self.assertLessEqual(lo, hi, f"{key}: диапазон задан задом наперёд")
+        for left_key, (left_lo, left_hi) in ranges.items():
+            for right_key, (right_lo, right_hi) in ranges.items():
+                if left_key >= right_key:
+                    continue
+                overlap = left_lo <= right_hi and right_lo <= left_hi
+                self.assertFalse(overlap, f"{left_key} и {right_key} пересекаются")
 
     def test_resume_migrates_saved_client_cps_without_exposing_other_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -976,7 +1776,7 @@ class InteractiveDeployTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertLess(
             sing_box_tasks.index("Связывание запуска sing-box"),
-            sing_box_tasks.index("Применение: прокси sing-box — этап 17"),
+            sing_box_tasks.index("Применение: прокси sing-box - этап 17"),
         )
         self.assertIn("awg-entry-routing-reconcile", dropin)
         self.assertIn("test ! -x", dropin)
@@ -1043,10 +1843,10 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn('export_user_config "$2"', vpn_user)
         self.assertIn('cat -- "$output"', vpn_user)
         self.assertIn('export_user_config "$name"', vpn_user)
-        self.assertIn('awg set "$iface" peer "$public_key" remove', vpn_user)
+        self.assertIn('"$tool" set "$iface" peer "$public_key" remove', vpn_user)
         self.assertIn("config-backups/entry/clients/deleted", vpn_user)
         self.assertIn("управляется зашифрованным inventory", vpn_user)
-        self.assertIn('"$client_ip" "$profile" >"$peer_file"', vpn_user)
+        self.assertIn('"$client_ip" "$profile_label" >"$peer_file"', vpn_user)
         self.assertIn("#_Profile", vpn_user)
 
         self.assertIn("restore_state", domains)
@@ -1200,7 +2000,7 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("Изоляция служебного AWG 3+", security_tasks)
         self.assertIn("взаимно изолированы", health)
         self.assertLess(
-            security_tasks.index('name: "Удаление: безопасность — этап 38"'),
+            security_tasks.index('name: "Удаление: безопасность - этап 38"'),
             security_tasks.index(
                 'name: "Фиксация отпечатка окончательной политики UFW"'
             ),
@@ -1220,7 +2020,14 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("mode = aggressive", fail2ban_jail)
         self.assertIn("banaction = ufw", fail2ban_jail)
         self.assertIn("usedns = no", fail2ban_jail)
-        self.assertIn("ignoreip = 127.0.0.1/8 ::1", fail2ban_jail)
+        self.assertIn(
+            "ignoreip = 127.0.0.1/8 ::1 {{ security_automation_source_ipv4 }}",
+            fail2ban_jail,
+        )
+        self.assertIn(
+            "Исключение подтверждённого управляющего SSH из ограничения частоты",
+            security_tasks,
+        )
         self.assertIn("fail2ban_sshd_policy_is_strict", health)
 
     def test_no_logs_baseline_keeps_only_volatile_operational_state(self) -> None:
@@ -1402,8 +2209,7 @@ class InteractiveDeployTests(unittest.TestCase):
         profiles = (
             MODULE.awg_server_obfuscation(),
             MODULE.awg_legacy_server_obfuscation(),
-            MODULE.awg_mobile_dns_obfuscation(),
-            MODULE.awg_mobile_quic_obfuscation(),
+            MODULE.awg_mobile_awg3_obfuscation(),
             MODULE.awg3_transit_obfuscation(),
         )
         for profile in profiles:
@@ -1440,14 +2246,40 @@ class InteractiveDeployTests(unittest.TestCase):
         )
 
     def test_modern_i2_i5_signatures_remain_populated_and_bounded(self) -> None:
-        server = MODULE.awg_server_obfuscation()
-        for key in ("i2", "i3", "i4", "i5"):
-            value = str(server[key])
-            self.assertTrue(value.startswith("<b 0x"))
-            self.assertIn("><r ", value)
-            random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
-            self.assertGreater(random_size, 0)
-            self.assertLess(random_size, 192)
+        # Предел берётся из таблицы границ генератора, а не собственным
+        # литералом: прежняя копия "< 192" устарела после расширения границ и
+        # отбраковывала 7% честных профилей - редкий, но настоящий красный CI.
+        # Одного вызова мало, чтобы поймать такой разъезд, поэтому выборка.
+        for _ in range(200):
+            server = MODULE.awg_server_obfuscation()
+            for key, (low, high) in MODULE.AWG_SHORT_SIGNATURE_BOUNDS.items():
+                value = str(server[key])
+                with self.subTest(key=key, value=value):
+                    self.assertTrue(value.startswith("<b 0x"))
+                    self.assertIn("><r ", value)
+                    random_size = int(value.rsplit("<r ", 1)[1].removesuffix(">"))
+                    # <r N> несёт размер пакета без первого байта тега <b 0x..>,
+                    # поэтому сверяем с границами восстановленный размер.
+                    self.assertGreaterEqual(random_size + 1, low[0])
+                    self.assertLessEqual(random_size + 1, high[1])
+                    self.assertLessEqual(random_size, MODULE.AWG_CPS_RANDOM_TAG_MAX)
+
+    def test_short_signature_bounds_stay_ordered_and_descending(self) -> None:
+        # Структурные инварианты самой таблицы: нижняя граница ниже верхней, а
+        # подписи I2-I5 идут по убыванию - иначе "короткая" подпись перестанет
+        # быть короче предыдущей и профиль потеряет задуманную форму.
+        bounds = MODULE.AWG_SHORT_SIGNATURE_BOUNDS
+        self.assertEqual(list(bounds), ["i2", "i3", "i4", "i5"])
+        previous: tuple[int, int] | None = None
+        for key, (low, high) in bounds.items():
+            with self.subTest(key=key):
+                self.assertLess(low[0], low[1])
+                self.assertLess(high[0], high[1])
+                self.assertLess(low[1], high[0])
+                if previous is not None:
+                    self.assertLess(low[1], previous[0])
+                    self.assertLess(high[1], previous[1])
+                previous = (low[1], high[1])
 
     def test_old_profile_uses_only_base_scalar_asc(self) -> None:
         server = MODULE.awg_legacy_server_obfuscation()
@@ -1463,77 +2295,9 @@ class InteractiveDeployTests(unittest.TestCase):
         for index in range(1, 6):
             self.assertEqual(client[f"i{index}"], "")
 
-    def test_mobile_profile_matches_confirmed_ios_dns_signature(self) -> None:
-        server = MODULE.awg_mobile_dns_obfuscation()
-        client = MODULE.awg_client_obfuscation("mobile", server)
-        self.assertEqual((client["jc"], client["jmin"], client["jmax"]), (5, 10, 50))
-        self.assertEqual(client["s4"], 0)
-        self.assertTrue(str(client["i1"]).startswith("<r 2><b 0x8580"))
-        self.assertIn("69636c6f756403636f6d", str(client["i1"]))
-        for index in range(2, 6):
-            self.assertEqual(client[f"i{index}"], "")
-
-    def test_mobile_quic_test_changes_only_i1(self) -> None:
-        dns_profile = MODULE.awg_mobile_dns_obfuscation()
-        with mock.patch.object(MODULE, "random_between", side_effect=[4, 8, 8]):
-            quic_profile = MODULE.awg_mobile_quic_obfuscation()
-
-        for key in (
-            "jc", "jmin", "jmax", "s1", "s2", "s3", "s4",
-            "h1", "h2", "h3", "h4", "i2", "i3", "i4", "i5",
-        ):
-            self.assertEqual(quic_profile[key], dns_profile[key])
-        self.assertEqual(
-            quic_profile["i1"],
-            "<b 0xc30000000108><r 8><b 0x08><r 8>"
-            "<b 0x004496><r 1000><r 174>",
-        )
-
-    def test_mobile_i1_mode_is_stable_and_reversible(self) -> None:
-        dns_profile = MODULE.awg_mobile_dns_obfuscation()
-        with tempfile.TemporaryDirectory() as temporary:
-            production = Path(temporary)
-            entry_path = production / "group_vars" / "entry.yml"
-            entry_path.parent.mkdir(parents=True)
-            MODULE.yaml_write(
-                entry_path,
-                {
-                    "entry_mobile_i1_mode": "dns-ios",
-                    "entry_mobile_awg_obfuscation": dns_profile,
-                },
-            )
-            with mock.patch.object(MODULE, "random_between", side_effect=[4, 8, 8]):
-                self.assertTrue(
-                    MODULE.set_mobile_i1_mode(production, "quic-ios")
-                )
-            first_quic = MODULE.load_yaml(entry_path)[
-                "entry_mobile_awg_obfuscation"
-            ]["i1"]
-
-            with mock.patch.object(
-                MODULE,
-                "awg_quic_initial_signature",
-                side_effect=AssertionError("I1 не должен ротироваться при resume"),
-            ):
-                self.assertFalse(
-                    MODULE.set_mobile_i1_mode(production, "quic-ios")
-                )
-            self.assertEqual(
-                MODULE.load_yaml(entry_path)["entry_mobile_awg_obfuscation"]["i1"],
-                first_quic,
-            )
-
-            self.assertTrue(MODULE.set_mobile_i1_mode(production, "dns-ios"))
-            restored = MODULE.load_yaml(entry_path)
-            self.assertEqual(restored["entry_mobile_i1_mode"], "dns-ios")
-            self.assertEqual(
-                restored["entry_mobile_awg_obfuscation"]["i1"],
-                dns_profile["i1"],
-            )
-
-    def test_mobile_interface_uses_direct_8443_and_cleans_legacy_dns_redirect(self) -> None:
+    def test_mobile_awg3_profile_uses_direct_8443_and_full_field_set(self) -> None:
         root = MODULE_PATH.parents[2]
-        config = (root / "roles/entry/templates/awg-mobile.conf.j2").read_text(
+        config = (root / "roles/awg3_mobile/templates/mobile.conf.j2").read_text(
             encoding="utf-8"
         )
         firewall = (
@@ -1545,15 +2309,195 @@ class InteractiveDeployTests(unittest.TestCase):
         self.assertIn("ListenPort = {{ entry_mobile_client_listen_port }}", config)
         self.assertIn("vault_entry_mobile_client_peers", config)
         self.assertIn("I1 = {{ entry_mobile_awg_obfuscation.i1 }}", config)
-        self.assertNotIn("I2 =", config)
+        for field in (
+            "I2", "I3", "I4", "I5", "HeaderProtectionKey",
+            "ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout",
+            "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts",
+            "RandomTrailers", "DisableCookies",
+        ):
+            self.assertIn(f"{field} =", config)
+        # Mobile поднимается kernel-модулем через awg-quick, поэтому конфиг
+        # сам несёт адрес, MTU и обвязку, которую раньше делал userspace-скрипт.
+        self.assertIn("Address = {{ entry_mobile_client_address }}", config)
+        self.assertIn("MTU = {{ entry_mobile_client_mtu | int }}", config)
+        self.assertIn("Table = off", config)
+        self.assertIn("PostUp = {{ entry_mobile_firewall_path }} apply", config)
+        self.assertIn("PostDown = {{ entry_mobile_firewall_path }} remove", config)
+        self.assertNotIn("AdvancedSecurity", config)
         self.assertIn("readonly comment=awg-mobile-public-quic", firewall)
         self.assertIn("--dport \"$listen_port\"", firewall)
         self.assertIn("-j ACCEPT", firewall)
         self.assertIn("remove_legacy_redirect", firewall)
         self.assertIn("check-dns-clean", firewall)
         self.assertNotIn("-A PREROUTING", firewall)
-        self.assertIn("vpn-user NAME [performance|balanced|masking|mobile|old]", user)
+        self.assertIn("vpn-user NAME [performance|balanced|masking|mobile/AWG3+|old]", user)
+        self.assertIn("mobile/AWG3+", user)
+        self.assertIn("mobile-awg3|mobile/awg3+", user)
+        self.assertIn("HeaderProtectionKey =", user)
         self.assertIn("./deploy --resume --enable-mobile", user)
+
+    def test_awg3_transit_profile_pinned_to_v31_with_full_field_set(self) -> None:
+        # Сверено напрямую с исходником закреплённых версий (тот же коммит,
+        # что уже проверен для mobile/AWG3+ - см.
+        # test_mobile_awg31_obfuscation_profile_is_pinned): amneziawg-go
+        # v3.1.20260814, commit 1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1;
+        # amneziawg-tools v3.1.20260812, commit
+        # ee0f0a9aa34ff0a0da4b3433b9512781cfe02843. Любое отклонение должно
+        # быть осознанным обновлением с повторной сверкой протокола, а не
+        # случайным дрейфом.
+        root = MODULE_PATH.parents[2]
+        defaults = yaml.safe_load(
+            (root / "roles" / "awg3_transit" / "defaults" / "main.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(defaults["awg3_go_source_version"], "v3.1.20260814")
+        self.assertEqual(
+            defaults["awg3_go_source_commit"],
+            "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1",
+        )
+        self.assertEqual(defaults["awg3_tools_source_version"], "v3.1.20260812")
+        self.assertEqual(
+            defaults["awg3_tools_source_commit"],
+            "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843",
+        )
+        # Рандомизация размера выключена намеренно: замерено 7.6% против 1.9%
+        # потерь на живом межсерверном канале, см. комментарий в defaults роли.
+        self.assertFalse(defaults["awg3_random_trailers"])
+        self.assertFalse(defaults["awg3_disable_cookies"])
+
+        # Статические тайминги/паддинг - не генерируются заново при деплое
+        # (в отличие от Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5, см. ниже), поэтому их
+        # можно и нужно закрепить буквально: любое отклонение от диапазонов,
+        # близких к спецификации WireGuard с небольшим джиттером (обоснование
+        # см. в docs/awg3.md), должно быть осознанным решением, а не
+        # случайной правкой defaults/main.yml.
+        self.assertEqual(
+            {
+                key: defaults[key]
+                for key in (
+                    "awg3_content_padding_addition",
+                    "awg3_rekey_after_time",
+                    "awg3_rekey_timeout",
+                    "awg3_reject_after_time",
+                    "awg3_keepalive_timeout",
+                    "awg3_max_handshake_attempts",
+                    "awg3_persistent_keepalive",
+                )
+            },
+            {
+                "awg3_content_padding_addition": "0",
+                "awg3_rekey_after_time": "120-180",
+                "awg3_rekey_timeout": "5-8",
+                "awg3_reject_after_time": "180-240",
+                "awg3_keepalive_timeout": "10-15",
+                "awg3_max_handshake_attempts": "18-24",
+                "awg3_persistent_keepalive": "22-30",
+            },
+        )
+
+        # Jc/Jmin/Jmax и I1-I5 генерируются awg3_transit_obfuscation() заново
+        # на каждом вызове (не только один раз при деплое) - раньше Jc/Jmin/
+        # Jmax и целевой размер I1 были фиксированными числами; теперь это
+        # тоже диапазоны, чтобы сама СТРУКТУРА профиля не была одинаковой
+        # на каждой установке этого (публичного) репозитория, а не только
+        # значения внутри неё (обоснование и разбор потолка Keenetic - в
+        # docs/awg3.md). I2-I5 по-прежнему переопределены шире, чем у
+        # общего профиля - transit не ограничен клиентским MTU. Содержимое
+        # каждого I-поля и S1-S4/H1-H4 по-прежнему не закрепляются буквально
+        # - протокольные инварианты закреплены отдельно в
+        # test_awg3_profile_meets_header_protection_padding_requirement и
+        # test_profile_validator_accepts_all_generated_profiles.
+        jc_seen, jmin_seen, jmax_seen = set(), set(), set()
+        i1_sizes = set()
+        i2_sizes, i3_sizes, i4_sizes, i5_sizes = [], [], [], []
+        for _ in range(20):
+            profile = MODULE.awg3_transit_obfuscation()
+            self.assertTrue(8 <= profile["jc"] <= 16)
+            self.assertTrue(48 <= profile["jmin"] <= 80)
+            self.assertTrue(384 <= profile["jmax"] <= 640)
+            self.assertLessEqual(profile["jmax"] + 28, 1280)
+            jc_seen.add(profile["jc"])
+            jmin_seen.add(profile["jmin"])
+            jmax_seen.add(profile["jmax"])
+            i1_sizes.add(MODULE.awg_cps_signature_size(profile["i1"]))
+            i2_sizes.append(MODULE.awg_cps_signature_size(profile["i2"]))
+            i3_sizes.append(MODULE.awg_cps_signature_size(profile["i3"]))
+            i4_sizes.append(MODULE.awg_cps_signature_size(profile["i4"]))
+            i5_sizes.append(MODULE.awg_cps_signature_size(profile["i5"]))
+        for seen in (jc_seen, jmin_seen, jmax_seen):
+            self.assertGreater(len(seen), 1, "Jc/Jmin/Jmax должны меняться между вызовами")
+        # I1 больше не переопределяется отдельно для transit - наследуется
+        # от awg_server_obfuscation(), у которой размер I1 теперь тоже
+        # диапазон (1200-1252), а не фиксированное значение.
+        self.assertTrue(all(1200 <= size <= 1252 for size in i1_sizes))
+        self.assertGreater(len(i1_sizes), 1, "I1 должен меняться между вызовами")
+        for sizes, bounds in (
+            (i2_sizes, (80, 430)),
+            (i3_sizes, (50, 360)),
+            (i4_sizes, (38, 290)),
+            (i5_sizes, (25, 220)),
+        ):
+            self.assertTrue(all(bounds[0] <= size <= bounds[1] for size in sizes))
+        # Общий профиль (KeeneticOS/mobile) наследует тот же диапазон I1
+        # (1200-1252), что и transit, но НЕ получает расширенные границы
+        # I2-I5 - те остаются transit-специфичными.
+        self.assertTrue(
+            1200 <= MODULE.awg_cps_signature_size(MODULE.awg_server_obfuscation()["i1"]) <= 1252
+        )
+        self.assertTrue(
+            1200
+            <= MODULE.awg_cps_signature_size(MODULE.awg_mobile_awg3_obfuscation()["i1"])
+            <= 1252
+        )
+        # Легаси-профиль KeeneticOS <5.1 не строится на awg_server_obfuscation()
+        # и не должен получить I1-I5/S3-S4 ни при каких обстоятельствах -
+        # прошивка их не примет (см. docs/awg3.md, проверено против реальной
+        # команды `wireguard asc`).
+        legacy_profile = MODULE.awg_legacy_server_obfuscation()
+        self.assertEqual(legacy_profile["s3"], 0)
+        self.assertEqual(legacy_profile["s4"], 0)
+        self.assertTrue(all(legacy_profile[f"i{i}"] == "" for i in range(1, 6)))
+
+        # inventory/example - это то, что копируется в production при первой
+        # установке (см. prepare_production_directory); roles/awg3_transit -
+        # то, что --update-components подтягивает в уже развёрнутый
+        # inventory (см. prepare_component_update/AWG3_COMPONENT_KEYS). Обе
+        # копии должны совпадать, иначе новая установка и обновление
+        # существующей закрепят разные версии.
+        example = yaml.safe_load(
+            (
+                root / "inventory" / "example" / "group_vars" / "all" / "main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        for key in (
+            "awg3_go_source_version",
+            "awg3_go_source_commit",
+            "awg3_tools_source_version",
+            "awg3_tools_source_commit",
+        ):
+            self.assertEqual(
+                example[key],
+                defaults[key],
+                f"{key}: пример inventory разошёлся с ролевыми defaults",
+            )
+
+        config = (
+            root / "roles" / "awg3_transit" / "templates" / "transit.conf.j2"
+        ).read_text(encoding="utf-8")
+        for field in (
+            "Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4",
+            "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5",
+            "HeaderProtectionKey", "ContentPaddingAddition", "RekeyAfterTime",
+            "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout",
+            "MaxHandshakeAttempts", "RandomTrailers", "DisableCookies",
+        ):
+            self.assertIn(f"{field} =", config)
+
+        health = (
+            root / "roles" / "health" / "templates" / "awg-health.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("awg3_transit_profile_is_complete", health)
 
     def test_optional_interfaces_refresh_routes_without_dns_or_policy_reset(self) -> None:
         root = MODULE_PATH.parents[2]
@@ -2043,6 +2987,7 @@ class InteractiveDeployTests(unittest.TestCase):
                     "n",
                     "entry.invalid",
                     "exit.invalid",
+                    "n",
                     "ubuntu",
                     "deployer",
                     "22",
@@ -2180,7 +3125,9 @@ class InteractiveDeployTests(unittest.TestCase):
             )
             self.assertFalse(entry_vars["entry_ru_proxy_enabled"])
             self.assertEqual(entry_vars["entry_wan_interface"], "auto")
-            self.assertTrue(entry_vars["awg3_transit_enabled"])
+            # Межсерверный канал закрепляется за kernel-модулем: на том же
+            # канале userspace-движок терял 6.4-7.8% пакетов против 0.85%.
+            self.assertFalse(entry_vars["awg3_transit_enabled"])
             self.assertEqual(entry_vars["entry_exit_interface"], "awg3")
             self.assertTrue(entry_vars["entry_legacy_client_available"])
             self.assertFalse(entry_vars["entry_legacy_client_enabled"])
@@ -2188,7 +3135,9 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertTrue(entry_vars["entry_mobile_client_available"])
             self.assertFalse(entry_vars["entry_mobile_client_enabled"])
             self.assertEqual(entry_vars["entry_mobile_client_listen_port"], 8443)
-            self.assertEqual(entry_vars["entry_mobile_i1_mode"], "quic-ios")
+            self.assertNotIn("entry_mobile_i1_mode", entry_vars)
+            self.assertEqual(entry_vars["entry_mobile_profile_generation"], "awg3.1")
+            self.assertEqual(entry_vars["entry_mobile_service_name"], "awg-quick@awg-mobile.service")
             self.assertEqual(entry_vars["entry_mobile_legacy_public_port"], 53)
             self.assertEqual(entry_vars["entry_mobile_legacy_internal_port"], 39746)
             self.assertEqual(entry_vars["entry_awg0_listen_port"], 443)
@@ -2204,6 +3153,12 @@ class InteractiveDeployTests(unittest.TestCase):
             self.assertEqual(exit_vars["exit_awg_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_transit_listen_port"], 443)
             self.assertEqual(exit_vars["awg3_peer_endpoint_port"], 39745)
+            # Парный флаг к awg3_transit_enabled: при kernel-модуле конфиг
+            # межсерверного интерфейса на EXIT пишет роль exit. Две выключенные
+            # половины разных строк таблицы движков означали бы, что интерфейс
+            # не поднимает никто - см. tests/test_toggle_transit_engine.py.
+            self.assertFalse(exit_vars["awg3_transit_enabled"])
+            self.assertTrue(exit_vars["exit_manage_awg_config"])
             self.assertEqual(
                 exit_vars["security_interserver_peer_ipv4"], "198.51.100.10"
             )

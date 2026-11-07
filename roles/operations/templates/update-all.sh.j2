@@ -10,7 +10,11 @@ esac
 export DEBIAN_FRONTEND=noninteractive
 exec 9>/run/awg-apt-maintenance.lock
 flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 packages=(amneziawg amneziawg-dkms amneziawg-tools sing-box)
+{% else %}
+packages=()
+{% endif %}
 new_holds=()
 for package in "${packages[@]}"; do
   dpkg-query -W "$package" >/dev/null 2>&1 || continue
@@ -21,10 +25,16 @@ trap cleanup EXIT
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 -y upgrade
 apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 /usr/local/sbin/awg-kernel-guard
+{% endif %}
 {{ awg_server_audit_path | quote }}
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
 printf '%s\n' \
   'AmneziaWG, sing-box и AWG3 не обновляются обычным update-all.' \
   'Для транзакционного обновления каскада на управляющей машине используйте:' \
   '  ./deploy --resume --update-components'
+{% else %}
+printf '%s\n' 'Xray-core и конфигурация FRONT обновляются только повторным deploy.'
+{% endif %}
 [[ ! -e /var/run/reboot-required ]] || echo 'Требуется перезагрузка; автоматически она не выполнялась.'

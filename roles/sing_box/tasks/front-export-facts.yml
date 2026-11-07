@@ -1,0 +1,74 @@
+---
+- name: Проверка роли ENTRY перед чтением параметров FRONT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_node_role == 'entry'
+      - reality_fallback_enabled | default(false) | bool
+      - front_backend_enabled | default(false) | bool
+      - front_relay_enabled | default(false) | bool
+    fail_msg: ENTRY не содержит действующий backend для FRONT.
+
+- name: Проверка локального переопределения dest REALITY
+  ansible.builtin.stat:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: front_export_reality_override_file
+  no_log: true
+
+- name: Чтение локального переопределения dest REALITY
+  ansible.builtin.slurp:
+    path: "{{ sing_box_reality_dest_override_path }}"
+  register: front_export_reality_override_raw
+  no_log: true
+  when: front_export_reality_override_file.stat.exists
+
+- name: Подготовка действующего dest REALITY
+  ansible.builtin.set_fact:
+    front_export_reality_override: >-
+      {{ (front_export_reality_override_raw.content | b64decode | from_json)
+         if front_export_reality_override_file.stat.exists else {} }}
+  no_log: true
+
+- name: Чтение публичных параметров backend FRONT на ENTRY
+  ansible.builtin.slurp:
+    path: "{{ item }}"
+  loop:
+    - "{{ reality_fallback_state_dir }}/public.key"
+    - "{{ reality_fallback_short_id_path }}"
+    - "{{ reality_fallback_client_uuid_path }}"
+    - "{{ reality_fallback_front_client_uuid_path }}"
+  register: front_export_reality_material_raw
+  no_log: true
+
+- name: Публикация параметров ENTRY только для текущего Ansible-запуска
+  ansible.builtin.set_fact:
+    reality_fallback_effective_dest: >-
+      {{ front_export_reality_override.dest | default(reality_fallback_dest) }}
+    reality_fallback_effective_dest_port: >-
+      {{ front_export_reality_override.dest_port
+         | default(reality_fallback_dest_port) | int }}
+    reality_fallback_port: "{{ reality_fallback_port }}"
+    reality_fallback_public_key: >-
+      {{ ((front_export_reality_material_raw.results[0].content | b64decode)
+          .split('\\')[0] | trim) }}
+    reality_fallback_short_id: >-
+      {{ front_export_reality_material_raw.results[1].content | b64decode | trim }}
+    reality_fallback_client_uuid: >-
+      {{ front_export_reality_material_raw.results[2].content | b64decode | trim }}
+    reality_fallback_front_client_uuid: >-
+      {{ front_export_reality_material_raw.results[3].content | b64decode | trim }}
+  no_log: true
+
+- name: Проверка полноты параметров ENTRY для FRONT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - reality_fallback_effective_dest | length > 0
+      - reality_fallback_port | int >= 1
+      - reality_fallback_port | int <= 65535
+      - reality_fallback_public_key | length > 0
+      - reality_fallback_short_id | length > 0
+      - reality_fallback_client_uuid | length > 0
+      - reality_fallback_front_client_uuid | length > 0
+    fail_msg: Не удалось безопасно прочитать полный набор параметров FRONT с ENTRY.
+  no_log: true

@@ -4,9 +4,9 @@ exit_required_interfaces:
 exit_peer_migration_policy: preserve
 exit_docker_policy: preserve
 exit_manage_awg_config: false
-exit_awg_config_path: /etc/amnezia/amneziawg/awg0.conf
-exit_awg_candidate_path: /run/ansible-awg0.conf
-exit_awg_backup_dir: /root/config-backups/exit/awg0
+exit_awg_config_path: "/etc/amnezia/amneziawg/{{ exit_awg_interface }}.conf"
+exit_awg_candidate_path: "/run/ansible-{{ exit_awg_interface }}.conf"
+exit_awg_backup_dir: "/root/config-backups/exit/{{ exit_awg_interface }}"
 exit_awg_interface: awg0
 exit_legacy_awg_interface: awg0
 exit_wan_interface: eth0

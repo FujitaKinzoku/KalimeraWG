@@ -34,7 +34,9 @@ SOFTWARE.
 
 KalimeraWG загружает и собирает закреплённые upstream-релизы
 [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) и
-[amnezia-vpn/amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools).
+[amnezia-vpn/amneziawg-tools](https://github.com/amnezia-vpn/amneziawg-tools),
+когда межсерверный канал переведён на запасной userspace-движок; по умолчанию
+используется kernel-модуль AmneziaWG из закреплённых пакетов.
 Их исходники не включаются в репозиторий. Применимые лицензионные уведомления
 остаются в загружаемых деревьях исходников; происхождение и точные ревизии
 зафиксированы в `docs/upstream.md`.

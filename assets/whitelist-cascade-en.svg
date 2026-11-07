@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="790" viewBox="0 0 760 790" role="img" aria-labelledby="title desc">
+  <title id="title">KalimeraWG ingress options and shared routing policy</title>
+  <desc id="desc">Three independent client paths converge at ENTRY and use the same RU and EXIT policies. User VLESS always passes through FRONT.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+    .title { fill: #f0f6fc; font-size: 25px; font-weight: 600; }
+    .section { fill: #8b949e; font-size: 17px; font-weight: 600; letter-spacing: .4px; }
+    .label { fill: #f0f6fc; font-size: 19px; font-weight: 600; }
+    .detail { fill: #8b949e; font-size: 15px; }
+    .path { fill: #f0f6fc; font-size: 18px; font-weight: 600; }
+    .node { fill: #161b22; stroke: #30363d; stroke-width: 1.5; }
+    .core { fill: #172536; stroke: #58a6ff; stroke-width: 2; }
+    .route { fill: #2a2118; stroke: #d29922; stroke-width: 2; }
+    .exit { fill: #17251c; stroke: #3fb950; stroke-width: 2; }
+    .verified { fill: #142826; stroke: #2f9b91; stroke-width: 2; }
+    .module { fill: none; stroke: #30363d; stroke-width: 1; }
+    .divider { stroke: #30363d; stroke-width: 1; }
+  </style>
+
+  <rect width="760" height="790" rx="16" fill="#0d1117"/>
+  <text x="30" y="42" class="title">KalimeraWG · ingress options</text>
+  <text x="730" y="42" text-anchor="end" class="detail">VLESS only through FRONT</text>
+
+  <rect x="24" y="66" width="712" height="330" rx="10" class="module"/>
+  <text x="44" y="95" class="section">1. CLIENT INGRESS</text>
+
+  <text x="44" y="143" class="label">Primary AWG</text>
+  <rect x="205" y="112" width="505" height="62" rx="7" class="node"/>
+  <text x="457" y="138" text-anchor="middle" class="path">Client  →  ENTRY</text>
+  <text x="457" y="160" text-anchor="middle" class="detail">AmneziaWG 3+ · UDP/443 or mobile UDP/8443</text>
+
+  <text x="44" y="234" class="label">FRONT</text>
+  <rect x="205" y="203" width="505" height="62" rx="7" class="node"/>
+  <text x="457" y="229" text-anchor="middle" class="path">Client  →  FRONT  →  ENTRY</text>
+  <text x="457" y="251" text-anchor="middle" class="detail">TLS + VLESS/XHTTP · without CDN</text>
+
+  <text x="44" y="325" class="label">Reachable CDN</text>
+  <rect x="205" y="294" width="505" height="62" rx="7" class="verified"/>
+  <text x="457" y="320" text-anchor="middle" class="path">Client  →  CDN  →  FRONT  →  ENTRY</text>
+  <text x="457" y="342" text-anchor="middle" class="detail">field-validated while an allowlist was active</text>
+
+  <rect x="24" y="410" width="712" height="236" rx="10" class="module"/>
+  <text x="44" y="439" class="section">2. SHARED POLICY AFTER ENTRY</text>
+
+  <rect x="44" y="462" width="128" height="64" rx="7" class="core"/>
+  <text x="108" y="501" text-anchor="middle" class="label">ENTRY</text>
+  <text x="194" y="501" text-anchor="middle" class="path">→</text>
+  <rect x="216" y="462" width="180" height="64" rx="7" class="route"/>
+  <text x="306" y="489" text-anchor="middle" class="label">RU traffic</text>
+  <text x="306" y="511" text-anchor="middle" class="detail">domains · networks</text>
+  <text x="418" y="501" text-anchor="middle" class="path">→</text>
+  <rect x="440" y="462" width="270" height="64" rx="7" class="node"/>
+  <text x="575" y="489" text-anchor="middle" class="label">SOCKS5 / TUN</text>
+  <text x="575" y="511" text-anchor="middle" class="detail">or WAN ENTRY · fail-open</text>
+
+  <rect x="44" y="551" width="128" height="64" rx="7" class="core"/>
+  <text x="108" y="590" text-anchor="middle" class="label">ENTRY</text>
+  <text x="194" y="590" text-anchor="middle" class="path">→</text>
+  <rect x="216" y="551" width="180" height="64" rx="7" class="node"/>
+  <text x="306" y="578" text-anchor="middle" class="label">AWG 3+</text>
+  <text x="306" y="600" text-anchor="middle" class="detail">dedicated tunnel</text>
+  <text x="418" y="590" text-anchor="middle" class="path">→</text>
+  <rect x="440" y="551" width="270" height="64" rx="7" class="exit"/>
+  <text x="575" y="578" text-anchor="middle" class="label">EXIT</text>
+  <text x="575" y="600" text-anchor="middle" class="detail">remaining and forced traffic</text>
+
+  <rect x="24" y="660" width="712" height="96" rx="10" class="module"/>
+  <text x="44" y="689" class="section">3. SHARED SERVER PROTECTION</text>
+  <rect x="44" y="706" width="154" height="34" rx="6" class="node"/>
+  <text x="121" y="728" text-anchor="middle" class="detail">Key-only SSH</text>
+  <rect x="215" y="706" width="154" height="34" rx="6" class="node"/>
+  <text x="292" y="728" text-anchor="middle" class="detail">UFW + Fail2Ban</text>
+  <rect x="386" y="706" width="154" height="34" rx="6" class="node"/>
+  <text x="463" y="728" text-anchor="middle" class="detail">No-logs</text>
+  <rect x="557" y="706" width="153" height="34" rx="6" class="node"/>
+  <text x="633" y="728" text-anchor="middle" class="detail">2-of-N secrets</text>
+
+  <line x1="30" y1="772" x2="730" y2="772" class="divider"/>
+</svg>

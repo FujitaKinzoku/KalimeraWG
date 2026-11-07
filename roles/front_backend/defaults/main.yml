@@ -1,0 +1,7 @@
+---
+front_enabled: false
+front_backend_enabled: "{{ front_enabled | bool }}"
+front_backend_service_name: kalimera-front-backend.service
+front_backend_config_path: /etc/sing-box/front-backend.json
+front_backend_candidate_path: /run/ansible-front-backend.json.candidate
+front_backend_state_dir: "{{ reality_fallback_state_dir | default('/etc/sing-box/reality') }}"

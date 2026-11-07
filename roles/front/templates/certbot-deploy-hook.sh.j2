@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+{% if runtime_secrets_enabled | default(false) | bool %}
+{{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }} seal >/dev/null
+{% endif %}
+/usr/sbin/nginx -t >/dev/null
+/usr/bin/systemctl reload nginx.service

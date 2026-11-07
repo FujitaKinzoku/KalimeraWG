@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "access_modes": {{ front_access_modes | to_json }},
+  "domains": {
+    "direct": {{ front_direct_domain | to_json }},
+    "cdn": {{ front_cdn_domain | to_json }}
+  },
+  "encryption": {{ (front_vless_encryption if front_vless_encryption_enabled | default(false) | bool else 'none') | to_json }},
+  "dns": {
+    "queryStrategy": "UseIP",
+    "servers": [
+      "77.88.8.8",
+      "77.88.8.1"
+    ]
+  },
+  "xhttp": {
+    "path": {{ front_xhttp_path | to_json }},
+    "mode": {{ front_xhttp_mode | to_json }}{% if front_xhttp_mode == 'packet-up' %},
+{# GET без тела: нагрузка аплинка в заголовках/cookie, см.
+   front_xhttp_uplink_data_placement в defaults/main.yml. Эти поля снаружи
+   extra действуют только без маскировки; при наличии extra Xray берёт отсюда
+   лишь host, path и mode, поэтому внутри extra они повторены. #}
+    "uplinkHTTPMethod": "GET",
+    "uplinkDataPlacement": {{ front_xhttp_uplink_data_placement | to_json }},
+    "uplinkDataKey": {{ front_xhttp_uplink_data_key | to_json }},
+    "uplinkChunkSize": {{ front_xhttp_uplink_chunk_size | to_json }},
+    "scMaxEachPostBytes": {{ front_xhttp_uplink_max_each_post_bytes | to_json }},
+    "scMinPostsIntervalMs": {{ front_xhttp_uplink_min_posts_interval_ms | to_json }}{% endif %}{% if front_xhttp_disguise_enabled | default(false) | bool %},
+    "extra": {
+      "path": {{ front_xhttp_path | to_json }},
+      "sessionIDKey": {{ front_xhttp_disguise_session_cookie | to_json }},
+      "sessionIDPlacement": "cookie",
+      "sessionIDLength": "32",
+      "sessionIDTable": "hex",
+      "sessionKey": {{ front_xhttp_disguise_session_cookie | to_json }},
+      "sessionPlacement": "cookie",
+      "uplinkDataKey": {{ front_xhttp_uplink_data_key | to_json }},
+{% if front_xhttp_mode == 'packet-up' %}
+      "uplinkHTTPMethod": "GET",
+      "uplinkDataPlacement": {{ front_xhttp_uplink_data_placement | to_json }},
+      "uplinkChunkSize": {{ front_xhttp_uplink_chunk_size | to_json }},
+      "scMaxEachPostBytes": {{ front_xhttp_uplink_max_each_post_bytes | to_json }},
+      "scMinPostsIntervalMs": {{ front_xhttp_uplink_min_posts_interval_ms | to_json }},
+{% else %}
+      "uplinkDataPlacement": "body",
+{% endif %}
+      "seqKey": "chunk",
+      "seqPlacement": "query",
+      "xPaddingKey": {{ front_xhttp_disguise_padding_key | to_json }},
+      "xPaddingPlacement": "cookie",
+      "xPaddingMethod": "tokenish",
+      "xPaddingObfsMode": true,
+      "xPaddingBytes": "10-50",
+      "xmux": {
+        "maxConnections": 3,
+        "cMaxReuseTimes": "200-300",
+        "hKeepAlivePeriod": 30,
+        "hMaxRequestTimes": "2000-3000",
+        "hMaxReusableSecs": "1800-2400"
+      }
+    }{% endif %}
+  }
+}

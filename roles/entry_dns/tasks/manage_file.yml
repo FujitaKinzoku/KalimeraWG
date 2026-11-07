@@ -1,10 +1,10 @@
 ---
-- name: "Проверка: DNS ENTRY сервера — этап 1"
+- name: "Проверка: DNS ENTRY сервера - этап 1"
   ansible.builtin.stat:
     path: "{{ entry_dns_destination_path }}"
   register: entry_dns_live_file
 
-- name: "Проверка: DNS ENTRY сервера — этап 2"
+- name: "Проверка: DNS ENTRY сервера - этап 2"
   ansible.builtin.command:
     argv:
       - /usr/bin/cmp
@@ -16,13 +16,13 @@
   failed_when: entry_dns_file_compare.rc not in [0, 1]
   when: entry_dns_live_file.stat.exists
 
-- name: "Определение: DNS ENTRY сервера — этап 3"
+- name: "Определение: DNS ENTRY сервера - этап 3"
   ansible.builtin.set_fact:
     entry_dns_file_changed: >-
       {{ (not entry_dns_live_file.stat.exists) or
          (entry_dns_file_compare.rc | default(1) == 1) }}
 
-- name: "Создание: DNS ENTRY сервера — этап 4"
+- name: "Создание: DNS ENTRY сервера - этап 4"
   ansible.builtin.file:
     path: "{{ entry_dns_backup_dir }}"
     state: directory
@@ -33,7 +33,7 @@
     - entry_dns_live_file.stat.exists
     - entry_dns_file_changed | bool
 
-- name: "Резервное копирование: DNS ENTRY сервера — этап 5"
+- name: "Резервное копирование: DNS ENTRY сервера - этап 5"
   ansible.builtin.copy:
     src: "{{ entry_dns_destination_path }}"
     dest: >-
@@ -46,7 +46,7 @@
     - entry_dns_live_file.stat.exists
     - entry_dns_file_changed | bool
 
-- name: "Установка: DNS ENTRY сервера — этап 6"
+- name: "Установка: DNS ENTRY сервера - этап 6"
   ansible.builtin.copy:
     src: "{{ entry_dns_source_path }}"
     dest: "{{ entry_dns_destination_path }}"

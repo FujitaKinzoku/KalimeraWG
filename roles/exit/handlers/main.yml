@@ -1,5 +1,5 @@
 ---
-- name: "Перезапуск: EXIT сервер — этап 1"
+- name: "Перезапуск: EXIT сервер - этап 1"
   ansible.builtin.systemd_service:
     name: "awg-quick@{{ exit_awg_interface }}.service"
     state: restarted

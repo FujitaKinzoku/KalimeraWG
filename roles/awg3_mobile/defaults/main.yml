@@ -1,0 +1,29 @@
+---
+awg3_mobile_enabled: "{{ entry_mobile_client_available | default(false) | bool }}"
+
+# Mobile/AWG3+ работает на kernel-модуле AmneziaWG через awg-quick, как и
+# клиентский с legacy интерфейсы. Отдельный userspace-движок был убран:
+# замеры на межсерверном канале показали, что userspace-реализация даёт
+# кратно худшие потери, а kernel-модуль v3.1 принимает весь набор полей 3.1
+# (проверено реальным awg setconf/showconf). Запасной userspace-путь смысла
+# не имеет: если DKMS не соберётся, kernel-интерфейсы клиентов отвалятся
+# вместе с mobile, и ENTRY всё равно не обслужит клиентов.
+awg3_mobile_service_name: "awg-quick@{{ entry_mobile_client_interface }}.service"
+awg3_mobile_tools_binary_path: /usr/bin/awg
+awg3_mobile_config_dir: "{{ entry_awg_config_dir | default('/etc/amnezia/amneziawg') }}"
+awg3_mobile_config_path: "{{ awg3_mobile_config_dir }}/{{ entry_mobile_client_interface }}.conf"
+# awg-quick выводит имя интерфейса из имени файла кандидата и требует, чтобы
+# оно было не длиннее 15 символов, иначе strip отказывается его разбирать.
+# "ansible-awg-mobile" в этот предел не укладывается, поэтому имя короткое.
+awg3_mobile_candidate_path: /run/awgm-cand.conf
+awg3_mobile_backup_dir: /root/config-backups/entry/awg3-mobile
+
+awg3_mobile_content_padding_addition: "8-32"
+awg3_mobile_rekey_after_time: "120-180"
+awg3_mobile_rekey_timeout: "5-8"
+awg3_mobile_reject_after_time: "180-240"
+awg3_mobile_keepalive_timeout: "10-15"
+awg3_mobile_max_handshake_attempts: "18-24"
+awg3_mobile_persistent_keepalive: "22-30"
+awg3_mobile_random_trailers: true
+awg3_mobile_disable_cookies: false

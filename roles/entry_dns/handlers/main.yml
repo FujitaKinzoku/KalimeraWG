@@ -1,16 +1,16 @@
 ---
-- name: "Перезагрузка: DNS ENTRY сервера — этап 1"
+- name: "Перезагрузка: DNS ENTRY сервера - этап 1"
   ansible.builtin.systemd_service:
     daemon_reload: true
   listen: Перезагрузить модули systemd для DNS
 
-- name: "Перезапуск: DNS ENTRY сервера — этап 2"
+- name: "Перезапуск: DNS ENTRY сервера - этап 2"
   ansible.builtin.systemd_service:
     name: unbound.service
     state: restarted
   listen: Перезапустить Unbound
 
-- name: "Перезапуск: DNS ENTRY сервера — этап 3"
+- name: "Перезапуск: DNS ENTRY сервера - этап 3"
   ansible.builtin.systemd_service:
     name: dnsmasq.service
     state: restarted

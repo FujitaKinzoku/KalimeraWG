@@ -1,7 +1,7 @@
 # Управляемое KalimeraWG приглашение Bash. Не редактировать на сервере.
 [[ $- == *i* ]] || return 0
 KALIMERA_PROMPT_LOADED=1
-KALIMERA_NODE_ROLE={{ 'ENTRY' if 'entry' in group_names else ('EXIT' if 'exit' in group_names else 'SERVER') }}
+KALIMERA_NODE_ROLE={{ 'ENTRY' if 'entry' in group_names else ('EXIT' if 'exit' in group_names else ('FRONT' if 'front' in group_names else 'SERVER')) }}
 
 __kalimera_exit_description() {
     case "$1" in

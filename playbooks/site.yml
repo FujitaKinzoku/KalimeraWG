@@ -93,6 +93,13 @@
       changed_when: false
       when: awg_prepare_apt | default(true) | bool
 
+# Измерение не зависит от движка межсерверного канала: оно идёт ICMP до
+# публичного IPv4 пира по WAN, а не через туннель. Поэтому условие здесь
+# ролевое, а не по awg3_transit_enabled - прежний гейт по движку выключал всю
+# игру целиком, как только канал переводили на kernel-модуль, и каскад молча
+# оставался на статическом MTU. Просто убрать условие нельзя: игра идёт по
+# hosts: all, а FRONT не участвует в межсерверном канале и подставил бы чужой
+# WAN-интерфейс и неопределённый security_interserver_peer_ipv4.
 - name: Двустороннее согласование MTU между ENTRY и EXIT
   hosts: all
   gather_facts: false
@@ -113,7 +120,7 @@
         lock_timeout: 600
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление остаточного временного разрешения ICMP
       ansible.builtin.command:
@@ -141,7 +148,7 @@
       failed_when: false
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Удаление остаточного временного запрета ICMP
       ansible.builtin.command:
@@ -167,12 +174,12 @@
       failed_when: false
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Измерение MTU с обязательным удалением временного ICMP-правила
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
       block:
         - name: Временное включение ответов ICMP echo для измерения MTU
           ansible.builtin.command:
@@ -336,7 +343,7 @@
              map('int') | min }}
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Создание каталога состояния MTU
       ansible.builtin.file:
@@ -347,7 +354,7 @@
         mode: "0755"
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Согласование MTU клиентского интерфейса с каскадом
       ansible.builtin.set_fact:
@@ -356,9 +363,8 @@
         entry_legacy_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1280] | min }}"
         entry_mobile_client_mtu: "{{ [awg3_shared_effective_mtu | int, 1380] | min }}"
       when:
-        - awg_node_role == 'entry'
+        - awg_node_role | default('') == 'entry'
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
 
     - name: Сохранение результата MTU на серверах
       ansible.builtin.copy:
@@ -374,7 +380,7 @@
         mode: "0644"
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
 
     - name: Передача безопасного результата MTU управляющему компьютеру
       ansible.builtin.copy:
@@ -391,7 +397,7 @@
       run_once: true
       when:
         - awg_adoption_mode == 'apply'
-        - awg3_transit_enabled | default(false) | bool
+        - awg_node_role | default('') in ['entry', 'exit']
         - awg_mtu_controller_result_path is defined
 
 - name: Настройка ENTRY сервера
@@ -425,6 +431,8 @@
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit
       when: awg_adoption_mode == 'apply'
+    - role: awg3_mobile
+      when: awg_adoption_mode == 'apply'
     - role: sing_box
       when: awg_adoption_mode == 'apply'
     - role: entry_routing
@@ -432,6 +440,8 @@
     - role: entry_dns
       when: awg_adoption_mode == 'apply'
     - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: front_backend
       when: awg_adoption_mode == 'apply'
     - role: entry_watchdog
       when: awg_adoption_mode == 'apply'
@@ -489,6 +499,58 @@
     - role: health
       when: awg_adoption_mode == 'apply'
 
+# Опциональный третий узел (docs/front-relay.md) - группа `front` в inventory
+# по умолчанию пуста, play выполняется 0 раз и ничего не меняет, если фича
+# не подключена через ./deploy --enable-front. Требует, чтобы play "Настройка
+# ENTRY сервера" выше уже отработал в этом же прогоне - факты reality_fallback_*
+# читаются из hostvars ENTRY (fact_caching = jsonfile, ansible.cfg).
+- name: Настройка FRONT сервера
+  hosts: front
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Сбор сведений о FRONT сервере
+      ansible.builtin.setup:
+
+    - name: Определение внешнего интерфейса FRONT
+      ansible.builtin.shell: |
+        set -Eeuo pipefail
+        ip -4 route show default | awk 'NR == 1 {print $5}'
+      args:
+        executable: /bin/bash
+      register: front_wan_interface_probe
+      changed_when: false
+
+    - name: Выбор внешнего интерфейса FRONT
+      ansible.builtin.set_fact:
+        exit_wan_interface: "{{ front_wan_interface_probe.stdout | trim }}"
+
+    - name: Проверка служб перед защищённой установкой
+      ansible.builtin.service_facts:
+      when: not (awg_enable_fail2ban | default(true) | bool)
+    - name: Остановка ранее запущенного Fail2Ban на время перехода SSH
+      ansible.builtin.systemd_service:
+        name: fail2ban.service
+        state: stopped
+      when:
+        - not (awg_enable_fail2ban | default(true) | bool)
+        - "'fail2ban.service' in ansible_facts.services"
+  roles:
+    - role: common
+      when: awg_adoption_mode == 'apply'
+    - role: terminal
+      when: awg_adoption_mode == 'apply'
+    - role: security
+      when: awg_adoption_mode == 'apply'
+    - role: front
+      when: awg_adoption_mode == 'apply'
+    - role: operations
+      when: awg_adoption_mode == 'apply'
+    - role: fail2ban
+      when: awg_adoption_mode == 'apply'
+    - role: health
+      when: awg_adoption_mode == 'apply'
+
 - name: Проверка DNS зарубежной ветки через рекурсивный резолвер EXIT
   hosts: entry
   gather_facts: false
@@ -508,17 +570,26 @@
         - awg_adoption_mode == 'apply'
         - entry_dns_default_via_exit | default(false) | bool
 
+# Пороговое (Shamir 2-of-N) хранилище охватывает все активные роли.
+# Каждый ENTRY, EXIT и FRONT получает отдельную долю и может восстановиться
+# при доступности любого второго держателя.
 - name: Подготовка взаимной аутентификации держателей Shamir-долей
   hosts: all
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    - name: Ожидание восстановления SSH после возможной перезагрузки sshd
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+      when: awg_adoption_mode == 'apply'
+
     - name: Чтение публичного Ed25519 host key без закрытого материала
       ansible.builtin.slurp:
         path: /etc/ssh/ssh_host_ed25519_key.pub
       register: runtime_secrets_host_public_key_file
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
     - name: Сохранение проверенного host key только в памяти Ansible
@@ -529,6 +600,7 @@
       no_log: true
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Шифрование постоянных секретов и перенос открытых данных в tmpfs
@@ -539,6 +611,7 @@
     - role: runtime_secrets
       when:
         - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
         - runtime_secrets_enabled | default(false) | bool
 
 - name: Фиксация контрольных сумм управляемой конфигурации
@@ -550,7 +623,9 @@
       ansible.builtin.command:
         argv: [/usr/local/sbin/awg-managed-integrity, seal]
       changed_when: true
-      when: awg_adoption_mode == 'apply'
+      when:
+        - awg_adoption_mode == 'apply'
+        - awg_node_role | default('') in ['entry', 'exit', 'front']
 
 - name: Восстановление автоматических обновлений
   hosts: all

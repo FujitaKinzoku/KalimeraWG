@@ -7,26 +7,63 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallResilienceTests(unittest.TestCase):
-    def test_readmes_use_fixed_valid_cascade_diagrams(self) -> None:
-        for readme_name, asset_name in (
-            ("README.md", "cascade-ru.svg"),
-            ("README.en.md", "cascade-en.svg"),
-        ):
-            readme = (ROOT / readme_name).read_text(encoding="utf-8")
-            diagram = ROOT / "assets" / asset_name
-            root = ET.parse(diagram).getroot()
+    def test_docs_use_responsive_valid_cascade_diagrams(self) -> None:
+        documents = {
+            "README.md": (
+                "cascade-ru.svg",
+                "cascade-ru-mobile.svg",
+                "whitelist-cascade-ru.svg",
+                "whitelist-cascade-ru-mobile.svg",
+            ),
+            "README.en.md": (
+                "cascade-en.svg",
+                "cascade-en-mobile.svg",
+                "whitelist-cascade-en.svg",
+                "whitelist-cascade-en-mobile.svg",
+            ),
+            "docs/front-relay.md": (
+                "whitelist-cascade-ru.svg",
+                "whitelist-cascade-ru-mobile.svg",
+            ),
+        }
+        expected_viewboxes = {
+            "cascade-ru.svg": "0 0 760 650",
+            "cascade-en.svg": "0 0 760 650",
+            "cascade-ru-mobile.svg": "0 0 390 1120",
+            "cascade-en-mobile.svg": "0 0 390 1120",
+            "whitelist-cascade-ru.svg": "0 0 760 790",
+            "whitelist-cascade-en.svg": "0 0 760 790",
+            "whitelist-cascade-ru-mobile.svg": "0 0 390 1060",
+            "whitelist-cascade-en-mobile.svg": "0 0 390 1060",
+        }
 
-            self.assertIn(f'assets/{asset_name}', readme)
-            self.assertNotIn("```mermaid", readme)
-            self.assertEqual(root.attrib["viewBox"], "0 0 1440 620")
+        for document_name, asset_names in documents.items():
+            document = (ROOT / document_name).read_text(encoding="utf-8")
+            self.assertNotIn("```mermaid", document)
+            self.assertIn('<source media="(max-width: 600px)"', document)
+            for asset_name in asset_names:
+                diagram = ROOT / "assets" / asset_name
+                svg_root = ET.parse(diagram).getroot()
+                asset_reference = (
+                    f"../assets/{asset_name}"
+                    if document_name.startswith("docs/")
+                    else f"assets/{asset_name}"
+                )
+                self.assertIn(asset_reference, document)
+                self.assertEqual(
+                    svg_root.attrib["viewBox"], expected_viewboxes[asset_name]
+                )
+                self.assertFalse(
+                    any(element.tag.endswith("polygon") for element in svg_root.iter())
+                )
 
     def test_release_version_is_used_by_installer_and_deploy(self) -> None:
         version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         deploy = (ROOT / "deploy").read_text(encoding="utf-8")
 
-        self.assertEqual(version, "2.1.0")
-        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v2.1.0}"', installer)
+        self.assertEqual(version, "3.0.0")
+        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v3.0.0}"', installer)
         self.assertIn('installed_version', installer)
         self.assertIn('if [[ $# -eq 1 && $1 == --version ]]', deploy)
 
@@ -42,6 +79,16 @@ class InstallResilienceTests(unittest.TestCase):
         self.assertIn("/usr/bin/getent ahostsv4", site)
         self.assertIn('Acquire::Retries "5";', site)
         self.assertNotIn("resolvectl dns", site)
+
+    def test_shamir_play_waits_for_ssh_after_possible_sshd_reload(self) -> None:
+        site = (ROOT / "playbooks/site.yml").read_text(encoding="utf-8")
+
+        wait_task = site.index("Ожидание восстановления SSH после возможной перезагрузки sshd")
+        host_key_read = site.index("Чтение публичного Ed25519 host key без закрытого материала")
+
+        self.assertLess(wait_task, host_key_read)
+        wait_block = site[wait_task:host_key_read]
+        self.assertIn("ansible.builtin.wait_for_connection", wait_block)
 
     def test_ipset_is_an_initial_dependency(self) -> None:
         common_defaults = (ROOT / "roles/common/defaults/main.yml").read_text(
@@ -116,7 +163,7 @@ class InstallResilienceTests(unittest.TestCase):
         )
         generation = installer.index('account_passwords = {')
         success = installer.rindex(
-            'ui_success("ENTRY и EXIT настроены, проверены и готовы к подключению клиента.")'
+            'ui_success("Все активные серверы настроены, проверены и готовы к работе.")'
         )
         summary = installer.rindex('show_deployment_summary(production)')
         display = installer.rindex('show_generated_account_passwords(account_passwords)')
@@ -133,6 +180,63 @@ class InstallResilienceTests(unittest.TestCase):
         )
         self.assertIn('if not local_entry:\n        check_ssh(entry_host', installer)
         self.assertIn('variables.get("ansible_connection") == "local"', installer)
+
+    def test_front_packages_one_through_four_remain_integrated(self) -> None:
+        site = (ROOT / "playbooks/site.yml").read_text(encoding="utf-8")
+        sing_box = (ROOT / "roles/sing_box/templates/config.json.j2").read_text(
+            encoding="utf-8"
+        )
+        backend = (
+            ROOT / "roles/front_backend/templates/front-backend.json.j2"
+        ).read_text(encoding="utf-8")
+        front_tasks = (ROOT / "roles/front/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+        front_nginx = (
+            ROOT / "roles/front/templates/nginx-front.conf.j2"
+        ).read_text(encoding="utf-8")
+        runtime_config = (
+            ROOT / "roles/runtime_secrets/templates/config.json.j2"
+        ).read_text(encoding="utf-8")
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("- role: front_backend", site)
+        front_play = site[site.index("- name: Настройка FRONT сервера") :]
+        for role in ("common", "terminal", "security", "front", "operations", "fail2ban", "health"):
+            self.assertIn(f"- role: {role}", front_play)
+
+        self.assertIn("not (front_backend_enabled | default(false) | bool)", sing_box)
+        self.assertIn('"tag": "front-reality-in"', backend)
+        self.assertIn('"name": "front-service"', backend)
+        self.assertIn('"routing_mark": "{{ entry_exit_mark }}"', backend)
+        self.assertIn('"routing_mark": "{{ entry_ru_mark }}"', backend)
+        # "default_interface" привязывает исходящий сокет backend к
+        # WAN-интерфейсу и фиксирует исходный адрес ещё до маршрутизации,
+        # после чего routing_mark выше не работает: метка выбрала бы таблицу
+        # через межсерверный интерфейс, но адрес уже взят публичный, ENTRY.
+        # Проявлялось это тем, что весь трафик VLESS/FRONT выходил в интернет
+        # с ENTRY вместо EXIT - при исправном туннеле и пустых логах, поэтому
+        # искалось долго. Подтверждено на двух каскадах и снято удалением
+        # строки; вернуть её - значит вернуть отказ смены страны выхода.
+        # Проверяется форма с двоеточием, то есть реальный ключ JSON: само имя
+        # опции упоминается в пояснении внутри шаблона и не должно считаться
+        # за её присутствие.
+        self.assertNotIn('"default_interface":', backend)
+        self.assertIn('"disabled": true', backend)
+        self.assertIn("{'source': '/etc/letsencrypt', 'target': 'letsencrypt'}", runtime_config)
+        runtime_tasks = (
+            ROOT / "roles/runtime_secrets/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("{unit: nginx.service, template: runtime-dependency.conf.j2}", runtime_tasks)
+        self.assertIn("{unit: certbot.service, template: runtime-dependency.conf.j2}", runtime_tasks)
+
+        self.assertIn("front_subscription_enabled", front_tasks)
+        self.assertNotIn("subscription", front_nginx.lower())
+        self.assertIn('"front_subscription_enabled": False', installer)
+        self.assertIn('"front_cdn_state": front_cdn_state', installer)
+        self.assertIn('"front_backend_enabled": front_enabled', installer)
 
 
 if __name__ == "__main__":

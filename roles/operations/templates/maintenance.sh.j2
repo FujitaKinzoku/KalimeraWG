@@ -14,16 +14,24 @@ flock -w 600 9 || { echo 'Другое обслуживание пакетов �
 if [[ "${1:-}" == "--scheduled" ]]; then
     apt-get -o DPkg::Lock::Timeout=600 -q update
     unattended-upgrade -d
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
     /usr/local/sbin/awg-kernel-guard
+{% endif %}
     {{ awg_server_audit_path | quote }} --quiet
 else
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 --simulate upgrade
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
     /usr/local/sbin/awg-kernel-guard
+{% endif %}
     {{ awg_server_audit_path | quote }}
     printf '\nТребуется перезагрузка: '
     [[ -e /var/run/reboot-required ]] && echo да || echo нет
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
     printf '%s\n' \
       'Критические компоненты показаны в списке, но применяются только отдельной транзакцией:' \
       '  ./deploy --resume --update-components'
+{% else %}
+    printf '%s\n' 'Компоненты FRONT применяются повторным deploy с управляющей машины.'
+{% endif %}
 fi
