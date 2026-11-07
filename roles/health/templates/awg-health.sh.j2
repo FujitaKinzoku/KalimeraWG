@@ -141,18 +141,24 @@ runtime_secret_dependencies_are_loaded() {
             grep -Fq 'Requires={{ runtime_secrets_service_name }}'
 {% elif awg_node_role == 'entry' and front_backend_enabled | default(false) | bool %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
+{% if awg3_transit_enabled | default(false) | bool %}
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:' &&
+{% endif %}
         systemctl cat {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} |
             grep -Fq 'LoadCredential=front-backend.json:'
-{% elif awg_node_role == 'entry' %}
+{#
+   Юнита awg3-transit.service на чистом kernel-каскаде нет: роль awg3_transit
+   ставит его только для userspace-движка. На существующих каскадах файл
+   остался с прежнего движка, поэтому проверка без этого условия проходила на
+   них и падала только на чистой установке.
+#}
+{% elif awg3_transit_enabled | default(false) | bool %}
     systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
         systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
             grep -Fq 'LoadCredential=awg3.conf:'
 {% else %}
-    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:' &&
-        systemctl cat {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} |
-            grep -Fq 'LoadCredential=awg3.conf:'
+    systemctl cat awg-quick@.service | grep -Fq 'LoadCredential=%i.conf:'
 {% endif %}
 }
 {% endif %}
