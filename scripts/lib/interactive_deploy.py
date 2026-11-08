@@ -2320,6 +2320,34 @@ def update_saved_client_configs_mtu(clients_dir: Path, result: Path) -> None:
         update_client_config_mtu(config, result, "S3 = " not in text)
 
 
+def seal_local_controller_state(production: Path) -> None:
+    """Сохранить в зашифрованный runtime-пакет правки после последнего seal.
+
+    На локальном ENTRY каталог клиентов управляющего компьютера лежит в tmpfs
+    runtime-секретов. Согласованный MTU записывается в него уже после playbook,
+    который делает последний seal, поэтому без повторного seal перезагрузка
+    ENTRY вернула бы в сохранённый конфиг прежний MTU.
+    """
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        return
+    entry_vars = load_yaml(entry_path)
+    if not entry_vars.get("runtime_secrets_controller_client_state_path"):
+        return
+    all_path = production / "group_vars" / "all" / "main.yml"
+    all_vars = load_yaml(all_path) if all_path.is_file() else {}
+    secretctl = str(
+        all_vars.get("runtime_secrets_ctl_path") or "/usr/local/sbin/kalimera-secretctl"
+    )
+    try:
+        subprocess.run([secretctl, "seal"], check=True, stdout=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        fail(
+            "Не удалось сохранить согласованный MTU клиентских конфигов в "
+            "зашифрованный пакет; выполните на ENTRY 'sudo kalimera-secretctl seal'"
+        )
+
+
 def update_saved_client_configs_cps(clients_dir: Path) -> None:
     """Атомарно исправить превышающие 1000 байт CPS-теги сохранённых клиентов."""
     if not clients_dir.is_dir():
@@ -3437,6 +3465,7 @@ def main() -> None:
             atexit.unregister(cleanup_callback)
             fail(f"{update_error}\nПредыдущая рабочая версия компонентов восстановлена.")
         update_saved_client_configs_mtu(state_root / "clients", mtu_result)
+        seal_local_controller_state(production)
         cleanup_deployment(repo, hosts_path, vault_password)
         atexit.unregister(cleanup_callback)
         if args.rollback_front_replacement:
@@ -4653,6 +4682,7 @@ def main() -> None:
     ansible(repo, hosts_path, vault_password, "playbooks/finalize-monitoring.yml")
     ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
     update_client_config_mtu(client_config, mtu_result, client_mode)
+    seal_local_controller_state(production)
     cleanup_deployment(repo, hosts_path, vault_password)
     atexit.unregister(cleanup_callback)
 
