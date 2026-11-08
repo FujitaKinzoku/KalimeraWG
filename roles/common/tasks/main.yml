@@ -14,3 +14,27 @@
     owner: root
     group: root
     mode: "0700"
+
+- name: Проверка наличия таймера обновления метаданных прошивок
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/fwupd-refresh.timer
+  register: common_fwupd_refresh_timer
+  when: common_disable_fwupd_refresh | bool
+
+- name: Отключение таймера обновления метаданных прошивок
+  ansible.builtin.systemd_service:
+    name: fwupd-refresh.timer
+    enabled: false
+    state: stopped
+  when:
+    - common_disable_fwupd_refresh | bool
+    - common_fwupd_refresh_timer.stat.exists
+
+- name: Сброс прежнего отказа службы обновления метаданных прошивок
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, fwupd-refresh.service]
+  changed_when: false
+  failed_when: false
+  when:
+    - common_disable_fwupd_refresh | bool
+    - common_fwupd_refresh_timer.stat.exists

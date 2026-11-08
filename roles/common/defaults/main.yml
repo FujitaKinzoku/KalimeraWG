@@ -12,4 +12,10 @@ common_packages:
   - ssss
   - openssl
 awg_backup_root: /root/config-backups
+# Ubuntu раз в сутки обновляет по таймеру метаданные прошивок с LVFS. На VPS
+# обновляемых прошивок нет, а LVFS с части хостингов недоступен: служба
+# зависает на 60 секунд, падает и оставляет failed-модуль, из-за которого
+# server-audit не проходит. Пакет fwupd не удаляется, отключается только
+# таймер. false - не трогать таймер.
+common_disable_fwupd_refresh: true
 awg_enable_fail2ban: true
