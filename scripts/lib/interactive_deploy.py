@@ -1899,15 +1899,17 @@ AWG_CLIENT_PROFILES = {
 # клиентские интерфейсы; имя интерфейса задано ролью entry (awg-mobile).
 MOBILE_SERVICE_NAME = "awg-quick@awg-mobile.service"
 
+# Рандомизация размера выключена: с ней mobile терял 5% пакетов, без неё 0%
+# (подробно - roles/awg3_mobile/defaults/main.yml).
 AWG3_MOBILE_FEATURE_DEFAULTS = {
-    "content_padding_addition": "8-32",
+    "content_padding_addition": "0",
     "rekey_after_time": "120-180",
     "rekey_timeout": "5-8",
     "reject_after_time": "180-240",
     "keepalive_timeout": "10-15",
     "max_handshake_attempts": "18-24",
     "persistent_keepalive": "22-30",
-    "random_trailers": True,
+    "random_trailers": False,
     "disable_cookies": False,
 }
 

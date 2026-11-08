@@ -164,12 +164,23 @@ runtime_secret_dependencies_are_loaded() {
 {% endif %}
 
 {% if awg_node_role == 'entry' and entry_mobile_client_available | default(false) | bool %}
+{#
+   ContentPaddingAddition со значением 0 showconf не печатает, поэтому поле
+   требуется только при включённой рандомизации. Булевы RandomTrailers и
+   DisableCookies печатаются и в значении off: DisableCookies = off проходил
+   эту проверку на живом kernel-интерфейсе mobile.
+#}
+{% set mobile_profile_fields = [
+       'HeaderProtectionKey', 'RekeyAfterTime', 'RekeyTimeout',
+       'RejectAfterTime', 'KeepaliveTimeout', 'MaxHandshakeAttempts',
+       'RandomTrailers', 'DisableCookies', 'I1', 'I2', 'I3', 'I4', 'I5'] %}
+{% if (awg3_mobile_content_padding_addition | default('0') | string) not in ['0', '0-0'] %}
+{% set mobile_profile_fields = ['ContentPaddingAddition'] + mobile_profile_fields %}
+{% endif %}
 mobile_awg31_profile_is_complete() {
     local config
     config="$({{ awg3_mobile_tools_binary_path | quote }} showconf {{ entry_mobile_client_interface | quote }} 2>/dev/null)" || return 1
-    for field in HeaderProtectionKey ContentPaddingAddition RekeyAfterTime \
-        RekeyTimeout RejectAfterTime KeepaliveTimeout MaxHandshakeAttempts \
-        RandomTrailers DisableCookies I1 I2 I3 I4 I5; do
+    for field in {{ mobile_profile_fields | join(' ') }}; do
         grep -Eq "^${field}[[:space:]]*=[[:space:]]*[^[:space:]].*$" <<<"$config" || return 1
     done
 }

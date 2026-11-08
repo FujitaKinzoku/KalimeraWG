@@ -13,7 +13,7 @@
 AmneziaWG 3.1 · VLESS+REALITY · CDN/XHTTP · route-aware DNS · optional SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.0"><img src="https://img.shields.io/badge/release-v3.0.0-7B2CBF" alt="KalimeraWG v3.0.0"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.1"><img src="https://img.shields.io/badge/release-v3.0.1-7B2CBF" alt="KalimeraWG v3.0.1"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3.1-7B2CBF" alt="AmneziaWG 3.1">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -26,7 +26,7 @@ AmneziaWG to ENTRY plus a dedicated ENTRY–EXIT channel. An optional third role
 FRONT, accepts VLESS/XHTTP directly or through a CDN and exists mainly for
 mobile allowlist conditions.
 
-> **v3.0.0 is the current working release.** The ENTRY–EXIT channel and
+> **v3.0.1 is the current working release** (v3.0 line). The ENTRY–EXIT channel and
 > mobile/AWG3+ run on the kernel module with the full AWG 3.1 field set, FRONT
 > is installed together with the cascade, and the VLESS uplink is compatible
 > with Yandex Cloud CDN. The release was confirmed by a clean ENTRY + EXIT +
@@ -47,10 +47,10 @@ mobile allowlist conditions.
 Run as `root` on ENTRY:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.1/install.sh | bash
 ```
 
-The command installs the immutable `v3.0.0` tag rather than the moving `main`
+The command installs the immutable `v3.0.1` tag rather than the moving `main`
 branch. Confirm the local version with `./deploy --version`. Enter the EXIT and
 FRONT addresses as IPv4 literals, not DNS names.
 
@@ -109,6 +109,11 @@ failure matrix, deployment notes, and current limitations.
 After upgrading an existing cascade, VLESS client profiles must be exported
 again (`vless-user export NAME`) and mobile profiles recreated. Full list in
 [CHANGELOG.md](CHANGELOG.md), section `[3.0.0]`.
+
+**v3.0.1:** size randomization (`ContentPaddingAddition`, `RandomTrailers`) is
+off on mobile/AWG3+: with it the profile lost about 5% of packets. On cascades
+installed earlier, change the values in `group_vars/entry.yml` by hand and then
+reissue mobile configs, see [docs/awg3.md](docs/awg3.md).
 
 ### What came in v2.0.0
 
@@ -283,4 +288,4 @@ lawful use and provider terms.
 KalimeraWG is not an official Amnezia VPN project. Third-party notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v3.0.0 · a managed cascade with a CDN fallback</b></p>
+<p align="center"><b>KalimeraWG v3.0.1 · a managed cascade with a CDN fallback</b></p>

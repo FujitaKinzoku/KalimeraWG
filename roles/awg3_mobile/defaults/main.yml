@@ -18,12 +18,21 @@ awg3_mobile_config_path: "{{ awg3_mobile_config_dir }}/{{ entry_mobile_client_in
 awg3_mobile_candidate_path: /run/awgm-cand.conf
 awg3_mobile_backup_dir: /root/config-backups/entry/awg3-mobile
 
-awg3_mobile_content_padding_addition: "8-32"
+# Рандомизация размера (ContentPaddingAddition и RandomTrailers) выключена,
+# как и на межсерверном канале. Замер на mobile/AWG3+ с одного компьютера и
+# одной сети: 5% потерь ICMP при включённых полях против 0% у профиля balanced
+# с той же задержкой ~285 мс. На межсерверном канале та же пара давала
+# 7-10% потерь против 1,5-3,5%. Поля подменяют друг друга, поэтому выключать
+# нужно оба. Остальной набор 3.1 (HeaderProtectionKey, I1-I5, S1-S4, H1-H4)
+# по потерям бесплатен и сохранён. Значения должны совпадать на сервере и в
+# клиенте: после изменения mobile-конфиги выпускаются заново. Вернуть
+# рандомизацию: "8-32" и true в group_vars/entry.yml.
+awg3_mobile_content_padding_addition: "0"
 awg3_mobile_rekey_after_time: "120-180"
 awg3_mobile_rekey_timeout: "5-8"
 awg3_mobile_reject_after_time: "180-240"
 awg3_mobile_keepalive_timeout: "10-15"
 awg3_mobile_max_handshake_attempts: "18-24"
 awg3_mobile_persistent_keepalive: "22-30"
-awg3_mobile_random_trailers: true
+awg3_mobile_random_trailers: false
 awg3_mobile_disable_cookies: false

@@ -13,7 +13,7 @@
 AmneziaWG 3.1 · VLESS+REALITY · CDN/XHTTP · маршрутный DNS · SOAX/SOCKS5</em></p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.0"><img src="https://img.shields.io/badge/release-v3.0.0-7B2CBF" alt="KalimeraWG v3.0.0"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.1"><img src="https://img.shields.io/badge/release-v3.0.1-7B2CBF" alt="KalimeraWG v3.0.1"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3.1-7B2CBF" alt="AmneziaWG 3.1">
   <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
@@ -27,7 +27,7 @@ KalimeraWG превращает чистые VPS с Ubuntu 24.04 в воспро
 роль FRONT принимает VLESS/XHTTP напрямую или через CDN и нужна прежде всего
 для режима белых списков.
 
-> **v3.0.0 - текущий рабочий выпуск.** Межсерверный канал и mobile/AWG3+
+> **v3.0.1 - текущий рабочий выпуск** (линия v3.0). Межсерверный канал и mobile/AWG3+
 > работают на kernel-модуле с полным AWG 3.1, FRONT ставится вместе с каскадом,
 > аплинк VLESS совместим с Yandex Cloud CDN. Выпуск подтверждён чистой
 > установкой ENTRY + EXIT + FRONT на реальных серверах. Подробности - в
@@ -48,10 +48,10 @@ KalimeraWG превращает чистые VPS с Ubuntu 24.04 в воспро
 Запустите на ENTRY от `root`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.1/install.sh | bash
 ```
 
-Команда загружает и устанавливает именно выпуск `v3.0.0`, а не изменяемое
+Команда загружает и устанавливает именно выпуск `v3.0.1`, а не изменяемое
 состояние ветки `main`. Проверить версию локальной копии:
 
 ```bash
@@ -65,7 +65,7 @@ cd /root/KalimeraWG
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.0 --depth 1 \
+git clone --branch v3.0.1 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -146,6 +146,12 @@ CDN-ресурс: источник по HTTPS на этот домен, заго
 После обновления существующего каскада клиентские VLESS-профили нужно выдать
 заново (`vless-user export ИМЯ`), mobile-профили - пересоздать. Полный список
 изменений - в [CHANGELOG.md](CHANGELOG.md), раздел `[3.0.0]`.
+
+**v3.0.1:** на mobile/AWG3+ выключена рандомизация размера
+(`ContentPaddingAddition`, `RandomTrailers`): с ней профиль терял около 5%
+пакетов. На каскадах, установленных раньше, значения меняются вручную в
+`group_vars/entry.yml`, после чего mobile-конфиги выпускаются заново, см.
+[docs/awg3.md](docs/awg3.md).
 
 ### Что было в v2.0.0
 
@@ -375,4 +381,4 @@ KalimeraWG не переключает установленный сервер �
 KalimeraWG не является официальным проектом Amnezia VPN. Сторонние компоненты и
 лицензии перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-<p align="center"><b>KalimeraWG v3.0.0 · управляемый каскад и резервный вход через CDN</b></p>
+<p align="center"><b>KalimeraWG v3.0.1 · управляемый каскад и резервный вход через CDN</b></p>
