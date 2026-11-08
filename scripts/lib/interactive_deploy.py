@@ -2328,10 +2328,14 @@ def seal_local_controller_state(production: Path) -> None:
     который делает последний seal, поэтому без повторного seal перезагрузка
     ENTRY вернула бы в сохранённый конфиг прежний MTU.
     """
-    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        return
+    entry_vars = load_yaml(entry_path)
     if not entry_vars.get("runtime_secrets_controller_client_state_path"):
         return
-    all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
+    all_path = production / "group_vars" / "all" / "main.yml"
+    all_vars = load_yaml(all_path) if all_path.is_file() else {}
     secretctl = str(
         all_vars.get("runtime_secrets_ctl_path") or "/usr/local/sbin/kalimera-secretctl"
     )

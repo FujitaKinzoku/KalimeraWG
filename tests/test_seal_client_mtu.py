@@ -60,6 +60,14 @@ class SealLocalControllerStateTests(unittest.TestCase):
                 MODULE.seal_local_controller_state(production)
         run.assert_not_called()
 
+    def test_missing_entry_vars_do_not_seal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            production = Path(temporary) / "production"
+            (production / "group_vars" / "all").mkdir(parents=True)
+            with mock.patch.object(MODULE.subprocess, "run") as run:
+                MODULE.seal_local_controller_state(production)
+        run.assert_not_called()
+
     def test_seal_failure_stops_deploy_with_instruction(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             production = write_production(
