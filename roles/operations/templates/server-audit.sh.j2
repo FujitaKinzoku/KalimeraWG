@@ -208,7 +208,8 @@ no_container_runtime() {
     return 0
 }
 
-known_public_listeners_only() {
+# Внешние сокеты вне ожидаемого списка, по строке proto/port, без повторов.
+unexpected_public_listeners() {
     local proto endpoint address port
     local known_tcp='{{ ssh_listen_port | int }} {{ ansible_port | default(22) | int }}'
 {% if awg_node_role == 'entry' %}
@@ -233,10 +234,26 @@ known_public_listeners_only() {
             127.*|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
         esac
         case "$proto" in
-            tcp) [[ " $known_tcp " == *" $port "* ]] || return 1 ;;
-            udp) [[ " $known_udp " == *" $port "* ]] || return 1 ;;
+            tcp) [[ " $known_tcp " == *" $port "* ]] || printf 'tcp/%s\n' "$port" ;;
+            udp) [[ " $known_udp " == *" $port "* ]] || printf 'udp/%s\n' "$port" ;;
         esac
-    done < <(ss -H -lntu)
+    done < <(ss -H -lntu) | sort -u
+}
+
+unexpected_listeners=''
+
+# Исходящий UDP-запрос (DNS, проверки) на мгновение держит сокет на случайном
+# порту, и ss показывает его как UNCONN 0.0.0.0:порт - так же, как слушателя.
+# Настоящий слушатель есть в обоих снимках, временный сокет почти никогда.
+known_public_listeners_only() {
+    local first second
+    unexpected_listeners=''
+    first="$(unexpected_public_listeners)" || return 1
+    [[ -n "$first" ]] || return 0
+    sleep "${SERVER_AUDIT_LISTENER_RECHECK_SECONDS:-3}"
+    second="$(unexpected_public_listeners)" || return 1
+    unexpected_listeners="$(comm -12 <(printf '%s\n' "$first") <(printf '%s\n' "$second"))"
+    [[ -z "$unexpected_listeners" ]]
 }
 
 systemd_config_last_value() {
@@ -359,6 +376,9 @@ record_warn_result \
     'неожиданные внешние слушатели не обнаружены' \
     'обнаружены неожиданные внешние слушатели' \
     known_public_listeners_only
+if [[ "$quiet" == false && -n "$unexpected_listeners" ]]; then
+    printf '     порты: %s; владелец: sudo ss -lntup\n' "$(paste -sd ' ' <<<"$unexpected_listeners")"
+fi
 
 [[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then
