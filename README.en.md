@@ -1,149 +1,94 @@
 <p align="center">
-  <a href="README.md">RU · Русский</a> ·
-  <a href="README.en.md"><b>EN · English</b></a>
+  <a href="README.md">Русский</a> ·
+  <a href="README.en.md"><b>English</b></a>
 </p>
 
 <p align="center">
-  <img src="assets/kinzoku.jpg" alt="KalimeraWG by Kinzoku" width="680">
+  <img src="assets/kinzoku.jpg" alt="KalimeraWG" width="680">
 </p>
 
 <h1 align="center">KalimeraWG</h1>
 
-<p align="center"><em><b>A managed VPN cascade: client → ENTRY → EXIT, with a CDN → FRONT fallback</b><br>
-AmneziaWG 3.1 · VLESS+REALITY · CDN/XHTTP · route-aware DNS · optional SOAX/SOCKS5</em></p>
+<p align="center">
+  <b>Your own AmneziaWG 3.1 VPN cascade in one command.</b><br>
+  Enter in your own country, exit abroad, keep local sites direct,<br>
+  and keep a CDN fallback for allowlist-only networks.
+</p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.3"><img src="https://img.shields.io/badge/release-v3.0.3-7B2CBF" alt="KalimeraWG v3.0.3"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/latest"><img src="https://img.shields.io/github/v/release/FujitaKinzoku/KalimeraWG?color=7B2CBF&label=release" alt="Latest release"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/actions"><img src="https://img.shields.io/github/actions/workflow/status/FujitaKinzoku/KalimeraWG/validate.yml?label=checks" alt="Checks"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3.1-7B2CBF" alt="AmneziaWG 3.1">
-  <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/Ansible-IaC-EE0000?logo=ansible&logoColor=white" alt="Ansible">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F" alt="MIT"></a>
 </p>
-
-KalimeraWG turns clean Ubuntu 24.04 VPS instances into a reproducible cascade,
-creates the first client, and installs operational tools. The primary path is
-AmneziaWG to ENTRY plus a dedicated ENTRY–EXIT channel. An optional third role,
-FRONT, accepts VLESS/XHTTP directly or through a CDN and exists mainly for
-mobile allowlist conditions.
-
-> **v3.0.3 is the current working release** (v3.0 line). The ENTRY–EXIT channel and
-> mobile/AWG3+ run on the kernel module with the full AWG 3.1 field set, FRONT
-> is installed together with the cascade, and the VLESS uplink is compatible
-> with Yandex Cloud CDN. The release was confirmed by a clean ENTRY + EXIT +
-> FRONT install on real servers. See [What's new in v3.0.0](#whats-new-in-v300)
-> and [CHANGELOG.md](CHANGELOG.md).
-
-## Quick start
-
-| Requirement | Value |
-|---|---|
-| Servers | two clean Ubuntu 24.04 LTS VPS instances, a third one for FRONT |
-| ENTRY | accepts clients and runs the installer; public IPv4 required |
-| EXIT | primary egress; public IPv4 required |
-| FRONT (optional) | public IPv4 and a domain whose A record points at it; a ready CDN resource for CDN mode |
-| Bootstrap access | root and working SSH on every server; `kalimera` key access afterwards |
-| Typical time | 20–40 minutes |
-
-Run as `root` on ENTRY:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.3/install.sh | bash
-```
-
-The command installs the immutable `v3.0.3` tag rather than the moving `main`
-branch. Confirm the local version with `./deploy --version`. Enter the EXIT and
-FRONT addresses as IPv4 literals, not DNS names.
-
-For FRONT behind a CDN, prepare the origin domain (A record to FRONT) and the
-CDN resource beforehand: HTTPS origin on that domain, Host header and SNI set to
-the origin domain, caching off. After installation, get the first VLESS profile
-on FRONT with `vless-user export initial`. Details:
-[docs/front-relay.md](docs/front-relay.md).
-
-## Mobile allowlist conditions
-
-> A new client session is established while mobile allowlist restrictions are
-> active through **Russian cloud CDN → FRONT → ENTRY**, and the RU/EXIT routing
-> policy remains intact after ingress. This applies to the tested networks and
-> CDNs and is not a universal carrier availability guarantee.
 
 <p align="center">
-  <picture>
-    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-en-mobile.svg">
-    <img src="assets/whitelist-cascade-en.svg" alt="Three KalimeraWG ingress paths including the field-validated CDN and FRONT fallback" width="760">
-  </picture>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#day-to-day-use">Commands</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="CHANGELOG.md">What's new</a>
 </p>
 
-The ingress paths are alternatives rather than stacked transports. AWG remains
-the fast primary path. VLESS/XHTTP always terminates on FRONT: the client can
-use the FRONT origin directly or a reachable CDN edge.
+---
 
-| Client path | Transport | Purpose | Validation status |
-|---|---|---|---|
-| client → ENTRY | AmneziaWG 3+, UDP/443 or mobile UDP/8443 | lowest-overhead primary path | previously validated |
-| client → FRONT | TLS + VLESS/XHTTP, TCP/443 | direct VLESS without CDN; no public VLESS listener on ENTRY | implemented |
-| client → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | ingress through a reachable CDN edge | field-validated |
-| FRONT → ENTRY | VLESS+REALITY | protected service hop available only from FRONT | field-validated |
-| ENTRY → EXIT / RU | AWG 3+ or SOCKS5/fail-open | unchanged destination policy | retained |
+KalimeraWG turns two or three clean Ubuntu 24.04 VPS into a ready-to-use VPN
+cascade. You answer the installer's questions, and 20–40 minutes later you have
+working servers, a first client and a set of commands for everyday operation.
+No hand-editing of configs, `iptables` or `systemd`.
 
-The XHTTP uplink uses bodyless GET requests with the payload in headers: since
-30 September 2026 Yandex Cloud CDN answers `413` to any GET with a body. Upload
-through the CDN is therefore limited to about 2.2 Mbit/s; download is not.
+**Why a cascade.** The client connects to an ENTRY server in its own country:
+such connections are blocked less often and are faster. From there, traffic
+travels through a dedicated tunnel to an EXIT server abroad, and websites see
+the EXIT address. Russian sites still open directly from ENTRY, as if the VPN
+were off. If AmneziaWG gets blocked or the network switches to allowlist mode,
+a third server, FRONT, accepts VLESS through a Russian cloud CDN.
 
-Carrier, region, DNS, CDN edge, and filtering policy can change independently.
-See [docs/front-relay.md](docs/front-relay.md) for the detailed architecture,
-failure matrix, deployment notes, and current limitations.
+## Features
 
-## What's new in v3.0.0
+- **ENTRY → EXIT cascade.** A dedicated AmneziaWG 3.1 tunnel between the
+  servers, running on the kernel module with its own keys and parameters. The
+  EXIT port is open to the ENTRY address only.
+- **AmneziaWG 3.1 obfuscation.** The full set of obfuscation fields, with a
+  profile structure generated anew for every installation.
+- **CDN fallback.** FRONT accepts VLESS/XHTTP directly or through a CDN and
+  forwards traffic to ENTRY over an internal REALITY hop, so CDN clients never
+  see the ENTRY address. Verified with Yandex Cloud CDN.
+- **Country-aware routing.** Russian networks and domains go directly from
+  ENTRY or through your SOCKS5 proxy (for example, SOAX); everything else goes
+  through EXIT. If the proxy fails, traffic falls back to the direct route.
+- **Leak-free DNS.** Clients use a local Unbound resolver on ENTRY; upstream
+  queries leave over DoT or DoH. DNSSEC recursion on EXIT inside the tunnel is
+  available as an option.
+- **Profiles for every client.** `performance`, `balanced`, `masking`,
+  `mobile/AWG3+` for AmneziaWG 5, and a compatibility profile for KeeneticOS 4.3.
+- **Automatic MTU.** The installer measures path MTU in both directions and
+  negotiates the MTU of every segment, client configs included.
+- **No plaintext secrets on disk.** Shamir 2-of-N plus AES-256-GCM: plaintext
+  configuration lives in RAM only and services receive it via systemd
+  credentials. A stolen disk from one server reveals nothing.
+- **No logs.** journald, Fail2Ban and login accounting live in RAM only. UFW
+  and DNS query logs, shell history and core dumps are disabled.
+- **Locked-down SSH.** A dedicated `kalimera` admin, key-only login, root
+  disabled, a non-standard port and Fail2Ban.
+- **Self-monitoring.** `awg-health` and `server-audit` check services,
+  firewall, DNS and routes. Telegram reports reboots and failures. Component
+  updates are transactional with automatic rollback.
 
-| Area | v2.1.0 | v3.0.0 |
-|---|---|---|
-| ENTRY–EXIT channel | userspace `amneziawg-go`, AWG 3.0 | kernel module with the full AWG 3.1 field set; 0.85% loss on the channel instead of 6–8% |
-| mobile | separate profile | mobile/AWG3+ on the kernel module, full AWG 3.1 profile on UDP/8443 |
-| FRONT | none | third role: VLESS/XHTTP directly or through a CDN, REALITY service hop to ENTRY, installed with the cascade |
-| CDN | - | bodyless uplink compatible with Yandex Cloud CDN; ML-KEM-768 VLESS Encryption |
-| Obfuscation | fixed profile structure | AWG profile structure randomized per installation |
-| Reliability | - | the FRONT backend comes back by itself after reboot; VLESS egresses through EXIT, not ENTRY |
-| Checks | - | `awg-health` verifies the full AWG 3.1 profile and that the uplink passes the CDN |
+### What KalimeraWG does not do
 
-After upgrading an existing cascade, VLESS client profiles must be exported
-again (`vless-user export NAME`) and mobile profiles recreated. Full list in
-[CHANGELOG.md](CHANGELOG.md), section `[3.0.0]`.
+- It does not promise anonymity or protection from targeted surveillance.
+- It does not guarantee bypassing every block. Operators can change policy at
+  any time, and FRONT is an emergency path, not a universal solution.
+- It does not install a web panel or open extra ports. Management is SSH only.
+- It does not keep browsing logs or put client configs into Git or CI.
+- It does not update itself. A server stays on the chosen release until you
+  update it.
 
-**v3.0.1:** size randomization (`ContentPaddingAddition`, `RandomTrailers`) is
-off on mobile/AWG3+: with it the profile lost about 5% of packets. On cascades
-installed earlier, change the values in `group_vars/entry.yml` by hand and then
-reissue mobile configs, see [docs/awg3.md](docs/awg3.md).
-
-**v3.0.2:** the installer disables `fwupd-refresh.timer`: on VPS it timed out
-daily and left a failed unit for `server-audit`.
-
-**v3.0.3:** the negotiated client MTU is saved automatically; a manual
-`kalimera-secretctl seal` after the install is no longer needed.
-
-### What came in v2.0.0
-
-`v2.0.0` is a security-hardening package on top of `v1.0.0`: ports, MTU, DNS
-policy, and cascade routing are unchanged. Highlights:
-
-| Area | v1.0.0 | v2.0.0 |
-|---|---|---|
-| Administration | everyday work as `root` over SSH keys | dedicated `kalimera` account; `root` SSH is restricted to the automation source address |
-| Passwords | a single `root` password | 4 independent 30-character `kalimera`/`root` passwords per ENTRY and EXIT, shown once; only SHA-512 hashes remain in Vault |
-| On-disk secrets | plain AWG/AWG3/sing-box/Telegram config files | Shamir `2-of-5` threshold protection + AES-256-GCM; plaintext only in `/run`, configs delivered via systemd credentials |
-| Cascade boot | services start immediately | fail-closed startup: waits for a share quorum, verifies pinned SSH host keys, refuses to start on a missing/modified package |
-| SSH | key-only access, Fail2Ban | additionally: hidden banner, no user startup files, automation key restricted to its source address, separate recovery admin key |
-| Log retention | standard journald and Fail2Ban | no-logs policy: journald/Fail2Ban/login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
-| Auditing | `server-audit` | added `ssh-key-audit` (foreign root keys) and an expanded `server-audit` (public listeners, no-logs policy compliance) |
-| Cascade reliability | - | fixed routing/AWG3 boot races, added EXIT-route self-healing, removed false health-check failures after reboot |
-| Kernel/DKMS | checks `/vmlinuz` | guard now recognizes every installed kernel, including signed/unsigned kernel packages |
-
-See the full changelog in [CHANGELOG.md](CHANGELOG.md) (the `[2.0.0]` section) and the
-threat model for the new mechanisms in
-[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md) and
-[docs/security-boundary.md](docs/security-boundary.md).
-
-## Architecture
+## How it works
 
 <p align="center">
   <picture>
@@ -152,119 +97,134 @@ threat model for the new mechanisms in
   </picture>
 </p>
 
-| Segment | Purpose | Default state |
+| Path | Transport | When it is used |
 |---|---|---|
-| `awg0`, UDP/443 | modern clients | enabled |
-| `awg-mobile`, UDP/8443 | dedicated mobile/AWG3+ with the full AWG 3.1 profile | enabled on first mobile peer |
-| `awg-old` | KeeneticOS 4.3.x compatibility | enabled on first old peer |
-| `awg3`, EXIT UDP/443 | independent ENTRY–EXIT transit | enabled |
+| client → ENTRY | AmneziaWG 3.1, UDP/443; mobile/AWG3+ on UDP/8443 | primary path, lowest overhead |
+| client → FRONT | TLS + VLESS/XHTTP, TCP/443 | AmneziaWG is blocked by its UDP fingerprint |
+| client → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | allowlist mode while a cloud CDN is reachable |
+| FRONT → ENTRY | VLESS + REALITY | internal hop that hides ENTRY from CDN clients |
+| ENTRY → EXIT | AmneziaWG 3.1 on the kernel module | all foreign traffic |
+| ENTRY → RU | direct or through SOCKS5 | Russian networks and domains |
 
-Every interface, transit included, is brought up by the AmneziaWG kernel
-module. A fallback userspace engine based on `amneziawg-go` is kept for the
-transit channel only; it is selected with `scripts/toggle-transit-engine.py`
-and is not used by default - see [docs/awg3.md](docs/awg3.md).
+### Allowlist mode
 
-The public AWG3 port on EXIT is allowed only from the known ENTRY IPv4. Client
-and transit segments use separate interfaces, keys, and parameters.
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-en-mobile.svg">
+    <img src="assets/whitelist-cascade-en.svg" alt="KalimeraWG connection paths, including the CDN and FRONT fallback" width="760">
+  </picture>
+</p>
 
-## Choose a profile
+A field test confirmed that with allowlist mode active, a new session comes up
+through **Russian cloud CDN → FRONT → ENTRY**, and after that Russian traffic
+still goes direct while the rest leaves through EXIT. The result applies to the
+networks, CDN and moment tested and does not guarantee identical behaviour on
+every carrier.
 
-| Requirement | Recommended option |
+Client-to-server data travels in the headers of GET requests without a request
+body: since 30.09.2026 Yandex Cloud CDN answers `413` to a GET with a body. As
+a result, upload through the CDN is limited to about 2.2 Mbit/s; download is not
+limited. Details, CDN settings and the failure matrix are in
+[docs/front-relay.md](docs/front-relay.md).
+
+## Quick start
+
+### 1. Prepare the servers
+
+| | Requirement |
 |---|---|
-| General-purpose cascade | `balanced` |
-| Highest supported obfuscation | `masking` + AWG 3+ transit |
-| AmneziaWG 5.0.1.5 or newer | `mobile/AWG3+` on UDP/8443 |
-| KeeneticOS 4.3.x | `old` on the compatibility interface |
-| Highest client performance | `performance` |
-| Russian residential/mobile egress | SOAX or another SOCKS5 provider |
+| **ENTRY** | a VPS in your country with a public IPv4. The installer runs here |
+| **EXIT** | a VPS abroad with a public IPv4 |
+| **FRONT** | optional: a VPS with a public IPv4 and a domain whose A record points to it |
+| **OS** | clean Ubuntu 24.04 LTS on every server |
+| **Access** | to EXIT and FRONT: SSH login **with a password** as root or as a user with `sudo` |
+| **Time** | 20–40 minutes |
 
-### Validated compatibility
+The installer puts its own key on EXIT and FRONT through password login and, at
+the end, disables both root login and passwords itself. ENTRY needs no
+password: the installer runs there locally as root.
 
-| Path | `v3.0.0` validation |
-|---|---|
-| Ubuntu 24.04 LTS | clean ENTRY + EXIT + FRONT install on real VPS; reboot and strict audit on live cascades |
-| ENTRY–EXIT | fresh AWG 3.1 handshake on the kernel module, coordinated MTU, and post-reboot recovery |
-| mobile/AWG3+ | full AWG 3.1 profile, real client connections |
-| KeeneticOS | `balanced` and `old` profiles for current and compatibility firmware branches |
-| RU SOCKS5 | TCP/UDP probing, watchdog, fail-open through ENTRY, and automatic recovery |
-| Mobile allowlist | new session via Russian cloud CDN → FRONT → ENTRY while retaining RU/EXIT routing |
-| Yandex Cloud CDN | bodyless uplink verified on real Xray v26.7.28 and with live probes through the CDN |
+<details>
+<summary><b>The server only has a key-based user without a password (common on clouds)</b></summary>
 
-This matrix records scenarios that were actually exercised. It cannot guarantee
-identical behavior across every carrier, hosting provider, and client version.
+Temporarily allow root password login. As your user, run:
+
+```bash
+sudo passwd root
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/01-bootstrap.conf
+sudo sshd -t && sudo systemctl restart ssh
+```
+
+Keep the session open and check `ssh root@IP` with the password from another
+computer. After installation, remove the temporary file:
+
+```bash
+sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
+```
+
+By then the installer's settings already take precedence over this file.
+
+</details>
+
+### 2. Prepare the CDN (FRONT through a CDN only)
+
+1. The A record of the origin domain, for example `example.com`, points to FRONT.
+2. CDN resource: HTTPS origin on that domain, Host header and SNI equal to the
+   origin domain, caching off, GET allowed.
+3. The public CDN domain, for example `cdn.example.com`, is set up in DNS as
+   your CDN provider instructs.
+
+### 3. Run the installer
+
+On ENTRY as root (`sudo -i` if you logged in as a regular user):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.4/install.sh | bash
+```
+
+The command installs the pinned `v3.0.4` release rather than the moving `main`
+branch. The installer asks for server addresses and SSH ports, your public SSH
+key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
+Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
+Never paste a private key.
+
+<details>
+<summary><b>Install through Git and review the code first</b></summary>
+
+```bash
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y git
+git clone --branch v3.0.4 --depth 1 \
+  https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
+cd /root/KalimeraWG
+./deploy
+```
+
+</details>
+
+If the installation was interrupted, continue where it stopped:
+
+```bash
+cd /root/KalimeraWG && ./deploy --resume
+```
+
+### 4. Connect
+
+At the end, the installer prints the first client configuration and one-time
+account passwords: save them. New clients take one command on ENTRY; the first
+VLESS profile is issued on FRONT:
 
 ```bash
 vpn-user phone balanced
-vpn-user iphone mobile
-vpn-user tablet mobile/awg3+
-vpn-user list
-vpn-user delete phone
 ```
 
-## Routing and DNS
+```bash
+vless-user export initial
+```
 
-| Policy | Route | DNS transport |
-|---|---|---|
-| default and `se-domain` | ENTRY → AWG3 → EXIT | Unbound → DoT |
-| `entry-domain` | ENTRY WAN | managed local resolver |
-| RU networks and `ru-domain` | ENTRY WAN or SOCKS5/TUN | DoH through the RU proxy when available |
-| SOCKS5 outage | automatic fail-open through ENTRY | default DoT remains available |
+### 5. Verify
 
-Client DNS is redirected to the local ENTRY resolver. Runtime policy uses
-`ipset`, `iptables`, packet marks, and dedicated routing tables.
-
-## Reliability
-
-| Mechanism | Purpose |
-|---|---|
-| bidirectional PMTU | coordinated MTU without avoidable fragmentation |
-| TCP MSS clamp | reliable TCP inside the cascade |
-| kernel/DKMS guard | prevents reboot into a kernel without AmneziaWG |
-| transactional component updates | validated ENTRY/EXIT update with rollback |
-| bounded DNS/APT/SSH/AWG3 retries | tolerates transient provider failures |
-| SOCKS5 watchdog | stateful fail-open and recovery |
-| health/audit gates | detect service, firewall, DNS, and routing drift |
-| Telegram | alerts on reboot, failover, and recovery |
-
-## Security
-
-| Boundary | Implementation |
-|---|---|
-| Secrets | Ansible Vault, `no_log`, mode `0600`, no client configs in Git/CI |
-| SSH | dedicated `kalimera` account; key access is verified before old ports close; Fail2Ban follows |
-| Privileges | project commands use a root-owned allowlist; unrestricted sudo still requires the user password |
-| Passwords | four independent 30-character values are shown once; only hashes remain in Vault |
-| Firewall | deny-by-default UFW; AWG3 limited to known ENTRY/EXIT IPv4 peers |
-| Updates | candidate validation, exact applied-version lock, automatic rollback |
-| Kernel | headers, DKMS and `modinfo` verified for the running and newest installed kernels |
-| DNS | local Unbound, validated DoT/DoH, provider-DNS failure resilience; `/etc/resolv.conf` and `nsswitch.conf` are forced onto `systemd-resolved` regardless of hosting provider (v2.0.1); optionally, the default branch resolves via its own DNSSEC-validating recursion on EXIT inside the AWG tunnel instead of external DoT, so no separate TLS ClientHello leaves ENTRY (v2.1.0) |
-| No-logs | journal and login accounting stay in RAM; UFW/sing-box/DNS query logs, shell history, and coredumps are disabled |
-| On-disk secrets | Shamir `2-of-5` + AES-256-GCM; plaintext configuration only in `/run`; services receive AWG/AWG3/sing-box/Telegram config via systemd credentials |
-| AWG3 failures | bounded retries and sanitized diagnostics without key material |
-| VPS networking | compatible with both ifupdown and systemd-networkd without replacing the hosting provider's network manager |
-| Repository | Gitleaks plus YAML, Ansible, Shell, and Python checks |
-
-See [SECURITY.md](SECURITY.md) and
-[docs/security-boundary.md](docs/security-boundary.md) for the threat model.
-
-## Operations
-
-| Area | Commands |
-|---|---|
-| State | `kalimera-status`, `awg-health --strict`, `server-audit` |
-| Clients | `vpn-user`, `awg-mobile`, `awg-old` |
-| DNS | `dns-status`, `dot-switch`, `doh-switch` |
-| Routing | `ru-domain`, `se-domain`, `entry-domain`, `ru-direct-ports` |
-| Proxy | `ru-proxy`, `ru-proxy-set` |
-| Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
-| Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
-
-Normal post-installation administration uses the `kalimera` account. Project
-commands do not require typing `sudo`; arbitrary system changes still require
-the one-time displayed `kalimera` password, so no unrestricted passwordless
-root shell is created.
-
-Validation on both nodes:
+On every server:
 
 ```bash
 awg-health --strict
@@ -272,26 +232,129 @@ server-audit
 systemctl --failed --no-pager
 ```
 
+Expected result: `GOOD`, zero audit errors and no failed units.
+
+## Day-to-day use
+
+After installation, log in to the servers as `kalimera`. Project commands work
+without `sudo` and without a password, and every server shows a cascade status
+table at login. Full reference: `kalimera-help`.
+
+| Task | Commands |
+|---|---|
+| Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
+| AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
+| VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete` |
+| Domain routing | `ru-domain add`, `se-domain add`, `entry-domain add` |
+| Russian proxy | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
+| DNS | `dns-status`, `dot-switch`, `doh-switch` |
+| Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
+| Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
+
+```bash
+ru-domain add example.ru       # open directly from ENTRY
+se-domain add example.com      # always through EXIT
+entry-domain add example.org   # direct, bypassing the Russian proxy
+```
+
+### Client profiles
+
+| Profile | Use it for | Interface |
+|---|---|---|
+| `balanced` | the recommended choice for most devices | `awg0`, UDP/443 |
+| `performance` | lowest overhead, highest speed | `awg0` |
+| `masking` | the widest set of obfuscation parameters | `awg0` |
+| `mobile/AWG3+` | the full AWG 3.1 profile for AmneziaWG 5.0.1.5 and later | `awg-mobile`, UDP/8443 |
+| `old` | KeeneticOS 4.3.x | `awg-old` |
+
+## Security
+
+| Area | How it is protected |
+|---|---|
+| Secrets | Ansible Vault, `no_log`, `0600` permissions; on servers Shamir 2-of-N and AES-256-GCM, plaintext only under `/run` |
+| Boot | services wait for a share quorum and check pinned SSH host keys; a modified secret bundle does not start |
+| SSH | key-only `kalimera`, root disabled, new access verified before the old port closes |
+| Privileges | project commands through a restricted allowlist; full `sudo` requires a password |
+| Firewall | default-deny UFW; the inter-server port is open between ENTRY and EXIT only |
+| Updates | candidate checks, pinned versions and automatic rollback |
+| Repository | Gitleaks, a custom secret scan, YAML, Ansible, Shell and Python checks in CI |
+
+Threat model and vulnerability reporting: [SECURITY.md](SECURITY.md),
+[docs/security-boundary.md](docs/security-boundary.md) and
+[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md).
+
+## Verified compatibility
+
+| Area | What was tested |
+|---|---|
+| Ubuntu 24.04 LTS | clean ENTRY + EXIT + FRONT install on real VPS, reboot, strict audit |
+| ENTRY–EXIT | AWG 3.1 handshake on the kernel module, negotiated MTU, recovery after reboot |
+| mobile/AWG3+ | full AWG 3.1 profile, real client connections |
+| KeeneticOS | `balanced` and `old` profiles |
+| Russian SOCKS5 | TCP/UDP, watchdog, automatic fallback to the direct route and recovery |
+| Yandex Cloud CDN | header-based uplink on Xray v26.7.28, live probes through the CDN |
+| Allowlist mode | a new session through Russian cloud CDN → FRONT → ENTRY |
+
+The matrix records scenarios that actually passed and does not guarantee
+identical behaviour across carriers, hosting providers and client versions.
+
+## Updating
+
+Re-apply the current release:
+
+```bash
+kalimera-deploy --resume
+```
+
+Move to a new release:
+
+```bash
+sudo git -C /root/KalimeraWG fetch origin --tags
+sudo git -C /root/KalimeraWG switch --detach v3.0.4
+kalimera-deploy --resume
+```
+
+Read the release notes before updating: some releases require reissuing client
+profiles.
+
 ## Documentation
 
-| Document | Content |
+| Document | Topic |
 |---|---|
-| [docs/interactive-deploy.md](docs/interactive-deploy.md) | installation flow |
-| [docs/awg3.md](docs/awg3.md) | AWG 3+ transit |
-| [docs/security-boundary.md](docs/security-boundary.md) | secrets, UFW and trust boundaries |
+| [docs/interactive-deploy.md](docs/interactive-deploy.md) | installation stages and installer answers |
+| [docs/front-relay.md](docs/front-relay.md) | FRONT, CDN and allowlist mode |
+| [docs/awg3.md](docs/awg3.md) | the inter-server AWG 3.1 channel and its parameters |
+| [docs/security-boundary.md](docs/security-boundary.md) | secrets, firewall and trust boundaries |
+| [docs/terminal.md](docs/terminal.md) | terminal interface and help |
 | [docs/acceptance.md](docs/acceptance.md) | acceptance checks |
-| [docs/front-relay.md](docs/front-relay.md) | field-validated CDN/FRONT allowlist path and its limitations (Russian) |
-| [docs/upstream.md](docs/upstream.md) | pinned upstream components |
+| [docs/upstream.md](docs/upstream.md) | pinned third-party component versions |
 | [CHANGELOG.md](CHANGELOG.md) | release history |
 
-## Scope
+## What's new
 
-KalimeraWG does not guarantee anonymity, IP reputation, third-party proxy
-availability, or access through every network. It does not make cleartext
-traffic beyond the VPN exit end-to-end encrypted. Users remain responsible for
-lawful use and provider terms.
+**v3.0** moved the inter-server channel and mobile onto the kernel module with
+full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRONT
+role with a CDN fallback, and made the profile structure random for every
+installation.
 
-KalimeraWG is not an official Amnezia VPN project. Third-party notices are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- **v3.0.4:** installation no longer stops in the first stage with
+  "Permission denied (publickey)" for root.
+- **v3.0.3:** the negotiated client MTU is saved automatically.
+- **v3.0.2:** the `fwupd-refresh` timer, which failed daily on VPS, is disabled.
+- **v3.0.1:** packet size randomization is off on mobile/AWG3+; with it the
+  profile lost about 5% of packets.
 
-<p align="center"><b>KalimeraWG v3.0.3 · a managed cascade with a CDN fallback</b></p>
+Full history in [CHANGELOG.md](CHANGELOG.md).
+
+## Responsible use
+
+KalimeraWG does not guarantee anonymity, IP reputation, availability of an
+external proxy or the absence of blocking. An unencrypted protocol stays
+unencrypted after it leaves the VPN. You are responsible for lawful use and for
+following the rules of your hosting provider, proxy provider and the networks
+you connect to.
+
+KalimeraWG is not an official Amnezia VPN project. Third-party components and
+their licenses are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The project is distributed under the [MIT](LICENSE) license.
