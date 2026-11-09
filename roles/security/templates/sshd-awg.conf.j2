@@ -23,7 +23,10 @@ PermitEmptyPasswords no
 {% if manage_admin and finalize_admin %}
 AllowUsers {{ managed_admin }}
 {% elif manage_admin %}
-AllowUsers {{ managed_admin }} root{% if ansible_user not in [managed_admin, 'root'] %} {{ ansible_user }}{% endif %}
+{# Выражение, а не {% if %} в конце строки: Ansible рендерит с trim_blocks,
+   и перевод строки после {% endif %} склеивал AllowUsers с "Banner none".
+   sshd получал "AllowUsers kalimera rootBanner none" и отказывал root. #}
+AllowUsers {{ managed_admin }} root{{ (' ' ~ ansible_user) if ansible_user not in [managed_admin, 'root'] else '' }}
 {% else %}
 AllowUsers {{ managed_admin }}
 {% endif %}

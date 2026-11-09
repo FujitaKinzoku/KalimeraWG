@@ -1,187 +1,94 @@
 <p align="center">
-  <a href="README.md"><b>RU · Русский</b></a> ·
-  <a href="README.en.md">EN · English</a>
+  <a href="README.md"><b>Русский</b></a> ·
+  <a href="README.en.md">English</a>
 </p>
 
 <p align="center">
-  <img src="assets/kinzoku.jpg" alt="KalimeraWG by Kinzoku" width="680">
+  <img src="assets/kinzoku.jpg" alt="KalimeraWG" width="680">
 </p>
 
 <h1 align="center">KalimeraWG</h1>
 
-<p align="center"><em><b>Управляемый VPN-каскад: клиент → ENTRY → EXIT, резерв через CDN → FRONT</b><br>
-AmneziaWG 3.1 · VLESS+REALITY · CDN/XHTTP · маршрутный DNS · SOAX/SOCKS5</em></p>
+<p align="center">
+  <b>Собственный VPN-каскад на AmneziaWG 3.1 одной командой.</b><br>
+  Вход в своей стране, выход за рубежом, российские сайты напрямую<br>
+  и резервный вход через CDN на случай белых списков.
+</p>
 
 <p align="center">
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/tag/v3.0.3"><img src="https://img.shields.io/badge/release-v3.0.3-7B2CBF" alt="KalimeraWG v3.0.3"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/releases/latest"><img src="https://img.shields.io/github/v/release/FujitaKinzoku/KalimeraWG?color=7B2CBF&label=release" alt="Последний выпуск"></a>
+  <a href="https://github.com/FujitaKinzoku/KalimeraWG/actions"><img src="https://img.shields.io/github/actions/workflow/status/FujitaKinzoku/KalimeraWG/validate.yml?label=checks" alt="Проверки"></a>
   <img src="https://img.shields.io/badge/Ubuntu-24.04_LTS-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04 LTS">
   <img src="https://img.shields.io/badge/AmneziaWG-3.1-7B2CBF" alt="AmneziaWG 3.1">
-  <img src="https://img.shields.io/badge/IaC-Ansible-EE0000?logo=ansible&logoColor=white" alt="Ansible">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2EA44F" alt="MIT License"></a>
-  <a href="https://github.com/FujitaKinzoku/KalimeraWG/actions"><img src="https://img.shields.io/github/actions/workflow/status/FujitaKinzoku/KalimeraWG/validate.yml?label=checks" alt="Проверки"></a>
+  <img src="https://img.shields.io/badge/Ansible-IaC-EE0000?logo=ansible&logoColor=white" alt="Ansible">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2EA44F" alt="MIT"></a>
 </p>
-
-KalimeraWG превращает чистые VPS с Ubuntu 24.04 в воспроизводимый каскад,
-создаёт первого клиента и устанавливает инструменты эксплуатации. Основной
-путь - AmneziaWG до ENTRY и межсерверный канал до EXIT. Необязательная третья
-роль FRONT принимает VLESS/XHTTP напрямую или через CDN и нужна прежде всего
-для режима белых списков.
-
-> **v3.0.3 - текущий рабочий выпуск** (линия v3.0). Межсерверный канал и mobile/AWG3+
-> работают на kernel-модуле с полным AWG 3.1, FRONT ставится вместе с каскадом,
-> аплинк VLESS совместим с Yandex Cloud CDN. Выпуск подтверждён чистой
-> установкой ENTRY + EXIT + FRONT на реальных серверах. Подробности - в
-> разделе [Что нового в v3.0.0](#что-нового-в-v300) и в
-> [CHANGELOG.md](CHANGELOG.md).
-
-## Быстрый старт
-
-| Требование | Значение |
-|---|---|
-| Серверы | две чистые VPS с Ubuntu 24.04 LTS, третья - для FRONT |
-| ENTRY | принимает клиентов, на нём же запускается установщик; публичный IPv4 |
-| EXIT | выпускает основной трафик; публичный IPv4 |
-| FRONT (необязательно) | публичный IPv4, домен с A-записью на этот сервер; для CDN - готовый CDN-ресурс |
-| Начальный доступ | root и работающий SSH на всех серверах; после установки - `kalimera` по ключу |
-| Время | обычно 20–40 минут |
-
-Запустите на ENTRY от `root`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.3/install.sh | bash
-```
-
-Команда загружает и устанавливает именно выпуск `v3.0.3`, а не изменяемое
-состояние ветки `main`. Проверить версию локальной копии:
-
-```bash
-cd /root/KalimeraWG
-./deploy --version
-```
-
-<details>
-<summary><b>Установка с предварительным просмотром через Git</b></summary>
-
-```bash
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.3 --depth 1 \
-  https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
-cd /root/KalimeraWG
-./deploy
-```
-
-</details>
-
-Установщик запросит адреса и SSH-порты серверов, административный публичный
-SSH-ключ, режим RU-маршрута, DNS, необязательные SOCKS5, Telegram и FRONT, а
-затем создаст конфигурацию первого клиента. Закрытый SSH-ключ вводить нельзя.
-Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
-
-Для FRONT через CDN заранее подготовьте домен источника (A-запись на FRONT) и
-CDN-ресурс: источник по HTTPS на этот домен, заголовок Host и SNI - домен
-источника, кэширование выключено. Первый VLESS-профиль после установки
-выдаётся на FRONT командой `vless-user export initial`. Подробно -
-[docs/front-relay.md](docs/front-relay.md).
-
-## Работа при белых списках
-
-> Новая клиентская сессия устанавливается при активном режиме белых списков по
-> цепочке **российский облачный CDN → FRONT → ENTRY**, после чего сохраняются
-> штатные маршруты RU/EXIT. Результат относится к проверенным сетям и CDN и не
-> гарантирует одинаковую доступность у всех операторов.
 
 <p align="center">
-  <picture>
-    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-ru-mobile.svg">
-    <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая подтверждённый CDN/FRONT резерв" width="760">
-  </picture>
+  <a href="#быстрый-старт">Быстрый старт</a> ·
+  <a href="#возможности">Возможности</a> ·
+  <a href="#как-это-работает">Как это работает</a> ·
+  <a href="#повседневная-работа">Команды</a> ·
+  <a href="#документация">Документация</a> ·
+  <a href="CHANGELOG.md">Что нового</a>
 </p>
 
-Основной AWG идёт прямо на ENTRY. VLESS всегда завершается на FRONT: клиент
-подключается к origin-домену напрямую либо к доступному CDN edge. Затем FRONT
-открывает служебный REALITY-хоп к отдельному backend ENTRY.
+---
 
-| Путь клиента | Транспорт | Назначение | Статус этапа |
-|---|---|---|---|
-| клиент → ENTRY | AmneziaWG 3+, UDP/443 или mobile UDP/8443 | основной путь с минимальными накладными расходами | проверен ранее |
-| клиент → FRONT | TLS + VLESS/XHTTP, TCP/443 | прямой VLESS без CDN; публичного VLESS на ENTRY нет | реализован |
-| клиент → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | вход при доступном CDN во время IP allowlist | подтверждён полевым тестом |
-| FRONT → ENTRY | VLESS+REALITY | скрывает origin ENTRY от клиента CDN-пути | подтверждён полевым тестом |
-| ENTRY → EXIT | отдельный AWG 3.1 на kernel-модуле | основной и принудительный `se-domain` egress | без изменений |
+KalimeraWG превращает две-три чистые VPS с Ubuntu 24.04 в готовый VPN-каскад.
+Вы отвечаете на вопросы установщика, а через 20–40 минут получаете работающие
+серверы, первого клиента и набор команд для повседневной работы. Править
+конфиги, `iptables` и `systemd` вручную не нужно.
 
-Аплинк XHTTP идёт GET-запросами без тела, данные лежат в заголовках: с
-30.09.2026 Yandex Cloud CDN отвечает `413` на любой GET с телом. Поэтому
-отдача через CDN ограничена примерно 2,2 Мбит/с; скачивание не ограничено.
-| ENTRY → RU | SOCKS5/TUN либо fail-open через WAN ENTRY | российские домены и сети | без изменений |
+**Зачем каскад.** Клиент подключается к серверу ENTRY в своей стране: такое
+соединение реже блокируют и оно быстрее. Дальше трафик уходит по отдельному
+туннелю на зарубежный EXIT, и сайты видят адрес EXIT. Российские сайты при этом
+открываются напрямую с ENTRY, как будто VPN выключен. Если AmneziaWG
+заблокируют или включат режим белых списков, остаётся третий сервер, FRONT: к
+нему можно подключиться по VLESS через российский облачный CDN.
 
-### Что именно подтвердил тест
+## Возможности
 
-| Проверка | Результат |
-|---|---|
-| запуск новой сессии во время ограничения | соединение установлено через CDN, без прямого обращения клиента к IP ENTRY |
-| доставка до FRONT | реальный TLS на клиентском домене и XHTTP прошли CDN |
-| внутренний хоп | FRONT подключился к отдельной службе `kalimera-front-backend` на ENTRY |
-| политика после входа | RU-трафик сохранил SOCKS5/fail-open, остальной трафик - EXIT через AWG 3+ |
-| существующие профили | AWG и old не изменены; mobile заменён на mobile/AWG3+ |
+- **Каскад ENTRY → EXIT.** Отдельный туннель AmneziaWG 3.1 между серверами на
+  модуле ядра, со своими ключами и параметрами. Порт EXIT открыт только для
+  адреса ENTRY.
+- **Маскировка AmneziaWG 3.1.** Полный набор полей обфускации, а структура
+  профиля генерируется заново для каждой установки.
+- **Резервный вход через CDN.** FRONT принимает VLESS/XHTTP напрямую или через
+  CDN и передаёт трафик на ENTRY по служебному REALITY-соединению. Клиент
+  CDN-пути не видит адрес ENTRY. Проверено с Yandex Cloud CDN.
+- **Маршрутизация по странам.** Российские сети и домены идут напрямую с ENTRY
+  или через ваш SOCKS5 (например, SOAX), всё остальное уходит через EXIT.
+  Если прокси отказал, трафик сам переключается на прямой маршрут.
+- **DNS без утечек.** Клиенты используют локальный Unbound на ENTRY, наружу
+  запросы уходят по DoT или DoH. Можно включить DNSSEC-рекурсию на EXIT внутри
+  туннеля.
+- **Профили для любых клиентов.** `performance`, `balanced`, `masking`,
+  `mobile/AWG3+` для AmneziaWG 5 и совместимый профиль для KeeneticOS 4.3.
+- **Автоматический MTU.** Установщик измеряет PMTU в обе стороны и сам
+  согласует MTU всех сегментов, включая клиентские конфиги.
+- **Секреты не лежат на диске открытым текстом.** Shamir 2-of-N и AES-256-GCM:
+  открытые конфигурации живут только в RAM, службы получают их через systemd
+  credentials. Украденный диск одного сервера ничего не раскрывает.
+- **Без логов.** journald, Fail2Ban и учёт входов хранятся только в RAM. Логи
+  UFW и DNS-запросов, история shell и coredump отключены.
+- **Закрытый SSH.** Отдельный администратор `kalimera`, вход только по ключу,
+  root закрыт, нестандартный порт и Fail2Ban.
+- **Самоконтроль.** `awg-health` и `server-audit` проверяют службы, firewall,
+  DNS и маршруты. Telegram сообщает о перезагрузках и сбоях. Обновление
+  компонентов транзакционное, с автоматическим откатом.
 
-Результат относится к проверенной сети, региону, CDN edge и моменту времени.
-Оператор может менять IP/SNI/HTTP-политику без уведомления, поэтому FRONT -
-аварийный путь, а не обещание универсального обхода. Технология, настройки CDN,
-матрица отказов и границы проверки подробно описаны в
-[docs/front-relay.md](docs/front-relay.md).
+### Чего KalimeraWG не делает
 
-## Что нового в v3.0.0
+- Не обещает анонимность и не защищает от целевой слежки.
+- Не гарантирует обход любой блокировки. Оператор может сменить политику в
+  любой момент, а FRONT остаётся аварийным путём, а не универсальным решением.
+- Не ставит веб-панель и не открывает лишних портов. Управление только по SSH.
+- Не хранит журналы посещений и не кладёт клиентские конфиги в Git или CI.
+- Не обновляет себя сам. Сервер остаётся на выбранном выпуске, пока вы не
+  обновите его вручную.
 
-| Область | Было в v2.1.0 | Стало в v3.0.0 |
-|---|---|---|
-| Межсерверный канал | userspace `amneziawg-go`, AWG 3.0 | kernel-модуль с полным AWG 3.1; потери на канале 0,85% вместо 6–8% |
-| mobile | отдельный профиль | mobile/AWG3+ на kernel-модуле, полный профиль AWG 3.1 на UDP/8443 |
-| FRONT | отсутствовал | третья роль: VLESS/XHTTP напрямую или через CDN, служебный REALITY-хоп до ENTRY, ставится вместе с каскадом |
-| CDN | - | аплинк без тела запроса, совместим с Yandex Cloud CDN; ML-KEM-768 VLESS Encryption |
-| Обфускация | фиксированная структура профилей | структура профилей AWG случайна для каждой установки |
-| Надёжность | - | backend FRONT поднимается после перезагрузки сам, VLESS выходит через EXIT, а не с ENTRY |
-| Проверки | - | `awg-health` проверяет полноту профиля AWG 3.1 и проходимость аплинка через CDN |
-
-После обновления существующего каскада клиентские VLESS-профили нужно выдать
-заново (`vless-user export ИМЯ`), mobile-профили - пересоздать. Полный список
-изменений - в [CHANGELOG.md](CHANGELOG.md), раздел `[3.0.0]`.
-
-**v3.0.1:** на mobile/AWG3+ выключена рандомизация размера
-(`ContentPaddingAddition`, `RandomTrailers`): с ней профиль терял около 5%
-пакетов. На каскадах, установленных раньше, значения меняются вручную в
-`group_vars/entry.yml`, после чего mobile-конфиги выпускаются заново, см.
-[docs/awg3.md](docs/awg3.md).
-
-**v3.0.2:** установка отключает таймер `fwupd-refresh.timer`: на VPS он
-ежедневно падал по таймауту и оставлял failed-модуль для `server-audit`.
-
-**v3.0.3:** согласованный MTU клиентского конфига сохраняется сам; ручной
-`kalimera-secretctl seal` после установки больше не нужен.
-
-### Что было в v2.0.0
-
-Релиз `v2.0.0` - пакет усиления безопасности поверх `v1.0.0`: без изменения
-портов, MTU, DNS-политик и маршрутов каскада. Основные изменения:
-
-| Область | Было в v1.0.0 | Стало в v2.0.0 |
-|---|---|---|
-| Администрирование | повседневная работа под `root` по SSH-ключу | отдельный пользователь `kalimera`; `root` SSH ограничен адресом автоматизации |
-| Пароли | единый пароль `root` | 4 независимых 30-символьных пароля `kalimera`/`root` на ENTRY и EXIT; показываются один раз, в Vault - только SHA-512-хеши |
-| Секреты на диске | обычные файлы конфигурации AWG/AWG3/sing-box | пороговая защита Shamir `2-of-5` + AES-256-GCM; открытые данные только в `/run`, конфиги передаются через systemd credentials |
-| Загрузка каскада | службы стартуют сразу | fail-closed старт: ожидание кворума долей, проверка закреплённых SSH host keys, отказ при изменённом пакете |
-| SSH | key-only доступ, Fail2Ban | дополнительно: скрытый banner, запрет пользовательских startup-файлов, адресное ограничение ключа автоматизации, отдельный резервный административный ключ |
-| Хранение логов | стандартный journald и Fail2Ban | политика no-logs: journald/Fail2Ban/учёт входов только в RAM; UFW/sing-box/DNS query logs, shell history и coredump отключены |
-| Аудит | `server-audit` | добавлен `ssh-key-audit` (посторонние ключи root) и расширенный `server-audit` (публичные listener'ы, соответствие no-logs политике) |
-| Надёжность каскада | - | устранены гонки маршрутизации и AWG3 при загрузке, добавлено самовосстановление маршрута EXIT, устранены ложные срабатывания health-check после перезагрузки |
-| Ядро/DKMS | проверка `/vmlinuz` | guard распознаёт все установленные ядра, включая signed/unsigned kernel-пакеты |
-
-Полный список изменений - в [CHANGELOG.md](CHANGELOG.md) (раздел `[2.0.0]`).
-Модель угроз и границы доверия для новых механизмов - в
-[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md) и
-[docs/security-boundary.md](docs/security-boundary.md).
-
-## Как устроен каскад
+## Как это работает
 
 <p align="center">
   <picture>
@@ -190,156 +97,134 @@ CDN-ресурс: источник по HTTPS на этот домен, заго
   </picture>
 </p>
 
-| Сегмент | Назначение | Состояние по умолчанию |
+| Путь | Транспорт | Когда используется |
 |---|---|---|
-| `awg0`, UDP/443 | современные клиенты | включён |
-| `awg-mobile`, UDP/8443 | отдельный mobile/AWG3+ с полным профилем AWG 3.1 | включается при первом mobile-клиенте |
-| `awg-old` | совместимость с KeeneticOS 4.3.x | включается при первом old-клиенте |
-| `awg3`, EXIT UDP/443 | отдельный канал ENTRY–EXIT | включён |
+| клиент → ENTRY | AmneziaWG 3.1, UDP/443; mobile/AWG3+ на UDP/8443 | основной путь, минимум накладных расходов |
+| клиент → FRONT | TLS + VLESS/XHTTP, TCP/443 | AmneziaWG заблокирован по отпечатку UDP |
+| клиент → CDN → FRONT | TLS + VLESS/XHTTP, TCP/443 | режим белых списков, когда доступен облачный CDN |
+| FRONT → ENTRY | VLESS + REALITY | служебный хоп, скрывает ENTRY от клиента CDN-пути |
+| ENTRY → EXIT | AmneziaWG 3.1 на модуле ядра | весь зарубежный трафик |
+| ENTRY → RU | напрямую или через SOCKS5 | российские сети и домены |
 
-Все интерфейсы, включая межсерверный, поднимает kernel-модуль AmneziaWG. Для
-межсерверного канала сохранён запасной userspace-движок на `amneziawg-go`:
-он переключается `scripts/toggle-transit-engine.py` и по умолчанию не
-используется, см. [docs/awg3.md](docs/awg3.md).
+### Режим белых списков
 
-Межсерверный порт EXIT разрешён UFW только для известного публичного IPv4
-ENTRY. Клиентский и межсерверный каналы используют разные интерфейсы, ключи и
-параметры.
+<p align="center">
+  <picture>
+    <source media="(max-width: 600px)" srcset="assets/whitelist-cascade-ru-mobile.svg">
+    <img src="assets/whitelist-cascade-ru.svg" alt="Три пути подключения KalimeraWG, включая резерв через CDN и FRONT" width="760">
+  </picture>
+</p>
 
-## Выберите сценарий
+Полевой тест подтвердил: при активном режиме белых списков новая сессия
+устанавливается по цепочке **российский облачный CDN → FRONT → ENTRY**, а после
+входа российский трафик по-прежнему идёт напрямую, остальной уходит через EXIT.
+Результат относится к проверенным сетям, CDN и моменту проверки и не
+гарантирует одинаковую работу у всех операторов.
 
-| Задача | Рекомендуемый вариант |
+Данные от клиента к серверу передаются в заголовках GET-запросов, без тела
+запроса: с 30.09.2026 Yandex Cloud CDN отвечает `413` на GET с телом. Поэтому
+отдача через CDN ограничена примерно 2,2 Мбит/с, скачивание не ограничено.
+Подробности, настройки CDN и матрица отказов в
+[docs/front-relay.md](docs/front-relay.md).
+
+## Быстрый старт
+
+### 1. Подготовьте серверы
+
+| | Что нужно |
 |---|---|
-| Обычный надёжный каскад | профиль `balanced`, RU напрямую через ENTRY |
-| Максимальная доступная маскировка | профиль `masking` + межсерверный AWG 3+ |
-| AmneziaWG 5.0.1.5 или новее | профиль `mobile/AWG3+`, отдельный UDP/8443 |
-| KeeneticOS 4.3.x | профиль `old`, отдельный совместимый интерфейс |
-| Российский residential/mobile IP | SOAX или другой SOCKS5 |
-| Максимальная скорость клиента | профиль `performance` |
-| Уведомления об отказах | Telegram-мониторинг |
-| AmneziaWG заблокирован по фингерпринту UDP | VLESS/XHTTP через FRONT без CDN |
-| Режим белых списков на проверенной мобильной сети | подтверждённый резерв FRONT через совместимый облачный CDN, [docs/front-relay.md](docs/front-relay.md) |
+| **ENTRY** | VPS в своей стране с публичным IPv4. На нём запускается установщик |
+| **EXIT** | зарубежная VPS с публичным IPv4 |
+| **FRONT** | по желанию: VPS с публичным IPv4 и доменом, A-запись которого указывает на этот сервер |
+| **Система** | чистая Ubuntu 24.04 LTS на всех серверах |
+| **Доступ** | к EXIT и FRONT: SSH-вход **по паролю** под root или под пользователем с `sudo` |
+| **Время** | 20–40 минут |
 
-## Маршрутизация и DNS
+Установщик ставит свой ключ на EXIT и FRONT через вход по паролю, а в конце сам
+закрывает и root, и пароли. На ENTRY пароль не нужен: установка идёт локально
+от root.
 
-| Политика | Маршрут | DNS-транспорт |
-|---|---|---|
-| обычный трафик и `se-domain` | ENTRY → AWG3 → EXIT | Unbound → DoT |
-| `entry-domain` | напрямую через ENTRY | управляемый локальный резолвер |
-| RU-сети и `ru-domain` | ENTRY WAN либо SOCKS5/TUN | DoH через RU-прокси при его работе |
-| отказ SOCKS5 | автоматический fail-open через ENTRY | основной DoT без потери DNS |
+<details>
+<summary><b>У сервера только пользователь с ключом, без пароля (типично для облаков)</b></summary>
 
-DNS клиентов принудительно направляется на локальный резолвер ENTRY. Политику
-реализуют `ipset`, `iptables`, пакетные метки и отдельные таблицы маршрутизации.
-Настройки применяются сразу и сохраняются после повторного deploy.
+Временно разрешите root вход по паролю. Под своим пользователем выполните:
 
 ```bash
-ru-domain add example.ru
-se-domain add example.com
-entry-domain add example.org
-ru-direct-ports add 993
+sudo passwd root
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/01-bootstrap.conf
+sudo sshd -t && sudo systemctl restart ssh
 ```
 
-## Клиентские профили
+Не закрывая сессию, проверьте вход `ssh root@IP` по паролю с другого
+компьютера. После установки удалите временный файл:
 
-| Профиль | Для чего | Интерфейс |
-|---|---|---|
-| `performance` | минимальные накладные расходы | `awg0` |
-| `balanced` | рекомендуемый универсальный вариант | `awg0` |
-| `masking` | максимальный набор поддерживаемых параметров | `awg0` |
-| `mobile` (`mobile/AWG3+`) | полный профиль AWG 3.1 для AmneziaWG 5.0.1.5+ | `awg-mobile` |
-| `old` | старые версии KeeneticOS | `awg-old` |
+```bash
+sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
+```
 
-### Проверенная совместимость
+Настройки установщика к тому времени уже действуют и перекрывают этот файл.
 
-| Контур | Проверка выпуска `v3.0.0` |
-|---|---|
-| Ubuntu 24.04 LTS | чистая установка ENTRY + EXIT + FRONT на реальных VPS, перезагрузка и строгий аудит на действующих каскадах |
-| ENTRY–EXIT | свежий AWG 3.1 handshake на kernel-модуле, согласованный MTU и восстановление после перезагрузки |
-| mobile/AWG3+ | полный профиль AWG 3.1, реальные подключения клиентов |
-| KeeneticOS | профили `balanced` и `old` для актуальных и совместимых веток прошивки |
-| RU SOCKS5 | проверка TCP/UDP, watchdog, fail-open через ENTRY и автоматическое восстановление |
-| Белые списки | новая сессия через российский облачный CDN → FRONT → ENTRY с сохранением RU/EXIT-маршрутов |
-| Yandex Cloud CDN | аплинк без тела запроса проверен на настоящем Xray v26.7.28 и живыми пробами через CDN |
+</details>
 
-Матрица фиксирует реально пройденные сценарии, но не гарантирует одинаковое
-поведение у всех операторов, хостингов и версий клиентского ПО.
+### 2. Подготовьте CDN (только для FRONT через CDN)
+
+1. A-запись домена источника, например `example.com`, указывает на FRONT.
+2. CDN-ресурс: источник по HTTPS на этот домен, заголовок Host и SNI равны
+   домену источника, кеширование выключено, разрешён метод GET.
+3. Публичный домен CDN-ресурса, например `cdn.example.com`, указан в DNS по
+   инструкции провайдера CDN.
+
+### 3. Запустите установщик
+
+На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.4/install.sh | bash
+```
+
+Команда устанавливает закреплённый выпуск `v3.0.4`, а не текущее состояние
+ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
+SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
+Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
+Закрытый ключ вводить нельзя.
+
+<details>
+<summary><b>Установка через Git с предварительным просмотром кода</b></summary>
+
+```bash
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y git
+git clone --branch v3.0.4 --depth 1 \
+  https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
+cd /root/KalimeraWG
+./deploy
+```
+
+</details>
+
+Если установка прервалась, продолжите её с того же места:
+
+```bash
+cd /root/KalimeraWG && ./deploy --resume
+```
+
+### 4. Подключитесь
+
+В конце установщик покажет конфигурацию первого клиента и одноразовые пароли
+учётных записей: сохраните их. Новые клиенты создаются одной командой на ENTRY,
+первый VLESS-профиль выдаётся на FRONT:
 
 ```bash
 vpn-user phone balanced
-vpn-user iphone mobile
-vpn-user tablet mobile/awg3+
-vpn-user list
-vpn-user delete phone
 ```
 
-`vpn-user list` не печатает ключи. Удаление немедленно отзывает локально
-созданный peer и сохраняет root-only резервную копию.
+```bash
+vless-user export initial
+```
 
-## Автоматизация и надёжность
+### 5. Проверьте
 
-| Механизм | Что он предотвращает |
-|---|---|
-| двусторонний PMTU | фрагментацию и несогласованный MTU сегментов |
-| MSS clamp | проблемы TCP внутри каскада |
-| проверка DKMS до перезагрузки | загрузку ядра без модуля AmneziaWG |
-| транзакционное обновление компонентов | частично применённые обновления ENTRY/EXIT |
-| повторные попытки DNS/APT/SSH/AWG3 | ложные отказы из-за кратковременной недоступности |
-| SOCKS5 watchdog | зависший RU-маршрут без рабочего прокси |
-| `awg-health` и `server-audit` | незаметный дрейф служб, UFW, DNS и маршрутов |
-| Telegram | отсутствие уведомлений о перезагрузке, отказе и восстановлении |
-
-## Безопасность
-
-Начиная с `v2.0.0` усилены следующие границы:
-
-| Область | Реализация |
-|---|---|
-| Секреты | Ansible Vault, `no_log`, права `0600`, отсутствие клиентских конфигов в Git/CI |
-| SSH | отдельный `kalimera`, key-only доступ, проверка до закрытия старого порта и Fail2Ban |
-| Привилегии | команды проекта без явного `sudo` через ограниченный allowlist; полный sudo требует пароль |
-| Пароли | четыре независимых 30-символьных значения показываются один раз; сохраняются только хеши в Vault |
-| Firewall | запрещающие политики UFW; AWG3 разрешён только между известными IPv4 ENTRY/EXIT |
-| Обновления | проверка кандидатов, фиксация применённых версий и автоматический rollback |
-| Ядро | заголовки, DKMS и `modinfo` проверяются для текущего и наиболее нового установленного ядра |
-| DNS | локальный Unbound, контроль DoT/DoH, защита от DNS-сбоев образа VPS; `/etc/resolv.conf` и `nsswitch.conf` принудительно приводятся к `systemd-resolved` независимо от провайдера (v2.0.1); опционально - дефолтная ветка резолвится через собственную DNSSEC-рекурсию на EXIT внутри AWG-туннеля вместо внешнего DoT, без утечки отдельного TLS ClientHello с ENTRY (v2.1.0) |
-| No-logs | journal и учёт входов только в RAM; UFW/sing-box/DNS query logs, shell history и coredump отключены |
-| Секреты на диске | Shamir 2-of-5 + AES-256-GCM; открытые конфигурации только в `/run`, службы используют systemd credentials |
-| Ошибки AWG3 | ограниченные повторные попытки и очищенная диагностика без ключевого материала |
-| Сеть VPS | совместимость с ifupdown/systemd-networkd без самовольной смены сетевого менеджера |
-| Репозиторий | Gitleaks, собственный secret scan, YAML/Ansible/Shell/Python-проверки в CI |
-
-Подробная модель угроз и правила сообщения об уязвимости:
-[SECURITY.md](SECURITY.md) и [docs/security-boundary.md](docs/security-boundary.md).
-
-## Основные команды
-
-| Раздел | Команды |
-|---|---|
-| Состояние | `kalimera-status`, `awg-health --strict`, `server-audit` |
-| Клиенты | `vpn-user`, `awg-mobile`, `awg-old` |
-| DNS | `dns-status`, `dot-switch`, `doh-switch` |
-| Домены | `ru-domain`, `se-domain`, `entry-domain` |
-| RU-прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
-| REALITY | `reality-dest-switch status\|list`; смена dest управляемого FRONT выполняется через inventory и deploy |
-| FRONT-релей | `./deploy --resume --enable-front`, затем `kalimera-test`; [docs/front-relay.md](docs/front-relay.md) |
-| VLESS-пользователи | на FRONT: `vless-user create ИМЯ cdn`, `list`, `export`, `delete` |
-| Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
-| Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
-| Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
-
-При новом SSH-входе ENTRY, EXIT и FRONT показывают адаптивную таблицу с
-фактическими endpoint, режимами, маршрутами и состоянием защиты. Полная справка:
-`kalimera-help`.
-
-После завершения установки обычная работа выполняется под `kalimera`. Команды
-из таблицы запускаются без написания `sudo` и без запроса пароля. Произвольные
-системные изменения через полный `sudo` требуют одноразово показанный пароль
-`kalimera`; постоянный passwordless root shell намеренно не создаётся.
-
-## Проверка установки
-
-На каждом сервере каскада:
+На каждом сервере:
 
 ```bash
 awg-health --strict
@@ -347,44 +232,128 @@ server-audit
 systemctl --failed --no-pager
 ```
 
-Успешный результат: `GOOD`, `Ошибок аудита: 0` и отсутствие failed units.
-При ошибке запуска AWG3 установщик автоматически выводит очищенный отчёт
-systemd, интерфейса и порта, не раскрывая конфигурацию и ключи.
+Ожидаемый результат: `GOOD`, `Ошибок аудита: 0` и ни одного failed-модуля.
+
+## Повседневная работа
+
+После установки входите на серверы как `kalimera`. Команды проекта работают
+без `sudo` и без пароля, а при входе каждый сервер показывает таблицу с
+состоянием каскада. Полная справка: `kalimera-help`.
+
+| Задача | Команды |
+|---|---|
+| Состояние | `kalimera-status`, `awg-health --strict`, `server-audit` |
+| Клиенты AmneziaWG | `vpn-user ИМЯ ПРОФИЛЬ`, `vpn-user list`, `vpn-user delete ИМЯ` |
+| Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete` |
+| Маршруты доменов | `ru-domain add`, `se-domain add`, `entry-domain add` |
+| Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
+| DNS | `dns-status`, `dot-switch`, `doh-switch` |
+| Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
+| Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
+
+```bash
+ru-domain add example.ru       # открывать напрямую с ENTRY
+se-domain add example.com      # всегда через EXIT
+entry-domain add example.org   # напрямую, минуя российский прокси
+```
+
+### Клиентские профили
+
+| Профиль | Для чего | Интерфейс |
+|---|---|---|
+| `balanced` | рекомендуемый вариант для большинства устройств | `awg0`, UDP/443 |
+| `performance` | минимум накладных расходов, максимум скорости | `awg0` |
+| `masking` | максимальный набор параметров маскировки | `awg0` |
+| `mobile/AWG3+` | полный профиль AWG 3.1 для AmneziaWG 5.0.1.5 и новее | `awg-mobile`, UDP/8443 |
+| `old` | KeeneticOS 4.3.x | `awg-old` |
+
+## Безопасность
+
+| Область | Как защищено |
+|---|---|
+| Секреты | Ansible Vault, `no_log`, права `0600`; на серверах Shamir 2-of-N и AES-256-GCM, открытые данные только в `/run` |
+| Загрузка | службы ждут кворума долей и проверяют закреплённые SSH host keys; изменённый пакет секретов не запускается |
+| SSH | `kalimera` по ключу, root закрыт, проверка нового доступа до закрытия старого порта |
+| Привилегии | команды проекта через ограниченный список; полный `sudo` требует пароль |
+| Firewall | UFW с запретом по умолчанию; межсерверный порт открыт только между ENTRY и EXIT |
+| Обновления | проверка кандидатов, фиксация версий и автоматический откат |
+| Репозиторий | Gitleaks, собственный поиск секретов, проверки YAML, Ansible, Shell и Python в CI |
+
+Модель угроз и правила сообщения об уязвимостях: [SECURITY.md](SECURITY.md),
+[docs/security-boundary.md](docs/security-boundary.md) и
+[docs/RUNTIME-SECRETS.md](docs/RUNTIME-SECRETS.md).
+
+## Проверенная совместимость
+
+| Контур | Что проверено |
+|---|---|
+| Ubuntu 24.04 LTS | чистая установка ENTRY + EXIT + FRONT на реальных VPS, перезагрузка, строгий аудит |
+| ENTRY–EXIT | handshake AWG 3.1 на модуле ядра, согласованный MTU, восстановление после перезагрузки |
+| mobile/AWG3+ | полный профиль AWG 3.1, реальные подключения клиентов |
+| KeeneticOS | профили `balanced` и `old` |
+| Российский SOCKS5 | TCP/UDP, watchdog, автоматический переход на прямой маршрут и восстановление |
+| Yandex Cloud CDN | передача данных в заголовках на Xray v26.7.28, живые пробы через CDN |
+| Белые списки | новая сессия через российский облачный CDN → FRONT → ENTRY |
+
+Матрица фиксирует реально пройденные сценарии и не гарантирует одинаковое
+поведение у всех операторов, хостингов и версий клиентов.
 
 ## Обновление
 
-Повторный deploy текущего выпуска:
+Повторно применить текущий выпуск:
 
 ```bash
-cd /root/KalimeraWG
-./deploy --resume
+kalimera-deploy --resume
 ```
 
-Перед переходом на будущий выпуск прочитайте его release notes и `CHANGELOG.md`.
-KalimeraWG не переключает установленный сервер на изменяемую ветку `main`
-автоматически.
+Перейти на новый выпуск:
+
+```bash
+sudo git -C /root/KalimeraWG fetch origin --tags
+sudo git -C /root/KalimeraWG switch --detach v3.0.4
+kalimera-deploy --resume
+```
+
+Перед обновлением прочитайте release notes: в некоторых выпусках нужно заново
+выдать клиентские профили.
 
 ## Документация
 
-| Документ | Содержание |
+| Документ | О чём |
 |---|---|
-| [docs/interactive-deploy.md](docs/interactive-deploy.md) | этапы интерактивной установки |
-| [docs/awg3.md](docs/awg3.md) | межсерверный AWG 3+ и параметры |
-| [docs/security-boundary.md](docs/security-boundary.md) | секреты, UFW и границы доверия |
+| [docs/interactive-deploy.md](docs/interactive-deploy.md) | этапы установки и ответы установщику |
+| [docs/front-relay.md](docs/front-relay.md) | FRONT, CDN и режим белых списков |
+| [docs/awg3.md](docs/awg3.md) | межсерверный AWG 3.1 и его параметры |
+| [docs/security-boundary.md](docs/security-boundary.md) | секреты, firewall и границы доверия |
 | [docs/terminal.md](docs/terminal.md) | интерфейс терминала и справка |
 | [docs/acceptance.md](docs/acceptance.md) | приёмочная проверка |
-| [docs/front-relay.md](docs/front-relay.md) | подтверждённая CDN/FRONT-схема для режима белых списков и её ограничения |
-| [docs/upstream.md](docs/upstream.md) | закреплённые upstream-компоненты |
+| [docs/upstream.md](docs/upstream.md) | закреплённые версии сторонних компонентов |
 | [CHANGELOG.md](CHANGELOG.md) | история выпусков |
 
-## Ограничения и ответственное использование
+## Что нового
 
-Проект не гарантирует анонимность, репутацию IP, доступность внешнего прокси или
-отсутствие блокировок. Он не превращает незашифрованный протокол после выхода
-из VPN в end-to-end шифрование. Пользователь отвечает за законность применения,
-правила хостинга, прокси-провайдера и сетей, к которым подключается.
+**v3.0** перевела межсерверный канал и mobile на модуль ядра с полным
+AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), добавила роль FRONT с
+резервным входом через CDN и сделала структуру профилей случайной для каждой
+установки.
+
+- **v3.0.4:** установка больше не останавливается на первом этапе с ошибкой
+  «Permission denied (publickey)» для root.
+- **v3.0.3:** согласованный MTU клиентского конфига сохраняется сам.
+- **v3.0.2:** отключён таймер `fwupd-refresh`, который ежедневно падал на VPS.
+- **v3.0.1:** на mobile/AWG3+ выключена рандомизация размера пакетов, из-за
+  которой профиль терял около 5% пакетов.
+
+Полная история в [CHANGELOG.md](CHANGELOG.md).
+
+## Ответственное использование
+
+KalimeraWG не гарантирует анонимность, репутацию IP-адресов, доступность
+внешнего прокси или отсутствие блокировок. После выхода из VPN незашифрованный
+протокол остаётся незашифрованным. Вы отвечаете за законность использования и
+соблюдение правил хостинга, прокси-провайдера и сетей, к которым подключаетесь.
 
 KalimeraWG не является официальным проектом Amnezia VPN. Сторонние компоненты и
-лицензии перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-<p align="center"><b>KalimeraWG v3.0.3 · управляемый каскад и резервный вход через CDN</b></p>
+их лицензии перечислены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Проект распространяется по лицензии [MIT](LICENSE).
