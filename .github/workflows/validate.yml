@@ -25,8 +25,30 @@ jobs:
 
       - name: Установка инструментов проверки
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes openssh-server shellcheck ssss unbound nginx unzip
+          # Во время сбоев DNS у Canonical имена *.ubuntu.com не разрешаются,
+          # и CI падает до тестов. Тогда пакеты берутся с зеркала kernel.org,
+          # которое не зависит от DNS Canonical; установка повторяется до трёх раз.
+          use_fallback_mirror() {
+            echo 'Зеркала *.ubuntu.com недоступны; используется mirrors.edge.kernel.org'
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              echo 'https://mirrors.edge.kernel.org/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            sudo find /etc/apt \( -name '*.sources' -o -name '*.list' \) -print0 |
+              xargs -0r sudo sed -E -i 's#https?://([a-z0-9.-]+\.)?ubuntu\.com/ubuntu/?#https://mirrors.edge.kernel.org/ubuntu/#g'
+          }
+          if ! getent hosts azure.archive.ubuntu.com >/dev/null; then
+            use_fallback_mirror
+          fi
+          for attempt in 1 2 3; do
+            if sudo apt-get update &&
+              sudo apt-get install --yes openssh-server shellcheck ssss unbound nginx unzip; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] || exit 1
+            [ "$attempt" -gt 1 ] || use_fallback_mirror
+            echo "Установка инструментов не удалась, повтор через 30 секунд ($attempt/3)"
+            sleep 30
+          done
           pip install --require-hashes -r requirements.lock
 
       - name: Установка коллекций Ansible

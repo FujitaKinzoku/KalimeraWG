@@ -2438,6 +2438,24 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     yaml_write(exit_vars_path, exit_variables)
 
 
+def require_amneziawg_ppa(repo: Path) -> None:
+    """Не начинать обновление пакетов AmneziaWG, пока Launchpad недоступен.
+
+    Без PPA транзакция упала бы уже на скачивании пакетов, а откат и
+    сообщения об ошибке выглядели бы так, будто серверы пострадали. Проверка
+    до любых изменений даёт понятный ответ: повторить позже.
+    """
+    defaults = load_yaml(repo / "roles" / "amneziawg" / "defaults" / "main.yml")
+    url = f"{str(defaults['amneziawg_ppa_uri']).rstrip('/')}/dists/noble/InRelease"
+    try:
+        _http_get(url)
+    except OSError as error:
+        fail(
+            "PPA AmneziaWG на Launchpad (ppa.launchpadcontent.net) сейчас "
+            f"недоступен ({error}). Серверы не изменены; повторите обновление позже."
+        )
+
+
 def prepare_amneziawg_update(production: Path) -> None:
     """Разрешить новые пакеты AmneziaWG, не трогая профили обфускации.
 
@@ -3432,6 +3450,8 @@ def main() -> None:
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
         drop_stale_xray_override(repo, production)
+        if args.update_components or args.update_amneziawg:
+            require_amneziawg_ppa(repo)
         xray_release: dict[str, object] | None = None
         if args.update_xray:
             xray_release = newer_xray_release(repo, production)

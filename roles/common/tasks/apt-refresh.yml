@@ -1,0 +1,79 @@
+---
+# Обновление списков APT, устойчивое к недоступности PPA AmneziaWG.
+#
+# Модуль apt с update_cache проваливает весь deploy, если не ответил хотя бы
+# один источник. Launchpad, где живёт PPA AmneziaWG, регулярно бывает
+# недоступен часами, хотя установленным и закреплённым пакетам AmneziaWG он
+# не нужен. Поэтому apt-get update запускается напрямую, а недоступные
+# источники разбираются по его выводу:
+# - не ответил только PPA, пакеты уже стоят и не обновляются - предупреждение;
+# - PPA нужен (первая установка или явное обновление) - понятная остановка
+#   до каких-либо изменений;
+# - не ответили репозитории Ubuntu - остановка, как и прежде.
+- name: Обновление списков пакетов APT
+  ansible.builtin.command:
+    argv:
+      - "{{ common_apt_get_path }}"
+      - -o
+      - DPkg::Lock::Timeout=600
+      - -q
+      - update
+  environment:
+    LC_ALL: C
+    DEBIAN_FRONTEND: noninteractive
+  register: common_apt_update
+  changed_when: false
+  failed_when: common_apt_update.rc != 0
+
+- name: Проверка установленных пакетов AmneziaWG
+  ansible.builtin.command:
+    argv:
+      - "{{ common_dpkg_query_path }}"
+      - -W
+      - -f=${db:Status-Abbrev}
+      - amneziawg-dkms
+  register: common_amneziawg_installed
+  changed_when: false
+  failed_when: false
+  when: awg_node_role | default('') in ['entry', 'exit']
+
+- name: Разбор недоступных источников APT
+  ansible.builtin.set_fact:
+    common_apt_unreachable_ppa: >-
+      {{ common_apt_failed_sources |
+         select('search', common_apt_optional_source_pattern | regex_escape) | list }}
+    common_apt_unreachable_other: >-
+      {{ common_apt_failed_sources |
+         reject('search', common_apt_optional_source_pattern | regex_escape) | list }}
+    common_amneziawg_present: >-
+      {{ (common_amneziawg_installed.stdout | default('')) is match('^ii') }}
+  vars:
+    common_apt_failed_sources: >-
+      {{ (common_apt_update.stdout ~ '\n' ~ common_apt_update.stderr) |
+         regex_findall('Failed to fetch (\S+)') | unique }}
+
+- name: Остановка при недоступных репозиториях Ubuntu
+  ansible.builtin.fail:
+    msg: >-
+      Не отвечают репозитории пакетов: {{ common_apt_unreachable_other | join(', ') }}.
+      Серверы не изменены; повторите deploy, когда репозитории станут доступны.
+  when: common_apt_unreachable_other | length > 0
+
+- name: Остановка, если без PPA AmneziaWG нельзя продолжить
+  ansible.builtin.fail:
+    msg: >-
+      PPA AmneziaWG на Launchpad (ppa.launchpadcontent.net) сейчас недоступен, а
+      пакеты AmneziaWG нужно {{ 'обновить' if awg_package_refresh | default(false) | bool
+      else 'установить' }}. Серверы не изменены; повторите позже. Проверить:
+      sudo apt-get update - в выводе не должно быть ошибки ppa.launchpadcontent.net.
+  when:
+    - common_apt_unreachable_ppa | length > 0
+    - (not common_amneziawg_present | bool) or (awg_package_refresh | default(false) | bool)
+
+- name: Предупреждение о временно недоступном PPA AmneziaWG
+  ansible.builtin.debug:
+    msg: >-
+      PPA AmneziaWG на Launchpad сейчас недоступен. Установленные пакеты
+      AmneziaWG закреплены и из PPA не скачиваются, поэтому deploy
+      продолжается; используются сохранённые списки пакетов.
+  when: common_apt_unreachable_ppa | length > 0
