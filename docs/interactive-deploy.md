@@ -249,7 +249,18 @@ GitHub и проверяет аплинк через CDN. `--update-components` 
 `--update-amneziawg` и `--update-components` без PPA невозможны: они
 останавливаются до изменения серверов с сообщением, что PPA недоступен.
 Проверить доступность можно командой `sudo apt-get update` - в выводе не
-должно быть ошибки `ppa.launchpadcontent.net`.
+должно быть ошибки `ppa.launchpadcontent.net`. Ключ PPA с
+`keyserver.ubuntu.com` скачивается только при первой установке или если
+отпечаток установленного ключа не совпадает.
+
+Если на сервере не разрешаются имена `*.ubuntu.com` (сбой DNS у Canonical),
+временно переключите источники Ubuntu этого сервера на другое зеркало,
+например `mirror.yandex.ru`, и укажите его для проверки DNS перед deploy
+в `inventory/production/group_vars/<entry|exit|front>.yml`:
+
+```yaml
+awg_apt_dns_probe_name: mirror.yandex.ru
+```
 
 Показать сохранённый итог без подключения к серверам и без изменений:
 
