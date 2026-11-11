@@ -32,9 +32,12 @@ apt-get -o DPkg::Lock::Timeout=600 -y autoremove
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 printf '%s\n' \
   'AmneziaWG, sing-box и AWG3 не обновляются обычным update-all.' \
-  'Для транзакционного обновления каскада на управляющей машине используйте:' \
-  '  ./deploy --resume --update-components'
+  'Пакеты AmneziaWG на ENTRY и EXIT с откатом, без смены клиентских конфигов:' \
+  '  kalimera-deploy --resume --update-amneziawg' \
+  'Новое ядро: kalimera-updates install kernel'
 {% else %}
-printf '%s\n' 'Xray-core и конфигурация FRONT обновляются только повторным deploy.'
+printf '%s\n' \
+  'Xray-core обновляется с управляющего ENTRY: kalimera-deploy --resume --update-xray' \
+  'Новое ядро: kalimera-updates install kernel'
 {% endif %}
 [[ ! -e /var/run/reboot-required ]] || echo 'Требуется перезагрузка; автоматически она не выполнялась.'

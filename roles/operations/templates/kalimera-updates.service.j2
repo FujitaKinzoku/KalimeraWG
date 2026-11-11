@@ -1,0 +1,15 @@
+[Unit]
+Description=Проверка доступных обновлений ядра, AmneziaWG и Xray-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ kalimera_updates_path }} check
+StandardOutput=null
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+ProtectClock=true
+RestrictRealtime=true
+SystemCallArchitectures=native

@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# Проверка и установка обновлений ядра, AmneziaWG и Xray-core.
+# Найденное обновление - это не ошибка и не предупреждение: строка UPD
+# сообщает, что доступно и какой командой это применить. Ничего не
+# устанавливается автоматически; состояние живёт только в RAM (/run).
+set -Eeuo pipefail
+
+readonly STATE_DIR={{ kalimera_updates_state_dir | quote }}
+readonly STATE_FILE="$STATE_DIR/state"
+readonly ROLE={{ awg_node_role | quote }}
+{% if awg_node_role == 'front' %}
+readonly XRAY_BINARY={{ front_xray_binary_path | default('/usr/local/bin/xray') | quote }}
+readonly XRAY_RELEASES_API={{ kalimera_updates_xray_releases_api | quote }}
+{% endif %}
+
+usage() {
+    cat <<'EOF'
+Использование:
+  kalimera-updates                 показать доступные обновления
+  kalimera-updates check           проверить заново, ничего не устанавливая
+  kalimera-updates install kernel  установить новое ядро; перезагрузка вручную
+EOF
+}
+
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+record() {
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}"
+}
+
+# 0, если версия $1 строго новее $2 (сравнение как у sort -V).
+version_gt() {
+    [[ "$1" != "$2" ]] &&
+        [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" == "$1" ]]
+}
+
+# Метапакет, который тянет новые ядра той же сборки, что работает сейчас.
+# Для generic берём облегчённый linux-image-virtual: то же ядро без драйверов
+# железа и прошивок, которые VPS не нужны.
+kernel_meta_package() {
+    local flavour="${1##*-}"
+    if [[ "$flavour" == generic ]]; then
+        printf 'linux-image-virtual\n'
+    else
+        printf 'linux-image-%s\n' "$flavour"
+    fi
+}
+
+latest_kernel_release() {
+    apt-cache depends "$1" 2>/dev/null |
+        awk '$1 == "Depends:" && $2 ~ /^linux-image-[0-9]/ {
+            sub(/^linux-image-/, "", $2); print $2; exit
+        }'
+}
+
+check_kernel() {
+    local running meta latest
+    running="$(uname -r)"
+    meta="$(kernel_meta_package "$running")"
+    latest="$(latest_kernel_release "$meta")"
+    if [[ -z "$latest" ]]; then
+        record INFO kernel "ядро $running; новые версии не определены: в репозиториях нет $meta"
+        return
+    fi
+    if ! version_gt "${latest%-*}" "${running%-*}"; then
+        record OK kernel "ядро $running актуально"
+        return
+    fi
+    if dpkg-query -W -f='${db:Status-Abbrev}' "linux-image-$latest" 2>/dev/null | grep -q '^ii'; then
+{% if awg_node_role in ['entry', 'exit'] %}
+        record UPD kernel "ядро $latest установлено, работает $running" \
+            "sudo /usr/local/sbin/awg-kernel-guard && sudo reboot (серверы одного каскада по очереди)"
+{% else %}
+        record UPD kernel "ядро $latest установлено, работает $running" \
+            "sudo reboot (серверы одного каскада по очереди)"
+{% endif %}
+    else
+        record UPD kernel "доступно ядро $latest, работает $running" \
+            "kalimera-updates install kernel, затем перезагрузка"
+    fi
+}
+
+{% if awg_node_role in ['entry', 'exit'] %}
+check_amneziawg() {
+    # Счётчик вместо длины массива: "решётка" сразу после фигурной скобки
+    # открывает комментарий Jinja и сломала бы шаблон.
+    local package installed candidate current='' count=0
+    local -a found=()
+    for package in amneziawg-dkms amneziawg-tools; do
+        installed="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
+        [[ -n "$installed" ]] || continue
+        [[ -n "$current" ]] || current="$installed"
+        candidate="$(apt-cache policy "$package" 2>/dev/null |
+            awk '$1 == "Candidate:" { print $2; exit }')"
+        if [[ -n "$candidate" && "$candidate" != '(none)' ]] &&
+            dpkg --compare-versions "$candidate" gt "$installed"; then
+            found+=("$package $installed → $candidate")
+            count=$((count + 1))
+        fi
+    done
+    if [[ -z "$current" ]]; then
+        record INFO amneziawg 'пакеты AmneziaWG не установлены'
+    elif (( count > 0 )); then
+        record UPD amneziawg "доступен AmneziaWG: $(IFS=';'; printf '%s' "${found[*]}")" \
+            'на ENTRY: kalimera-deploy --resume --update-amneziawg (ENTRY и EXIT вместе, с откатом; клиентские конфиги не меняются)'
+    else
+        record OK amneziawg "AmneziaWG $current актуален"
+    fi
+}
+{% endif %}
+
+{% if awg_node_role == 'front' %}
+check_xray() {
+    local installed latest
+    installed="$("$XRAY_BINARY" version 2>/dev/null | awk 'NR == 1 { print $2 }' || true)"
+    latest="$(curl -fsS --max-time 15 -A KalimeraWG \
+        -H 'Accept: application/vnd.github+json' "$XRAY_RELEASES_API" 2>/dev/null |
+        jq -er '.tag_name' 2>/dev/null || true)"
+    latest="${latest#v}"
+    if [[ ! "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        record INFO xray "Xray ${installed:-?}; новые версии не проверены: GitHub недоступен"
+    elif [[ -n "$installed" ]] && version_gt "$latest" "$installed"; then
+        record UPD xray "доступен Xray $latest, работает $installed" \
+            'на ENTRY: kalimera-deploy --resume --update-xray (с проверкой через CDN и откатом)'
+    else
+        record OK xray "Xray ${installed:-?} актуален"
+    fi
+}
+{% endif %}
+
+run_checks() {
+    local temporary
+    install -d -m 0700 "$STATE_DIR"
+    temporary="$(mktemp "$STATE_DIR/.state.XXXXXX")"
+    {
+        printf '#checked\t%s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+        check_kernel
+{% if awg_node_role in ['entry', 'exit'] %}
+        check_amneziawg
+{% endif %}
+{% if awg_node_role == 'front' %}
+        check_xray
+{% endif %}
+    } >"$temporary"
+    chmod 0600 "$temporary"
+    mv -f "$temporary" "$STATE_FILE"
+}
+
+show_state() {
+    local level component message action checked='' updates=0
+    [[ -s "$STATE_FILE" ]] || run_checks
+    while IFS=$'\t' read -r level component message action; do
+        case "$level" in
+            '#checked') checked="$component" ;;
+            UPD)
+                updates=$((updates + 1))
+                printf 'UPD  %s\n' "$message"
+                [[ -z "$action" ]] || printf '     → %s\n' "$action"
+                ;;
+            OK|INFO) printf '%-4s %s\n' "$level" "$message" ;;
+        esac
+    done <"$STATE_FILE"
+    printf 'Доступно обновлений: %d; проверено: %s (%s)\n' "$updates" "${checked:-?}" "$ROLE"
+}
+
+install_kernel() {
+    local running meta
+    local -a packages=()
+    running="$(uname -r)"
+    meta="$(kernel_meta_package "$running")"
+    packages+=("$meta")
+{% if awg_node_role in ['entry', 'exit'] %}
+    # Заголовки нужны DKMS, чтобы собрать модуль AmneziaWG под новое ядро.
+    packages+=("${meta/linux-image-/linux-headers-}")
+{% endif %}
+    export DEBIAN_FRONTEND=noninteractive
+    exec 9>/run/awg-apt-maintenance.lock
+    flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
+{% if awg_node_role in ['entry', 'exit'] %}
+    /usr/local/sbin/awg-kernel-guard
+{% endif %}
+    flock -u 9
+    run_checks
+    show_state
+    printf '%s\n' \
+        'Ядро установлено, но начнёт работать после перезагрузки: sudo reboot' \
+        'Серверы одного каскада перезагружайте по очереди: следующий - только после awg-health --strict на предыдущем.'
+}
+
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; }; show_state ;;
+    check) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; run_checks; show_state ;;
+    install)
+        [[ $# -eq 2 && "$2" == kernel ]] || { usage >&2; exit 2; }
+        install_kernel
+        ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage ;;
+    *) usage >&2; exit 2 ;;
+esac

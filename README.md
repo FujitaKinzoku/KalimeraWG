@@ -56,7 +56,7 @@ KalimeraWG превращает две-три чистые VPS с Ubuntu 24.04 �
   профиля генерируется заново для каждой установки.
 - **Резервный вход через CDN.** FRONT принимает VLESS/XHTTP напрямую или через
   CDN и передаёт трафик на ENTRY по служебному REALITY-соединению. Клиент
-  CDN-пути не видит адрес ENTRY. Проверено с Yandex Cloud CDN.
+  CDN-пути не видит адрес ENTRY. Проверено с Yandex Cloud CDN и VK Cloud CDN.
 - **Маршрутизация по странам.** Российские сети и домены идут напрямую с ENTRY
   или через ваш SOCKS5 (например, SOAX), всё остальное уходит через EXIT.
   Если прокси отказал, трафик сам переключается на прямой маршрут.
@@ -75,8 +75,10 @@ KalimeraWG превращает две-три чистые VPS с Ubuntu 24.04 �
 - **Закрытый SSH.** Отдельный администратор `kalimera`, вход только по ключу,
   root закрыт, нестандартный порт и Fail2Ban.
 - **Самоконтроль.** `awg-health` и `server-audit` проверяют службы, firewall,
-  DNS и маршруты. Telegram сообщает о перезагрузках и сбоях. Обновление
-  компонентов транзакционное, с автоматическим откатом.
+  DNS и маршруты. Telegram сообщает о перезагрузках и сбоях.
+- **Обновления под контролем.** Каждый сервер раз в сутки проверяет новое
+  ядро, AmneziaWG и Xray-core и показывает `UPD` с командой, которая его
+  применит. Обновление ставится одной командой, с проверкой и откатом.
 
 ### Чего KalimeraWG не делает
 
@@ -85,8 +87,8 @@ KalimeraWG превращает две-три чистые VPS с Ubuntu 24.04 �
   любой момент, а FRONT остаётся аварийным путём, а не универсальным решением.
 - Не ставит веб-панель и не открывает лишних портов. Управление только по SSH.
 - Не хранит журналы посещений и не кладёт клиентские конфиги в Git или CI.
-- Не обновляет себя сам. Сервер остаётся на выбранном выпуске, пока вы не
-  обновите его вручную.
+- Не обновляет себя сам. Он сообщает о новых версиях, но ставит их только по
+  вашей команде.
 
 ## Как это работает
 
@@ -179,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.5/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.6/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.0.5`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.0.6`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -194,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.5 --depth 1 \
+git clone --branch v3.0.6 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -250,6 +252,7 @@ systemctl --failed --no-pager
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Обновления | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
 
 ```bash
@@ -294,12 +297,35 @@ entry-domain add example.org   # напрямую, минуя российски
 | KeeneticOS | профили `balanced` и `old` |
 | Российский SOCKS5 | TCP/UDP, watchdog, автоматический переход на прямой маршрут и восстановление |
 | Yandex Cloud CDN | передача данных в заголовках на Xray v26.7.28, живые пробы через CDN |
+| VK Cloud CDN | чистая установка и рабочие VLESS-подключения через CDN |
+| Xray-core v26.10.31 | пара клиент + сервер на реальных бинарниках: клиенты 26.7.28 и 26.10.31 работают без перевыпуска профилей |
 | Белые списки | новая сессия через российский облачный CDN → FRONT → ENTRY |
 
 Матрица фиксирует реально пройденные сценарии и не гарантирует одинаковое
 поведение у всех операторов, хостингов и версий клиентов.
 
 ## Обновление
+
+### Компоненты
+
+Каждый сервер раз в сутки проверяет, не вышло ли новое ядро, AmneziaWG или
+Xray-core. Это уведомление, а не ошибка: в `server-audit` и на экране входа
+появляется строка вида
+
+```
+UPD  доступен Xray 26.11.9, работает 26.10.31
+     → на ENTRY: kalimera-deploy --resume --update-xray (с проверкой через CDN и откатом)
+```
+
+Полный список на сервере: `kalimera-updates`.
+
+| Что | Команда | Что происходит |
+|---|---|---|
+| ядро | `kalimera-updates install kernel`, затем `sudo reboot` | ставит новое ядро и собирает под него модуль AmneziaWG; серверы одного каскада перезагружайте по очереди |
+| AmneziaWG | на ENTRY: `kalimera-deploy --resume --update-amneziawg` | обновляет пакеты на ENTRY и EXIT, проверяет каскад, при ошибке откатывает; клиентские конфиги не меняются |
+| Xray-core | на ENTRY: `kalimera-deploy --resume --update-xray` | ставит на FRONT последний стабильный выпуск с SHA-256 из GitHub, проверяет аплинк через CDN, при ошибке откатывает |
+
+### Выпуск KalimeraWG
 
 Повторно применить текущий выпуск:
 
@@ -311,7 +337,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.5
+sudo git -C /root/KalimeraWG switch --detach v3.0.6
 kalimera-deploy --resume
 ```
 
@@ -338,6 +364,8 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.0.6:** Xray-core v26.10.31 на FRONT; ежедневная проверка новых версий
+  ядра, AmneziaWG и Xray с уведомлением `UPD` и команды их установки.
 - **v3.0.5:** `server-audit` не принимает короткоживущие исходящие сокеты
   за посторонних слушателей и показывает порт настоящего.
 - **v3.0.4:** установка больше не останавливается на первом этапе с ошибкой

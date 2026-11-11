@@ -380,7 +380,23 @@ if [[ "$quiet" == false && -n "$unexpected_listeners" ]]; then
     printf '     порты: %s; владелец: sudo ss -lntup\n' "$(paste -sd ' ' <<<"$unexpected_listeners")"
 fi
 
+# Доступные обновления - не ошибка и не предупреждение: строки UPD берутся из
+# последней проверки kalimera-updates (RAM) и на код возврата не влияют.
+updates=0
+updates_state={{ (kalimera_updates_state_dir | default('/run/kalimera-updates') ~ '/state') | quote }}
+if [[ "$quiet" == false && -r "$updates_state" ]]; then
+    while IFS=$'\t' read -r level _ message action; do
+        [[ "$level" == UPD ]] || continue
+        updates=$((updates + 1))
+        printf 'UPD  %s\n' "$message"
+        [[ -z "$action" ]] || printf '     → %s\n' "$action"
+    done <"$updates_state"
+fi
+
 [[ "$quiet" == true ]] || printf 'Ошибок аудита: %d; предупреждений: %d\n' "$failures" "$warnings"
+if [[ "$quiet" == false && "$updates" -gt 0 ]]; then
+    printf 'Доступно обновлений: %d; подробнее: kalimera-updates\n' "$updates"
+fi
 if [[ "$quiet" == false && "$failures" -gt 0 ]]; then
     systemctl --failed --no-legend --plain --no-pager |
         awk '$1 != "awg-server-audit.service"' || true

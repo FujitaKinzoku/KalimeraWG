@@ -73,6 +73,7 @@
     - {src: update-all.sh.j2, dest: update-all}
     - {src: f2b-reset.sh.j2, dest: f2b-reset}
     - {src: ssh-key-audit.sh.j2, dest: ssh-key-audit}
+    - {src: kalimera-updates.sh.j2, dest: kalimera-updates}
 
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
@@ -89,6 +90,8 @@
   loop:
     - awg-maintenance.service
     - awg-maintenance.timer
+    - kalimera-updates.service
+    - kalimera-updates.timer
   notify: Перезагрузить модули systemd для администрирования
 
 - name: "Создание: администрирование - этап 8"
@@ -388,6 +391,21 @@
     name: awg-maintenance.timer
     enabled: true
     state: started
+
+- name: Включение ежедневной проверки доступных обновлений
+  ansible.builtin.systemd_service:
+    name: kalimera-updates.timer
+    enabled: true
+    state: started
+
+# Первая проверка сразу после deploy, чтобы server-audit и экран входа
+# показывали состояние обновлений без ожидания таймера. Недоступность сети
+# или GitHub проверку не проваливает: она пишет INFO и завершается успешно.
+- name: Первичная проверка доступных обновлений
+  ansible.builtin.command:
+    argv: ["{{ kalimera_updates_path }}", check]
+  changed_when: false
+  failed_when: false
 
 - name: "Включение: администрирование - этап 26"
   ansible.builtin.systemd_service:

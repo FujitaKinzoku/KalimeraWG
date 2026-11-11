@@ -2438,6 +2438,127 @@ def prepare_component_update(repo: Path, production: Path) -> None:
     yaml_write(exit_vars_path, exit_variables)
 
 
+def prepare_amneziawg_update(production: Path) -> None:
+    """Разрешить новые пакеты AmneziaWG, не трогая профили обфускации.
+
+    В отличие от --update-components здесь не перевыпускаются профили
+    клиентов и межсерверного канала и не меняются sing-box/AWG3: обновляются
+    только пакеты AmneziaWG, поэтому клиентские конфиги продолжают работать.
+    """
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    variables = load_yaml(all_vars_path)
+    variables["awg_package_version_mode"] = "candidate"
+    variables.pop("awg_package_versions", None)
+    yaml_write(all_vars_path, variables)
+
+
+XRAY_RELEASES_API = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+XRAY_DOWNLOAD_PREFIX = "https://github.com/XTLS/Xray-core/releases/download/"
+XRAY_ASSETS = {"x86_64": "Xray-linux-64.zip", "aarch64": "Xray-linux-arm64-v8a.zip"}
+XRAY_OVERRIDE_KEYS = ("front_xray_version", "front_xray_packages")
+_XRAY_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _version_key(tag: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in tag.lstrip("v").split("."))
+
+
+def _http_get(url: str, *, accept: str = "application/octet-stream") -> bytes:
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "KalimeraWG", "Accept": accept}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return response.read()
+
+
+def latest_xray_release() -> dict[str, object]:
+    """Последний стабильный выпуск Xray-core и SHA256 архивов для FRONT.
+
+    Контрольная сумма берётся из поля digest, которое GitHub вычисляет сам,
+    а если его нет - из опубликованного рядом файла .dgst. Архив затем
+    скачивает Ansible на FRONT и сверяет с этой суммой.
+    """
+    try:
+        release = json.loads(
+            _http_get(XRAY_RELEASES_API, accept="application/vnd.github+json")
+        )
+    except (OSError, ValueError) as error:
+        fail(f"Не удалось получить сведения о выпуске Xray-core с GitHub: {error}")
+    tag = str(release.get("tag_name", ""))
+    if not _XRAY_TAG_RE.match(tag) or release.get("prerelease") or release.get("draft"):
+        fail(f"GitHub вернул неподходящий выпуск Xray-core: {tag or 'без тега'}")
+    assets = {
+        str(asset.get("name")): asset
+        for asset in release.get("assets", [])
+        if isinstance(asset, dict)
+    }
+    packages: dict[str, dict[str, str]] = {}
+    for architecture, name in XRAY_ASSETS.items():
+        asset = assets.get(name)
+        url = str(asset.get("browser_download_url", "")) if asset else ""
+        if not url.startswith(XRAY_DOWNLOAD_PREFIX + tag + "/"):
+            fail(f"В выпуске Xray-core {tag} нет архива {name}")
+        digest = str(asset.get("digest") or "")
+        checksum = digest.removeprefix("sha256:")
+        if not _SHA256_RE.match(checksum):
+            try:
+                text = _http_get(url + ".dgst").decode("utf-8", "replace")
+            except OSError as error:
+                fail(f"Не удалось получить контрольную сумму {name}: {error}")
+            found = re.search(r"SHA2-256=\s*([0-9a-f]{64})", text)
+            checksum = found.group(1) if found else ""
+        if not _SHA256_RE.match(checksum):
+            fail(f"Для {name} в выпуске {tag} не найдена SHA256")
+        packages[architecture] = {"url": url, "checksum": f"sha256:{checksum}"}
+    return {"front_xray_version": tag, "front_xray_packages": packages}
+
+
+def default_xray_version(repo: Path) -> str:
+    defaults = load_yaml(repo / "roles" / "front" / "defaults" / "main.yml")
+    return str(defaults["front_xray_version"])
+
+
+def drop_stale_xray_override(repo: Path, production: Path) -> None:
+    """Убрать версию Xray, закреплённую --update-xray, когда выпуск её догнал.
+
+    Иначе однажды записанная в inventory версия навсегда перекрыла бы более
+    новую, проверенную в следующем выпуске KalimeraWG.
+    """
+    front_path = production / "group_vars" / "front.yml"
+    if not front_path.is_file():
+        return
+    front_vars = load_yaml(front_path)
+    override = front_vars.get("front_xray_version")
+    if not isinstance(override, str) or not _XRAY_TAG_RE.match(override):
+        return
+    if _version_key(default_xray_version(repo)) >= _version_key(override):
+        for key in XRAY_OVERRIDE_KEYS:
+            front_vars.pop(key, None)
+        yaml_write(front_path, front_vars)
+
+
+def newer_xray_release(repo: Path, production: Path) -> dict[str, object] | None:
+    """Выпуск Xray новее применённого на FRONT либо None, если обновлять нечего."""
+    front_path = production / "group_vars" / "front.yml"
+    if not front_path.is_file():
+        fail("FRONT не установлен: обновлять Xray-core негде")
+    current = load_yaml(front_path).get("front_xray_version") or default_xray_version(repo)
+    release = latest_xray_release()
+    if _version_key(str(release["front_xray_version"])) <= _version_key(str(current)):
+        return None
+    release["previous_version"] = current
+    return release
+
+
+def apply_xray_release(production: Path, release: dict[str, object]) -> None:
+    front_path = production / "group_vars" / "front.yml"
+    front_vars = load_yaml(front_path)
+    for key in XRAY_OVERRIDE_KEYS:
+        front_vars[key] = release[key]
+    yaml_write(front_path, front_vars)
+
+
 def restore_file(path: Path, content: bytes | None) -> None:
     """Атомарно восстановить файл транзакции либо удалить созданный файл."""
     if content is None:
@@ -3016,7 +3137,8 @@ def show_deployment_summary(production: Path) -> None:
             "Клиенты:    vpn-user list/create/delete · awg-old · awg-mobile",
             "Маршруты:   ru-domain · se-domain · entry-domain · ru-direct-ports",
             "Прокси/DNS: ru-proxy · ru-proxy-set · dot-switch · doh-switch",
-            "Система:    maintenance · update-all · kalimera-deploy --resume --update-components · f2b-reset",
+            "Система:    maintenance · update-all · f2b-reset",
+            "Обновления: kalimera-updates · --update-amneziawg · --update-xray",
         ],
         "blue",
     )
@@ -3199,7 +3321,45 @@ def main() -> None:
             "проверенные версии sing-box/AWG3 из текущего выпуска KalimeraWG"
         ),
     )
+    parser.add_argument(
+        "--update-amneziawg",
+        action="store_true",
+        help=(
+            "при --resume транзакционно обновить только пакеты AmneziaWG на "
+            "ENTRY и EXIT; клиентские конфиги не меняются"
+        ),
+    )
+    parser.add_argument(
+        "--update-xray",
+        action="store_true",
+        help=(
+            "при --resume установить на FRONT последний стабильный выпуск "
+            "Xray-core с проверкой через CDN и автоматическим откатом"
+        ),
+    )
     args = parser.parse_args()
+    update_flags = [
+        name
+        for name, value in (
+            ("--update-components", args.update_components),
+            ("--update-amneziawg", args.update_amneziawg),
+            ("--update-xray", args.update_xray),
+        )
+        if value
+    ]
+    if update_flags and not args.resume:
+        parser.error(f"{update_flags[0]} используется только вместе с --resume")
+    if len(update_flags) > 1:
+        parser.error("выберите только одно обновление за запуск")
+    if (args.update_amneziawg or args.update_xray) and any(
+        (
+            args.enable_front,
+            args.replace_front,
+            args.commit_front_replacement,
+            args.rollback_front_replacement,
+        )
+    ):
+        parser.error(f"{update_flags[0]} нельзя объединять с операциями FRONT")
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
     if args.enable_front and not args.resume:
@@ -3235,7 +3395,7 @@ def main() -> None:
         or args.replace_front
         or args.commit_front_replacement
         or args.rollback_front_replacement
-        or args.update_components
+        or update_flags
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
     repo = args.repo_root.resolve()
@@ -3271,6 +3431,20 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        drop_stale_xray_override(repo, production)
+        xray_release: dict[str, object] | None = None
+        if args.update_xray:
+            xray_release = newer_xray_release(repo, production)
+            if xray_release is None:
+                print(
+                    "Xray-core на FRONT уже последней стабильной версии; "
+                    "обновлять нечего."
+                )
+                return
+            print(
+                f"Будет установлен Xray-core {xray_release['front_xray_version']} "
+                f"вместо {xray_release['previous_version']}."
+            )
         ensure_mobile_awg3_vault_material(production, vault_password)
         if args.rollback_front_replacement:
             rollback_front_replacement(production)
@@ -3291,11 +3465,15 @@ def main() -> None:
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
         update_saved_client_configs_cps(state_root / "clients")
+        # Обновление пакетов AmneziaWG: полный набор компонентов или только сами
+        # пакеты. В обоих случаях нужна транзакция пакетов с откатом.
+        package_update = args.update_components or args.update_amneziawg
+        transactional = package_update or args.update_xray
         all_vars = load_yaml(all_vars_path)
         if (
             all_vars.get("awg_package_version_mode") == "candidate"
             and awg_package_lock.is_file()
-            and not args.update_components
+            and not package_update
         ):
             pin_resolved_awg_packages(all_vars_path, awg_package_lock)
             all_vars = load_yaml(all_vars_path)
@@ -3315,7 +3493,7 @@ def main() -> None:
         )
         verify_saved_inventory_access(hosts_document)
         refresh_saved_automation_sources(hosts_document, hosts_path)
-        if args.update_components:
+        if transactional:
             transitioning = [
                 variables
                 for group in ("entry", "exit", "front")
@@ -3338,15 +3516,22 @@ def main() -> None:
             mtu_result,
             awg_package_lock,
         )
-        if awg_package_lock.is_file() and not args.update_components:
+        if awg_package_lock.is_file() and not package_update:
             pin_resolved_awg_packages(all_vars_path, awg_package_lock)
         component_backup: dict[Path, bytes | None] = {}
-        if args.update_components:
+        if package_update:
             entry_vars_path = production / "group_vars" / "entry.yml"
             exit_vars_path = production / "group_vars" / "exit.yml"
             for path in (all_vars_path, entry_vars_path, exit_vars_path, awg_package_lock):
                 component_backup[path] = path.read_bytes() if path.is_file() else None
-            prepare_component_update(repo, production)
+            if args.update_components:
+                prepare_component_update(repo, production)
+            else:
+                prepare_amneziawg_update(production)
+        if xray_release is not None:
+            front_vars_path = production / "group_vars" / "front.yml"
+            component_backup[front_vars_path] = front_vars_path.read_bytes()
+            apply_xray_release(production, xray_release)
         final_variables = {
             "awg_enable_fail2ban": True,
             "awg_health_run_during_deploy": False,
@@ -3354,7 +3539,7 @@ def main() -> None:
             "awg_mtu_controller_result_path": str(mtu_result),
             "awg_package_controller_lock_path": str(awg_package_lock),
         }
-        if args.update_components:
+        if package_update:
             final_variables["awg_package_refresh"] = True
             final_variables["awg_package_transaction_id"] = secrets.token_hex(12)
         if transition_completed:
@@ -3432,17 +3617,18 @@ def main() -> None:
                     )
                 finish_front_replacement(production)
         except SystemExit as update_error:
-            if not args.update_components:
+            if not transactional:
                 raise
             print(
-                "Обновление компонентов не прошло проверку. "
-                "Выполняется автоматический откат ENTRY и EXIT..."
+                "Обновление не прошло проверку. Выполняется автоматический откат "
+                + ("ENTRY и EXIT..." if package_update else "Xray-core на FRONT...")
             )
             for path, content in component_backup.items():
                 restore_file(path, content)
             rollback_variables = dict(final_variables)
-            rollback_variables["awg_package_refresh"] = False
-            rollback_variables["awg_package_rollback"] = True
+            if package_update:
+                rollback_variables["awg_package_refresh"] = False
+                rollback_variables["awg_package_rollback"] = True
             try:
                 ansible(
                     repo,
@@ -3453,6 +3639,12 @@ def main() -> None:
                 )
                 ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
             except SystemExit:
+                if not package_update:
+                    fail(
+                        "Обновление Xray-core и автоматический откат завершились "
+                        "ошибкой. Прежняя версия возвращена в inventory; повторите "
+                        "'kalimera-deploy --resume'"
+                    )
                 fail(
                     "Обновление и автоматический откат завершились ошибкой. "
                     "Не перезагружайте серверы; используйте сохранённые пакеты в "
@@ -3473,6 +3665,16 @@ def main() -> None:
             print("Откат FRONT применён и проверен; маркер восстановления удалён.")
         if args.update_components:
             print("Компоненты каскада обновлены транзакционно и успешно проверены.")
+        elif args.update_amneziawg:
+            print(
+                "Пакеты AmneziaWG на ENTRY и EXIT обновлены и проверены; "
+                "клиентские конфиги не изменились."
+            )
+        elif xray_release is not None:
+            print(
+                f"Xray-core {xray_release['front_xray_version']} установлен на FRONT "
+                "и проверен через CDN; клиентские профили не изменились."
+            )
         elif args.replace_front:
             print(
                 "Новый FRONT применён. Для каждого direct-пользователя повторно "

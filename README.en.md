@@ -56,7 +56,7 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
   profile structure generated anew for every installation.
 - **CDN fallback.** FRONT accepts VLESS/XHTTP directly or through a CDN and
   forwards traffic to ENTRY over an internal REALITY hop, so CDN clients never
-  see the ENTRY address. Verified with Yandex Cloud CDN.
+  see the ENTRY address. Verified with Yandex Cloud CDN and VK Cloud CDN.
 - **Country-aware routing.** Russian networks and domains go directly from
   ENTRY or through your SOCKS5 proxy (for example, SOAX); everything else goes
   through EXIT. If the proxy fails, traffic falls back to the direct route.
@@ -75,8 +75,10 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
 - **Locked-down SSH.** A dedicated `kalimera` admin, key-only login, root
   disabled, a non-standard port and Fail2Ban.
 - **Self-monitoring.** `awg-health` and `server-audit` check services,
-  firewall, DNS and routes. Telegram reports reboots and failures. Component
-  updates are transactional with automatic rollback.
+  firewall, DNS and routes. Telegram reports reboots and failures.
+- **Updates under control.** Every server checks daily for a new kernel,
+  AmneziaWG and Xray-core and shows `UPD` with the command that applies it.
+  An update is one command, verified and rolled back on failure.
 
 ### What KalimeraWG does not do
 
@@ -85,8 +87,8 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
   any time, and FRONT is an emergency path, not a universal solution.
 - It does not install a web panel or open extra ports. Management is SSH only.
 - It does not keep browsing logs or put client configs into Git or CI.
-- It does not update itself. A server stays on the chosen release until you
-  update it.
+- It does not update itself. It reports new versions but installs them only
+  on your command.
 
 ## How it works
 
@@ -179,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.5/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.6/install.sh | bash
 ```
 
-The command installs the pinned `v3.0.5` release rather than the moving `main`
+The command installs the pinned `v3.0.6` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -194,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.5 --depth 1 \
+git clone --branch v3.0.6 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -250,6 +252,7 @@ table at login. Full reference: `kalimera-help`.
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
 ```bash
@@ -294,12 +297,35 @@ Threat model and vulnerability reporting: [SECURITY.md](SECURITY.md),
 | KeeneticOS | `balanced` and `old` profiles |
 | Russian SOCKS5 | TCP/UDP, watchdog, automatic fallback to the direct route and recovery |
 | Yandex Cloud CDN | header-based uplink on Xray v26.7.28, live probes through the CDN |
+| VK Cloud CDN | clean install and working VLESS connections through the CDN |
+| Xray-core v26.10.31 | client + server pair on real binaries: clients 26.7.28 and 26.10.31 work without reissuing profiles |
 | Allowlist mode | a new session through Russian cloud CDN → FRONT → ENTRY |
 
 The matrix records scenarios that actually passed and does not guarantee
 identical behaviour across carriers, hosting providers and client versions.
 
 ## Updating
+
+### Components
+
+Every server checks daily whether a new kernel, AmneziaWG or Xray-core is
+out. This is a notice, not an error: `server-audit` and the login screen show
+a line like
+
+```
+UPD  доступен Xray 26.11.9, работает 26.10.31
+     → на ENTRY: kalimera-deploy --resume --update-xray (с проверкой через CDN и откатом)
+```
+
+The full list on a server: `kalimera-updates`.
+
+| What | Command | What happens |
+|---|---|---|
+| kernel | `kalimera-updates install kernel`, then `sudo reboot` | installs the new kernel and builds the AmneziaWG module for it; reboot servers of one cascade one at a time |
+| AmneziaWG | on ENTRY: `kalimera-deploy --resume --update-amneziawg` | updates packages on ENTRY and EXIT, verifies the cascade, rolls back on failure; client configs stay the same |
+| Xray-core | on ENTRY: `kalimera-deploy --resume --update-xray` | installs the latest stable release on FRONT with SHA-256 from GitHub, checks the uplink through the CDN, rolls back on failure |
+
+### KalimeraWG release
 
 Re-apply the current release:
 
@@ -311,7 +337,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.5
+sudo git -C /root/KalimeraWG switch --detach v3.0.6
 kalimera-deploy --resume
 ```
 
@@ -338,6 +364,8 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.0.6:** Xray-core v26.10.31 on FRONT; a daily check for new kernel,
+  AmneziaWG and Xray versions with an `UPD` notice, plus commands to install them.
 - **v3.0.5:** `server-audit` no longer mistakes short-lived outgoing sockets
   for unexpected listeners and prints the port of a real one.
 - **v3.0.4:** installation no longer stops in the first stage with

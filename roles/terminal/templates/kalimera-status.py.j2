@@ -331,7 +331,12 @@ def panel(
         + paint("─" * (value_width + 2) + "┤", BLUE)
     )
     for label, value, level in rows:
-        prefix = "✓ " if level == "OK" else ("! " if level in {"WARN", "FAIL"} else "")
+        prefix = (
+            "✓ " if level == "OK"
+            else "! " if level in {"WARN", "FAIL"}
+            else "↑ " if level == "UPD"
+            else ""
+        )
         label_lines = wrap_cell(label, label_width)
         value_lines = wrap_cell(prefix + value, value_width)
         line_count = max(len(label_lines), len(value_lines))
@@ -340,7 +345,12 @@ def panel(
             value_part = value_lines[index] if index < len(value_lines) else ""
             label_text = f"{label_part:<{label_width}}"
             value_text = f"{value_part:<{value_width}}"
-            value_colour = GREEN if level == "OK" else (YELLOW if level in {"WARN", "FAIL"} else WHITE)
+            value_colour = (
+                GREEN if level == "OK"
+                else YELLOW if level in {"WARN", "FAIL"}
+                else CYAN if level == "UPD"
+                else WHITE
+            )
             print(
                 paint("│ ", BLUE)
                 + paint(label_text, CYAN)
@@ -355,6 +365,33 @@ def panel(
     )
 
 
+UPDATES_STATE = Path("/run/kalimera-updates/state")
+UPDATE_LABELS = {"kernel": "Ядро", "amneziawg": "AmneziaWG", "xray": "Xray-core"}
+
+
+def updates_panel() -> None:
+    """Показать доступные обновления, если последняя проверка их нашла.
+
+    Это уведомление, а не предупреждение: панель появляется только при
+    наличии строк UPD и подсказывает команду, которая применит обновление.
+    """
+    try:
+        lines = UPDATES_STATE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    rows: list[tuple[str, str, str]] = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) < 3 or fields[0] != "UPD":
+            continue
+        label = UPDATE_LABELS.get(fields[1], fields[1])
+        rows.append((label, fields[2], "UPD"))
+        if len(fields) > 3 and fields[3]:
+            rows.append(("", "→ " + fields[3], "INFO"))
+    if rows:
+        panel("ДОСТУПНЫ ОБНОВЛЕНИЯ · kalimera-updates", rows)
+
+
 def command_panels() -> None:
     panel(
         "СОСТОЯНИЕ И ОБСЛУЖИВАНИЕ",
@@ -365,9 +402,21 @@ def command_panels() -> None:
             ("server-audit", "AWG, диск, systemd, UFW и Fail2Ban", "INFO"),
             ("maintenance", "проверка обновлений и восстановление готовности DKMS", "INFO"),
             ("update-all", "обновления ОС и подготовка DKMS", "INFO"),
+            ("kalimera-updates", "доступные обновления ядра, AmneziaWG и Xray", "INFO"),
+            ("kalimera-updates install kernel", "новое ядро; перезагрузка вручную", "INFO"),
+            (
+                "kalimera-deploy --resume --update-amneziawg",
+                "пакеты AmneziaWG на ENTRY и EXIT, клиенты не меняются",
+                "INFO",
+            ),
+            (
+                "kalimera-deploy --resume --update-xray",
+                "последний стабильный Xray на FRONT с откатом",
+                "INFO",
+            ),
             (
                 "./deploy --resume --update-components",
-                "транзакционное обновление AWG с управляющей ENTRY",
+                "все компоненты и новые профили; клиентов выпустить заново",
                 "INFO",
             ),
         ],
@@ -511,6 +560,7 @@ def main() -> int:
                 ("Полная проверка", audit_text, audit_level),
             ],
         )
+        updates_panel()
         if with_commands:
             command_panels()
         return 0
@@ -635,6 +685,7 @@ def main() -> int:
             ("Полная проверка", audit_text, audit_level),
         ],
     )
+    updates_panel()
     if with_commands:
         command_panels()
     return 0
