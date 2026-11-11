@@ -181,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.6/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.7/install.sh | bash
 ```
 
-The command installs the pinned `v3.0.6` release rather than the moving `main`
+The command installs the pinned `v3.0.7` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.6 --depth 1 \
+git clone --branch v3.0.7 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -337,7 +337,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.6
+sudo git -C /root/KalimeraWG switch --detach v3.0.7
 kalimera-deploy --resume
 ```
 
@@ -364,6 +364,9 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.0.7:** a regular `kalimera-deploy --resume` no longer stops when
+  Launchpad with the AmneziaWG PPA is down; package updates do not start
+  without it and say why.
 - **v3.0.6:** Xray-core v26.10.31 on FRONT; a daily check for new kernel,
   AmneziaWG and Xray versions with an `UPD` notice, plus commands to install them.
 - **v3.0.5:** `server-audit` no longer mistakes short-lived outgoing sockets

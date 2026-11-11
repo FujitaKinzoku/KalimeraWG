@@ -19,3 +19,8 @@ awg_backup_root: /root/config-backups
 # таймер. false - не трогать таймер.
 common_disable_fwupd_refresh: true
 awg_enable_fail2ban: true
+# Источник APT, недоступность которого не останавливает deploy, если
+# закреплённые пакеты AmneziaWG уже установлены (см. tasks/apt-refresh.yml).
+common_apt_optional_source_pattern: ppa.launchpadcontent.net/amnezia/
+common_apt_get_path: /usr/bin/apt-get
+common_dpkg_query_path: /usr/bin/dpkg-query
