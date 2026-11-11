@@ -23,6 +23,21 @@
     group: root
     mode: "0755"
 
+# get_url с force: false всё равно делает условный запрос к keyserver.ubuntu.com,
+# поэтому при его недоступности deploy падал даже с уже установленным ключом.
+# Ключ скачивается, только если файла нет или в нём не тот отпечаток.
+- name: Проверка уже установленного ключа PPA AmneziaWG
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/gpg
+      - --batch
+      - --show-keys
+      - --with-colons
+      - "{{ amneziawg_ppa_keyring_path }}"
+  register: amneziawg_ppa_key_existing
+  changed_when: false
+  failed_when: false
+
 - name: Загрузка отдельного ключа PPA AmneziaWG
   ansible.builtin.get_url:
     url: "{{ amneziawg_ppa_key_url }}"
@@ -30,8 +45,19 @@
     owner: root
     group: root
     mode: "0644"
-    force: false
+    force: true
   register: amneziawg_ppa_key_download
+  when: >-
+    amneziawg_ppa_key_existing.rc != 0 or
+    ('fpr:::::::::' ~ amneziawg_ppa_fingerprint ~ ':') not in
+    amneziawg_ppa_key_existing.stdout
+
+- name: Права установленного ключа PPA AmneziaWG
+  ansible.builtin.file:
+    path: "{{ amneziawg_ppa_keyring_path }}"
+    owner: root
+    group: root
+    mode: "0644"
 
 - name: Проверка полного отпечатка ключа PPA AmneziaWG
   ansible.builtin.command:
