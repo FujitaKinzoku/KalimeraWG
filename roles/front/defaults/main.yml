@@ -50,14 +50,23 @@ front_vless_initial_user_name: initial
 # Обновление версии клиентов ПЕРИОДИЧЕСКОЕ и происходит вне контроля этого
 # проекта - см. "Актуальность версии Xray-core" в docs/front-relay.md за
 # тем, как и когда проверять, не отстала ли эта версия снова.
-front_xray_version: v26.7.28
+#
+# v26.7.28 -> v26.10.31: два срочных выпуска безопасности (из встроенного
+# списка удалены скомпрометированные корневые сертификаты; MPTCP по умолчанию
+# выключен из-за CVE-2026-98432) и та же версия, что в Happ после обновления.
+# Пара client+server на реальных бинарниках с конфигами этой роли проверена во
+# всех сочетаниях 26.7.28/26.10.31, с маскировкой и без: скачивание и отдача
+# через аплинк в заголовках проходят, клиентские профили перевыпускать не нужно.
+# Контрольные суммы совпали в трёх источниках: поле digest GitHub, файл .dgst
+# выпуска и SHA256 скачанного архива.
+front_xray_version: v26.10.31
 front_xray_packages:
   x86_64:
-    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-64.zip"
-    checksum: "sha256:8195d909f1109b8f3d99eefe401a3c451d7bf4af71f24d3815420f77e5dd2a40"
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip"
+    checksum: "sha256:e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214"
   aarch64:
-    url: "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-linux-arm64-v8a.zip"
-    checksum: "sha256:f5698bb218ada3b4022db26fafc39601c5f53b46b19eb76c9616325985807501"
+    url: "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-arm64-v8a.zip"
+    checksum: "sha256:1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d"
 
 # Origin-домен, на который указывает A-запись FRONT и CNAME CDN-ресурса
 # (настраивается вручную вне Ansible - см. docs/front-relay.md). Обязателен,

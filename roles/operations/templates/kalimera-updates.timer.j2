@@ -1,0 +1,12 @@
+[Unit]
+Description=Ежедневная проверка доступных обновлений KalimeraWG
+
+[Timer]
+OnCalendar={{ kalimera_updates_calendar }}
+OnBootSec=10min
+Persistent=true
+RandomizedDelaySec=30m
+Unit=kalimera-updates.service
+
+[Install]
+WantedBy=timers.target

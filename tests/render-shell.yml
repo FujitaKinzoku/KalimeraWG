@@ -231,6 +231,8 @@
               dest: f2b-reset
             - src: roles/operations/templates/ssh-key-audit.sh.j2
               dest: ssh-key-audit
+            - src: roles/operations/templates/kalimera-updates.sh.j2
+              dest: kalimera-updates-entry
             - src: roles/operations/templates/domain-admin.sh.j2
               dest: domain-admin
             - src: roles/operations/templates/ru-proxy.sh.j2
@@ -562,6 +564,12 @@
             dest: "{{ rendered_shell_root }}/kalimera-test-front"
             mode: "0700"
 
+        - name: Формирование проверки обновлений FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/operations/templates/kalimera-updates.sh.j2"
+            dest: "{{ rendered_shell_root }}/kalimera-updates-front"
+            mode: "0700"
+
         - name: Проверка выбранных ролей в сформированных программах
           ansible.builtin.shell: |
             set -Eeuo pipefail
@@ -592,6 +600,8 @@
               - "{{ rendered_shell_root }}/update-all"
               - "{{ rendered_shell_root }}/f2b-reset"
               - "{{ rendered_shell_root }}/ssh-key-audit"
+              - "{{ rendered_shell_root }}/kalimera-updates-entry"
+              - "{{ rendered_shell_root }}/kalimera-updates-front"
               - "{{ rendered_shell_root }}/domain-admin"
               - "{{ rendered_shell_root }}/ru-proxy"
               - "{{ rendered_shell_root }}/ru-proxy-set"

@@ -29,9 +29,9 @@ else
     [[ -e /var/run/reboot-required ]] && echo да || echo нет
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
     printf '%s\n' \
-      'Критические компоненты показаны в списке, но применяются только отдельной транзакцией:' \
-      '  ./deploy --resume --update-components'
+      'Критические компоненты показаны в списке, но применяются только отдельной транзакцией.' \
+      'Что доступно и как применить: kalimera-updates'
 {% else %}
-    printf '%s\n' 'Компоненты FRONT применяются повторным deploy с управляющей машины.'
+    printf '%s\n' 'Что доступно и как применить: kalimera-updates'
 {% endif %}
 fi

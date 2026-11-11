@@ -14,6 +14,13 @@ awg_telegram_monitor_start_immediately: true
 awg_telegram_monitor_deferred_flag: /run/awg-telegram-monitor.deferred
 awg_maintenance_path: /usr/local/sbin/maintenance
 awg_maintenance_calendar: "*-*-* 05:20:00"
+# Проверка обновлений ядра, AmneziaWG и Xray: только сообщает (UPD), ничего
+# не устанавливает. Запускается после ночного обслуживания, которое обновляет
+# списки APT; версию Xray FRONT сверяет с последним стабильным выпуском.
+kalimera_updates_path: /usr/local/sbin/kalimera-updates
+kalimera_updates_state_dir: /run/kalimera-updates
+kalimera_updates_calendar: "*-*-* 06:10:00"
+kalimera_updates_xray_releases_api: https://api.github.com/repos/XTLS/Xray-core/releases/latest
 awg_domain_policy_dir: /etc/awg/domain-policy
 awg_client_output_dir: /root/awg-client-configs
 entry_ru_proxy_capability_path: /usr/local/sbin/ru-proxy-capability

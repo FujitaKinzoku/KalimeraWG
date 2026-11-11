@@ -67,6 +67,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function ssh-key-audit { _kalimera_admin ssh-key-audit "$@"; }
     function telegram-test { _kalimera_admin telegram-test "$@"; }
     function kalimera-secretctl { _kalimera_admin kalimera-secretctl "$@"; }
+    function kalimera-updates { _kalimera_admin kalimera-updates "$@"; }
     function kalimera-deploy { _kalimera_admin kalimera-deploy "$@"; }
 fi
 

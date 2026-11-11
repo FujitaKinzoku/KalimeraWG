@@ -29,6 +29,21 @@ upstream-исходников должно закреплять точный com
 - SHA-256: `e243c2856d62df33dd2ee588dc3327899a4e4605300c10fa252fdaefeca6c144`;
 - источник: https://github.com/SagerNet/sing-box/releases/tag/v1.13.19.
 
+## Xray-core на FRONT
+
+Роль FRONT устанавливает официальный архив выпуска XTLS:
+
+- релиз: `v26.10.31`;
+- файлы: `Xray-linux-64.zip` (SHA-256
+  `e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214`) и
+  `Xray-linux-arm64-v8a.zip` (SHA-256
+  `1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d`);
+- источник: https://github.com/XTLS/Xray-core/releases/tag/v26.10.31.
+
+Более новый стабильный выпуск ставится командой
+`kalimera-deploy --resume --update-xray`, см. раздел «Актуальность версии
+Xray-core» в [front-relay.md](front-relay.md).
+
 ## Межсерверная версия AmneziaWG 3+
 
 По умолчанию и межсерверный канал, и mobile/AWG3+ поднимает kernel-модуль

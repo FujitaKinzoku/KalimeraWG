@@ -31,6 +31,9 @@ managed_files() {
 /usr/local/sbin/maintenance
 /usr/local/sbin/update-all
 /usr/local/sbin/ssh-key-audit
+{{ kalimera_updates_path | default('/usr/local/sbin/kalimera-updates') }}
+/etc/systemd/system/kalimera-updates.service
+/etc/systemd/system/kalimera-updates.timer
 /etc/systemd/system/awg-server-audit.service
 /etc/systemd/system/awg-server-audit.timer
 {% if runtime_secrets_enabled | default(false) | bool %}
