@@ -120,10 +120,10 @@ class PpaKeyOfflineTests(unittest.TestCase):
         self.write_key("ppa@example.invalid", keyring)
         result = self.run_tasks(keyring)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertRegex(
-            result.stdout,
-            r"TASK \[Загрузка отдельного ключа PPA AmneziaWG\][^\n]*\n[*]*\s*skipping",
-        )
+        # ansible.cfg проекта скрывает пропущенные задачи, поэтому пропуск
+        # загрузки виден по итогам PLAY RECAP и отсутствию обращения к адресу.
+        self.assertRegex(result.stdout, r"localhost\s*:.*\bskipped=1\b")
+        self.assertNotIn("127.0.0.1:9", result.stdout + result.stderr)
 
     def test_missing_key_is_downloaded(self) -> None:
         keyring = self.root / "amnezia-ppa.asc"
