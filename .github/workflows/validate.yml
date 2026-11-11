@@ -25,8 +25,28 @@ jobs:
 
       - name: Установка инструментов проверки
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes openssh-server shellcheck ssss unbound nginx unzip
+          # Зеркало Ubuntu для Azure иногда перестаёт разрешаться в DNS, и тогда
+          # CI падает до тестов. В этом случае пакеты берутся с основного
+          # archive.ubuntu.com, а установка повторяется до трёх раз.
+          if ! getent hosts azure.archive.ubuntu.com >/dev/null; then
+            echo 'azure.archive.ubuntu.com не разрешается; используется archive.ubuntu.com'
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+              grep -q 'archive\.ubuntu\.com' /etc/apt/apt-mirrors.txt ||
+                echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            sudo find /etc/apt -name '*.sources' -o -name '*.list' |
+              xargs -r sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g'
+          fi
+          for attempt in 1 2 3; do
+            if sudo apt-get update &&
+              sudo apt-get install --yes openssh-server shellcheck ssss unbound nginx unzip; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] || exit 1
+            echo "Установка инструментов не удалась, повтор через 30 секунд ($attempt/3)"
+            sleep 30
+          done
           pip install --require-hashes -r requirements.lock
 
       - name: Установка коллекций Ansible
