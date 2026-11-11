@@ -884,6 +884,9 @@ class InteractiveDeployTests(unittest.TestCase):
             with (
                 mock.patch.object(Path, "home", return_value=home),
                 mock.patch.object(MODULE, "migrate_production_inventory"),
+                # Доступность PPA проверяется отдельно в test_apt_ppa_unreachable;
+                # здесь тест не должен зависеть от сети и Launchpad.
+                mock.patch.object(MODULE, "require_amneziawg_ppa"),
                 mock.patch.object(MODULE, "ensure_runtime_secret_material"),
                 mock.patch.object(MODULE, "ensure_admin_account_material"),
                 mock.patch.object(MODULE, "verify_saved_inventory_access"),
