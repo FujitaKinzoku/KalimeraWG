@@ -403,7 +403,7 @@
 # или GitHub проверку не проваливает: она пишет INFO и завершается успешно.
 - name: Первичная проверка доступных обновлений
   ansible.builtin.command:
-    argv: ["{{ kalimera_updates_path }}", check]
+    argv: ["{{ kalimera_updates_path }}"]
   changed_when: false
   failed_when: false
 

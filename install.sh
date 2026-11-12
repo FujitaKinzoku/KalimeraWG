@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 readonly REPOSITORY_URL="https://github.com/FujitaKinzoku/KalimeraWG.git"
-readonly REPOSITORY_REF="${KALIMERA_VERSION:-v3.0.8}"
+readonly REPOSITORY_REF="${KALIMERA_VERSION:-v3.0.9}"
 readonly INSTALL_DIR="${KALIMERA_DIR:-/root/KalimeraWG}"
 
 fail() {

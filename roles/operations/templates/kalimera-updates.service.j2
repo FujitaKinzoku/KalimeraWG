@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart={{ kalimera_updates_path }} check
+ExecStart={{ kalimera_updates_path }}
 StandardOutput=null
 Nice=10
 IOSchedulingClass=idle
