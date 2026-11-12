@@ -24,6 +24,11 @@
       - ('direct' not in front_access_modes) or front_direct_domain == front_origin_domain
       - front_replacement_state in ['active', 'prepared']
       - front_replacement_state != 'prepared' or front_previous_public_ipv4 | length > 0
+      - front_xhttp_disguise_session_cookie is match('^[A-Za-z][A-Za-z0-9_.-]{0,39}$')
+      - front_xhttp_disguise_padding_key is match('^[A-Za-z_][A-Za-z0-9_.-]{0,39}$')
+      - front_xhttp_disguise_session_table in ['hex', 'HEX', 'base36', 'BASE36', 'Base62']
+      - front_xhttp_disguise_session_length | int >= 16
+      - front_xhttp_disguise_session_length | int <= 64
     fail_msg: >-
       Нужны настоящий origin-домен (A-запись уже указывает на этот сервер),
       e-mail для Certbot, закреплённый пакет Xray-core и ровно один хост в

@@ -217,9 +217,15 @@ front_vless_encryption_path: "{{ front_xray_state_dir }}/vless-encryption"
 
 # Маскировка XHTTP под конкретное веб-приложение, а не просто "случайный
 # HTTP-путь": id сессии в cookie, номер пакета в query, паддинг под токен в
-# cookie; нагрузка аплинка - в заголовках (front_xhttp_uplink_*). Легенда
-# (PHPESSID/mc_token) взята из реально работающего конфига стороннего
-# VPN-провайдера. Выдаётся полный JSON, поэтому вложенный объект extra
+# cookie; нагрузка аплинка - в заголовках (front_xhttp_uplink_*). Значения
+# ниже (PHPESSID/mc_token) - прежняя легенда из конфига стороннего
+# VPN-провайдера: её же используют и другие, а PHPESSID - опечатка
+# настоящего PHPSESSID. Они остаются только для FRONT, установленных до
+# v3.1.0, чтобы их клиентские профили продолжали работать. Новая установка
+# записывает в group_vars/front.yml собственный набор, выбранный случайно
+# из правдоподобных легенд (scripts/lib/interactive_deploy.py,
+# new_front_disguise); kalimera-deploy --resume --rotate-front-disguise
+# заменяет его на существующем FRONT. Выдаётся полный JSON, поэтому вложенный объект extra
 # сохраняется без потери параметров. При наличии extra Xray-core берёт из
 # xhttpSettings снаружи только host, path и mode
 # (infra/conf/transport_method.go, SplitHTTPConfig.Build), поэтому все
@@ -233,6 +239,8 @@ front_vless_encryption_path: "{{ front_xray_state_dir }}/vless-encryption"
 # состоял лишь из символов B, a, s, e, 3 и 6 - явный отпечаток.
 front_xhttp_disguise_enabled: true
 front_xhttp_disguise_session_cookie: PHPESSID
+front_xhttp_disguise_session_table: hex
+front_xhttp_disguise_session_length: 32
 front_xhttp_disguise_padding_key: mc_token
 
 # Домен, на который в итоге смотрит клиент - сегодня совпадает с

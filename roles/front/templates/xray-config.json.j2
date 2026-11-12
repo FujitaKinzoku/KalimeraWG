@@ -35,8 +35,8 @@
           ,"extra": {
             "sessionIDKey": "{{ front_xhttp_disguise_session_cookie }}",
             "sessionIDPlacement": "cookie",
-            "sessionIDLength": "32",
-            "sessionIDTable": "hex",
+            "sessionIDLength": "{{ front_xhttp_disguise_session_length | int }}",
+            "sessionIDTable": "{{ front_xhttp_disguise_session_table }}",
             "uplinkDataKey": "{{ front_xhttp_uplink_data_key }}",
             "uplinkDataPlacement": "auto",
             "serverMaxHeaderBytes": {{ front_xhttp_server_max_header_bytes | int }},

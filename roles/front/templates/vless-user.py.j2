@@ -178,8 +178,8 @@ def uplink_sends_get_body(xhttp: dict) -> bool:
     return method == "GET" and placement in ("body", "auto")
 
 
-def client_config(record: dict, settings: dict) -> dict:
-    mode = record["mode"]
+def proxy_outbound(record: dict, settings: dict, mode: str, tag: str) -> dict:
+    """VLESS-outbound этого FRONT для режима mode (direct или cdn)."""
     domains = settings.get("domains", {})
     domain = domains.get(mode) if isinstance(domains, dict) else None
     if not isinstance(domain, str) or not domain:
@@ -197,11 +197,44 @@ def client_config(record: dict, settings: dict) -> dict:
             "(kalimera-deploy --resume) и повторите экспорт."
         )
     encryption = settings.get("encryption", "none")
+    xhttp_settings = copy.deepcopy(xhttp)
+    xhttp_settings["host"] = domain
+    return {
+        "tag": tag,
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": domain,
+                    "port": 443,
+                    "users": [
+                        {
+                            "id": record["id"],
+                            "encryption": encryption,
+                            "flow": "",
+                        }
+                    ],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": {
+                "alpn": ["h2", "http/1.1"],
+                "fingerprint": "firefox",
+                "serverName": domain,
+            },
+            "xhttpSettings": xhttp_settings,
+        },
+    }
+
+
+def base_profile(settings: dict) -> dict:
+    """Общая часть клиентского профиля: DNS, локальные inbound и журнал."""
     dns = settings.get("dns")
     if not isinstance(dns, dict):
         fail("Параметры DNS клиентского профиля отсутствуют")
-    xhttp_settings = copy.deepcopy(xhttp)
-    xhttp_settings["host"] = domain
     return {
         "dns": copy.deepcopy(dns),
         "inbounds": [
@@ -230,79 +263,233 @@ def client_config(record: dict, settings: dict) -> dict:
         # HAPP подставляет собственный локальный путь access.log после импорта.
         # Жёстко заданный iOS AppGroup здесь сделал бы JSON непереносимым.
         "log": {"dnsLog": True, "loglevel": "Warning"},
-        "outbounds": [
-            {
-                "tag": "proxy",
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [
-                        {
-                            "address": domain,
-                            "port": 443,
-                            "users": [
-                                {
-                                    "id": record["id"],
-                                    "encryption": encryption,
-                                    "flow": "",
-                                }
-                            ],
-                        }
-                    ]
-                },
-                "streamSettings": {
-                    "network": "xhttp",
-                    "security": "tls",
-                    "tlsSettings": {
-                        "alpn": ["h2", "http/1.1"],
-                        "fingerprint": "firefox",
-                        "serverName": domain,
-                    },
-                    "xhttpSettings": xhttp_settings,
-                },
-            },
-            {"protocol": "freedom", "tag": "direct"},
-            {"protocol": "blackhole", "tag": "block"},
-        ],
-        # V3: аплинк GET без тела, нагрузка в заголовках. Новое имя профиля
-        # позволяет в клиенте отличить перевыпущенный JSON от старого V2,
-        # который через CDN больше не работает.
-        "remarks": "Kalimera-FRONT-disguiseV3",
-        "routing": {
-            "domainStrategy": "AsIs",
-            "rules": [
-                {
-                    "network": "tcp,udp",
-                    "outboundTag": "proxy",
-                    "type": "field",
-                }
-            ],
-        },
         "stats": {},
     }
 
 
+def client_config(record: dict, settings: dict) -> dict:
+    profile = base_profile(settings)
+    profile["outbounds"] = [
+        proxy_outbound(record, settings, record["mode"], "proxy"),
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+    ]
+    # V3: аплинк GET без тела, нагрузка в заголовках. Новое имя профиля
+    # позволяет в клиенте отличить перевыпущенный JSON от старого V2,
+    # который через CDN больше не работает.
+    profile["remarks"] = "Kalimera-FRONT-disguiseV3"
+    profile["routing"] = {
+        "domainStrategy": "AsIs",
+        "rules": [
+            {
+                "network": "tcp,udp",
+                "outboundTag": "proxy",
+                "type": "field",
+            }
+        ],
+    }
+    return profile
+
+
+# Профиль с резервом: два независимых каскада. Основной - CDN этого FRONT
+# (прямой путь только у FRONT без CDN), резервный - экспорт другого
+# каскада. Поведение выбрано по исходникам Xray-core
+# (app/router/strategy_leastload.go, app/observatory/burst) и проверено
+# живым тестом переключения на настоящем Xray:
+#
+# * Резерв стоит внутри балансировщика с огромной ценой, а не в fallbackTag:
+#   пока наблюдатель ещё не получил ни одного результата (первые доли
+#   секунды после запуска), leastLoad не видит узлов и отдаёт fallbackTag.
+#   С резервом в fallbackTag каждый запуск начинался бы через резервный
+#   каскад с другим внешним IP. Поэтому fallbackTag - основной путь.
+# * leastLoad сортирует по разбросу RTT, умноженному на корень из цены.
+#   Цена резерва 1e8 (множитель 10 000): резерв выбирается, только когда
+#   основной путь исключён, - разброс живого пути меньше таймаута 5 с.
+# * Узел исключается, когда провалились 3 из 4 последних проверок
+#   (интервал 10 с - минимум Xray; проверки идут в случайные моменты
+#   раунда; на живом Xray резерв включался через 20-24 с настоящего
+#   отказа, основной возвращался через 8-24 с), и возвращается, когда
+#   провалов снова не больше двух. Обрыв на 1-2 проверки
+#   переключения не вызывает, поэтому соединения не скачут между
+#   каскадами с разными внешними IP. maxRTT не задан: на медленной
+#   мобильной сети он увёл бы трафик в резерв с другим IP без настоящего
+#   отказа; путь, который не отвечает за 5 с, и так считается провалом.
+# * connectivity: если проверка через каскад не прошла, Xray проверяет сеть
+#   напрямую и не засчитывает провал, когда сети нет совсем. Иначе после
+#   метро или лифта основной путь был бы исключён ещё около минуты и новые
+#   соединения ушли бы в резерв. Запрос к ya.ru направлен в direct правилом
+#   маршрутизации: на Android сокет проверки иначе вернулся бы в туннель.
+AUTO_BALANCER_TAG = "kalimera-auto"
+AUTO_MAIN_TAG = "kalimera-main"
+AUTO_RESERVE_TAG = "kalimera-reserve"
+AUTO_PROBE_URL = "https://www.gstatic.com/generate_204"
+AUTO_CONNECTIVITY_URL = "https://ya.ru/"
+AUTO_CONNECTIVITY_DOMAIN = "full:ya.ru"
+AUTO_MAX_RESERVE_BYTES = 262144
+
+
+def load_reserve_outbound(source: str, settings: dict) -> dict:
+    """Основной outbound из JSON, выданного 'vless-user export' другого каскада."""
+    try:
+        if source == "-":
+            raw = sys.stdin.buffer.read(AUTO_MAX_RESERVE_BYTES + 1)
+        else:
+            with open(source, "rb") as handle:
+                raw = handle.read(AUTO_MAX_RESERVE_BYTES + 1)
+    except OSError as error:
+        fail(f"Не удалось прочитать профиль резерва: {type(error).__name__}", 2)
+    if len(raw) > AUTO_MAX_RESERVE_BYTES:
+        fail("Профиль резерва слишком большой для клиентского JSON", 2)
+    try:
+        profile = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        fail(
+            "Профиль резерва - не JSON. Выполните 'vless-user export ИМЯ' на FRONT "
+            "резервного каскада и передайте полученный JSON целиком.",
+            2,
+        )
+    outbounds = profile.get("outbounds") if isinstance(profile, dict) else None
+    reserve = None
+    if isinstance(outbounds, list):
+        reserve = next(
+            (
+                item
+                for item in outbounds
+                if isinstance(item, dict) and item.get("tag") == "proxy"
+            ),
+            None,
+        )
+    if reserve is None:
+        fail(
+            "В профиле резерва нет outbound 'proxy'. Нужен обычный JSON от "
+            "'vless-user export ИМЯ' резервного каскада, а не профиль с резервом.",
+            2,
+        )
+    try:
+        vnext = reserve["settings"]["vnext"][0]
+        address = vnext["address"]
+        uuid.UUID(str(vnext["users"][0]["id"]))
+        stream = reserve["streamSettings"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        fail("Профиль резерва повреждён: нет адреса, UUID или streamSettings", 2)
+    if reserve.get("protocol") != "vless" or not isinstance(address, str) or not isinstance(stream, dict):
+        fail("Профиль резерва должен быть VLESS-профилем KalimeraWG", 2)
+    domains = settings.get("domains", {})
+    own = set(domains.values()) if isinstance(domains, dict) else set()
+    if address in own:
+        fail(
+            "Профиль резерва выдан этим же FRONT. Резерв должен быть другим "
+            "каскадом: выполните 'vless-user export ИМЯ' на его FRONT.",
+            2,
+        )
+    xhttp = stream.get("xhttpSettings")
+    if isinstance(xhttp, dict) and uplink_sends_get_body(xhttp):
+        fail(
+            "Профиль резерва устарел: аплинк идёт телом GET-запроса, через CDN "
+            "такой профиль не работает. Обновите резервный каскад "
+            "(kalimera-deploy --resume) и выпустите профиль заново.",
+            2,
+        )
+    reserve = copy.deepcopy(reserve)
+    reserve["tag"] = AUTO_RESERVE_TAG
+    return reserve
+
+
+def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
+    # Основной путь - CDN этого каскада; прямой путь только у FRONT без CDN.
+    mode = "cdn" if "cdn" in settings["access_modes"] else "direct"
+    profile = base_profile(settings)
+    profile["outbounds"] = [
+        proxy_outbound(record, settings, mode, AUTO_MAIN_TAG),
+        reserve,
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"},
+    ]
+    profile["burstObservatory"] = {
+        "subjectSelector": [AUTO_MAIN_TAG, AUTO_RESERVE_TAG],
+        "pingConfig": {
+            "destination": AUTO_PROBE_URL,
+            "connectivity": AUTO_CONNECTIVITY_URL,
+            "interval": "10s",
+            "sampling": 4,
+            "timeout": "5s",
+        },
+    }
+    profile["remarks"] = f"Kalimera-AUTO {record['name']}"
+    profile["routing"] = {
+        "domainStrategy": "AsIs",
+        "balancers": [
+            {
+                "tag": AUTO_BALANCER_TAG,
+                "selector": [AUTO_MAIN_TAG, AUTO_RESERVE_TAG],
+                "fallbackTag": AUTO_MAIN_TAG,
+                "strategy": {
+                    "type": "leastLoad",
+                    "settings": {
+                        "expected": 1,
+                        "tolerance": 0.5,
+                        "costs": [
+                            {"regexp": False, "match": AUTO_RESERVE_TAG, "value": 100000000},
+                        ],
+                    },
+                },
+            }
+        ],
+        "rules": [
+            {
+                "domain": [AUTO_CONNECTIVITY_DOMAIN],
+                "outboundTag": "direct",
+                "type": "field",
+            },
+            {
+                "network": "tcp,udp",
+                "balancerTag": AUTO_BALANCER_TAG,
+                "type": "field",
+            },
+        ],
+    }
+    return profile
+
+
+def json_payload(profile: dict) -> bytes:
+    return (json.dumps(profile, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
 def export_payload(record: dict, settings: dict) -> bytes:
-    return (
-        json.dumps(client_config(record, settings), ensure_ascii=False, indent=2) + "\n"
-    ).encode("utf-8")
+    return json_payload(client_config(record, settings))
 
 
-def save_export(record: dict, settings: dict) -> Path:
+def write_export(filename: str, payload: bytes) -> Path:
     account = pwd.getpwnam(ADMIN_USER)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(EXPORT_DIR, 0o700)
     os.chown(EXPORT_DIR, account.pw_uid, account.pw_gid)
-    path = EXPORT_DIR / f"{record['name']}.json"
-    atomic_write(path, export_payload(record, settings), 0o600, (account.pw_uid, account.pw_gid))
+    path = EXPORT_DIR / filename
+    atomic_write(path, payload, 0o600, (account.pw_uid, account.pw_gid))
     return path
+
+
+def save_export(record: dict, settings: dict) -> Path:
+    return write_export(f"{record['name']}.json", export_payload(record, settings))
+
+
+def emit_export(path: Path, payload: bytes) -> None:
+    sys.stdout.buffer.write(payload)
+    sys.stdout.flush()
+    print(f"Файл JSON сохранён: {path}", file=sys.stderr)
+    print(f"Открыть конфигурацию: nano {path}", file=sys.stderr)
 
 
 def print_export(record: dict, settings: dict) -> Path:
     path = save_export(record, settings)
-    sys.stdout.buffer.write(export_payload(record, settings))
-    sys.stdout.flush()
-    print(f"Файл JSON сохранён: {path}", file=sys.stderr)
-    print(f"Открыть конфигурацию: nano {path}", file=sys.stderr)
+    emit_export(path, export_payload(record, settings))
+    return path
+
+
+def print_auto_export(record: dict, settings: dict, reserve: dict) -> Path:
+    payload = json_payload(auto_config(record, settings, reserve))
+    path = write_export(f"{record['name']}-auto.json", payload)
+    emit_export(path, payload)
     return path
 
 
@@ -316,6 +503,15 @@ def main() -> int:
     create.add_argument("mode", nargs="?", choices=("direct", "cdn"))
     export = subparsers.add_parser("export")
     export.add_argument("name")
+    auto = subparsers.add_parser(
+        "auto",
+        help="профиль с резервным каскадом и автоматическим переключением",
+    )
+    auto.add_argument("name")
+    auto.add_argument(
+        "reserve",
+        help="JSON от 'vless-user export ИМЯ' резервного каскада; - читать из stdin",
+    )
     delete = subparsers.add_parser("delete")
     delete.add_argument("name")
     delete.add_argument("--yes", action="store_true")
@@ -345,6 +541,19 @@ def main() -> int:
             if record is None:
                 fail(f"Пользователь {args.name} не найден", 2)
             print_export(record, settings)
+            return 0
+        if args.command == "auto":
+            record = next((item for item in users if item["name"] == args.name), None)
+            if record is None:
+                fail(f"Пользователь {args.name} не найден", 2)
+            reserve = load_reserve_outbound(args.reserve, settings)
+            print_auto_export(record, settings, reserve)
+            print(
+                "Профиль с резервом: основной каскад - этот FRONT, резервный "
+                "включается только при недоступности основного. Для CDN-профиля "
+                "резерв должен быть CDN-экспортом второго каскада.",
+                file=sys.stderr,
+            )
             return 0
         if args.command == "sync":
             changed = sync_config(users)
@@ -393,6 +602,7 @@ def main() -> int:
             restart_xray()
             persist_protected_state()
             (EXPORT_DIR / f"{args.name}.json").unlink(missing_ok=True)
+            (EXPORT_DIR / f"{args.name}-auto.json").unlink(missing_ok=True)
             print(f"Пользователь {args.name} удалён")
             return 0
         except BaseException:
