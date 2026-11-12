@@ -326,6 +326,10 @@ AUTO_PROBE_URL = "https://www.gstatic.com/generate_204"
 AUTO_CONNECTIVITY_URL = "https://ya.ru/"
 AUTO_CONNECTIVITY_DOMAIN = "full:ya.ru"
 AUTO_MAX_RESERVE_BYTES = 262144
+AUTO_HOSTNAME = re.compile(
+    r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+)
 
 
 def load_reserve_outbound(source: str, settings: dict) -> dict:
@@ -374,6 +378,21 @@ def load_reserve_outbound(source: str, settings: dict) -> dict:
         fail("Профиль резерва повреждён: нет адреса, UUID или streamSettings", 2)
     if reserve.get("protocol") != "vless" or not isinstance(address, str) or not isinstance(stream, dict):
         fail("Профиль резерва должен быть VLESS-профилем KalimeraWG", 2)
+    # Мессенджеры и заметки при копировании превращают www.example.com в
+    # [www.example.com](https://www.example.com). Xray такой профиль
+    # принимает, но резерв никогда не отвечает, и переключение молча не
+    # происходит. Поэтому имена проверяются до сборки профиля.
+    tls = stream.get("tlsSettings") if isinstance(stream.get("tlsSettings"), dict) else {}
+    xhttp_names = stream.get("xhttpSettings") if isinstance(stream.get("xhttpSettings"), dict) else {}
+    names = [address, tls.get("serverName", address), xhttp_names.get("host", address)]
+    if not all(isinstance(name, str) and AUTO_HOSTNAME.fullmatch(name) for name in names):
+        fail(
+            "Профиль резерва испорчен при копировании: адрес сервера не является "
+            "доменным именем (например, превращён в ссылку [домен](https://домен)). "
+            "Передайте JSON на этот FRONT без мессенджеров и заметок, например "
+            "через scp, или вставьте его в nano прямо из терминала резервного FRONT.",
+            2,
+        )
     domains = settings.get("domains", {})
     own = set(domains.values()) if isinstance(domains, dict) else set()
     if address in own:

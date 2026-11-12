@@ -147,6 +147,22 @@ class AutoProfileTests(unittest.TestCase):
             level["uplinkDataPlacement"] = "body"
         self.assertIn("устарел", self.rejected(stale))
 
+    def test_reserve_mangled_into_markdown_link_is_rejected(self) -> None:
+        # Так выглядел реальный резерв после копирования через заметки:
+        # Xray профиль принимал, но резерв не отвечал и переключения не было.
+        link = "[edge2.example.invalid](https://edge2.example.invalid)"
+        for field in ("address", "serverName", "host"):
+            mangled = json.loads(json.dumps(self.reserve_export))
+            stream = mangled["outbounds"][0]["streamSettings"]
+            if field == "address":
+                mangled["outbounds"][0]["settings"]["vnext"][0]["address"] = link
+            elif field == "serverName":
+                stream["tlsSettings"]["serverName"] = link
+            else:
+                stream["xhttpSettings"]["host"] = link
+            with self.subTest(field=field):
+                self.assertIn("испорчен при копировании", self.rejected(mangled))
+
     def test_reserve_can_be_read_from_stdin(self) -> None:
         payload = json.dumps(self.reserve_export).encode("utf-8")
         fake_stdin = types.SimpleNamespace(buffer=io.BytesIO(payload))
