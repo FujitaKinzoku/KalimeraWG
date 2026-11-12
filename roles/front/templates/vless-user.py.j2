@@ -314,17 +314,20 @@ def client_config(record: dict, settings: dict) -> dict:
 #   каскадами с разными внешними IP. maxRTT не задан: на медленной
 #   мобильной сети он увёл бы трафик в резерв с другим IP без настоящего
 #   отказа; путь, который не отвечает за 5 с, и так считается провалом.
-# * connectivity: если проверка через каскад не прошла, Xray проверяет сеть
-#   напрямую и не засчитывает провал, когда сети нет совсем. Иначе после
-#   метро или лифта основной путь был бы исключён ещё около минуты и новые
-#   соединения ушли бы в резерв. Запрос к ya.ru направлен в direct правилом
-#   маршрутизации: на Android сокет проверки иначе вернулся бы в туннель.
+# * connectivity не задан. С ним Xray после неудачной проверки через каскад
+#   проверяет сеть обычным HTTP-клиентом и не записывает провал, если сеть
+#   «недоступна». На телефоне этот клиент разрешает имя через системный DNS,
+#   а DNS идёт в туннель - через тот самый упавший основной каскад. Проверка
+#   сети проваливается вместе с ним, провалы не записываются, и резерв
+#   включается только после устаревания старых результатов (80 с); на
+#   телефоне с настоящими каскадами переключения так и не дождались.
+#   Без connectivity при полном отсутствии сети
+#   проваливаются оба пути, живых нет, и балансировщик отдаёт fallbackTag -
+#   основной путь, так что метро и лифт в резерв не уводят.
 AUTO_BALANCER_TAG = "kalimera-auto"
 AUTO_MAIN_TAG = "kalimera-main"
 AUTO_RESERVE_TAG = "kalimera-reserve"
 AUTO_PROBE_URL = "https://www.gstatic.com/generate_204"
-AUTO_CONNECTIVITY_URL = "https://ya.ru/"
-AUTO_CONNECTIVITY_DOMAIN = "full:ya.ru"
 AUTO_MAX_RESERVE_BYTES = 262144
 AUTO_HOSTNAME = re.compile(
     r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -428,7 +431,6 @@ def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
         "subjectSelector": [AUTO_MAIN_TAG, AUTO_RESERVE_TAG],
         "pingConfig": {
             "destination": AUTO_PROBE_URL,
-            "connectivity": AUTO_CONNECTIVITY_URL,
             "interval": "10s",
             "sampling": 4,
             "timeout": "5s",
@@ -455,11 +457,6 @@ def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
             }
         ],
         "rules": [
-            {
-                "domain": [AUTO_CONNECTIVITY_DOMAIN],
-                "outboundTag": "direct",
-                "type": "field",
-            },
             {
                 "network": "tcp,udp",
                 "balancerTag": AUTO_BALANCER_TAG,

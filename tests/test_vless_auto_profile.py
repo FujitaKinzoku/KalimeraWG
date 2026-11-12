@@ -103,13 +103,11 @@ class AutoProfileTests(unittest.TestCase):
         self.assertEqual(observatory["subjectSelector"], ["kalimera-main", "kalimera-reserve"])
         ping = observatory["pingConfig"]
         self.assertEqual((ping["interval"], ping["sampling"], ping["timeout"]), ("10s", 4, "5s"))
-        # Проверка сети напрямую: при полном отсутствии сети провал не
-        # засчитывается, и после метро основной путь не исключён.
-        self.assertEqual(ping["connectivity"], "https://ya.ru/")
+        # Без проверки сети напрямую: на телефоне её DNS идёт через упавший
+        # основной каскад, провалы не записывались, и резерв не включался.
+        self.assertNotIn("connectivity", ping)
         rules = profile["routing"]["rules"]
-        self.assertEqual(rules[0], {"domain": ["full:ya.ru"], "outboundTag": "direct", "type": "field"})
-        self.assertEqual(rules[-1]["balancerTag"], "kalimera-auto")
-        self.assertEqual(rules[-1]["network"], "tcp,udp")
+        self.assertEqual(rules, [{"network": "tcp,udp", "balancerTag": "kalimera-auto", "type": "field"}])
 
     def test_front_without_cdn_uses_direct_path(self) -> None:
         direct_only = uplink.client_settings(front_access_modes=["direct"])
