@@ -46,7 +46,9 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn("seal_runtime()", manager)
         self.assertIn("seal_integrity()", manager)
         self.assertIn("restart_xray()", manager)
-        self.assertIn("EXPORT_DIR / f\"{record['name']}.json\"", manager)
+        self.assertIn("path = EXPORT_DIR / filename", manager)
+        self.assertIn("write_export(f\"{record['name']}.json\"", manager)
+        self.assertIn("write_export(f\"{record['name']}-auto.json\"", manager)
         self.assertIn('print(f"Открыть конфигурацию: nano {path}"', manager)
         self.assertIn("0o600", manager)
         self.assertIn('"protocol": "socks"', manager)
@@ -55,7 +57,7 @@ class FrontReleasePackagesTest(unittest.TestCase):
         self.assertIn('"fingerprint": "firefox"', manager)
         self.assertIn('"protocol": "blackhole"', manager)
         self.assertIn('"domainStrategy": "AsIs"', manager)
-        self.assertIn('"remarks": "Kalimera-FRONT-disguiseV3"', manager)
+        self.assertIn('profile["remarks"] = "Kalimera-FRONT-disguiseV3"', manager)
 
     def test_client_export_has_isolated_update_playbook(self) -> None:
         playbook = (
