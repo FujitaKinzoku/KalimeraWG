@@ -223,8 +223,23 @@ unexpected_public_listeners() {
 {% else %}
     local known_udp='{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) | int }}'
 {% endif %}
+    local process
+{% if awg_node_role == 'entry' %}
+    # sing-box на ENTRY сам отправляет UDP клиентов (QUIC, DNS, игры) напрямую
+    # и держит для каждого потока сокет 0.0.0.0:<временный порт> минутами.
+    # ss показывает такой сокет как UNCONN, будто это слушатель. Это не он:
+    # входящие на эти порты закрыты UFW. Пропускаются только UDP-сокеты
+    # управляемых служб sing-box (по MainPID) в диапазоне временных портов
+    # ядра; постоянный порт или чужой процесс по-прежнему дают предупреждение.
+    local unit pid outbound_pids='' port_low=32768 port_high=60999
+    for unit in {{ sing_box_service_name | default('sing-box.service') | quote }} {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}; do
+        pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
+        [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || outbound_pids="$outbound_pids $pid"
+    done
+    read -r port_low port_high </proc/sys/net/ipv4/ip_local_port_range || true
+{% endif %}
 
-    while read -r proto _ _ _ endpoint _; do
+    while read -r proto _ _ _ endpoint _ process; do
         [[ -n "$endpoint" ]] || continue
         port="${endpoint##*:}"
         address="${endpoint%:*}"
@@ -233,11 +248,18 @@ unexpected_public_listeners() {
         case "$address" in
             127.*|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
         esac
+{% if awg_node_role == 'entry' %}
+        if [[ "$proto" == udp && "$process" =~ pid=([0-9]+), ]] &&
+            [[ " $outbound_pids " == *" ${BASH_REMATCH[1]} "* ]] &&
+            (( port >= port_low && port <= port_high )); then
+            continue
+        fi
+{% endif %}
         case "$proto" in
             tcp) [[ " $known_tcp " == *" $port "* ]] || printf 'tcp/%s\n' "$port" ;;
             udp) [[ " $known_udp " == *" $port "* ]] || printf 'udp/%s\n' "$port" ;;
         esac
-    done < <(ss -H -lntu) | sort -u
+    done < <(ss -H -lntup) | sort -u
 }
 
 unexpected_listeners=''

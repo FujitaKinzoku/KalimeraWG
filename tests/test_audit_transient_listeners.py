@@ -3,11 +3,15 @@
 Исходящий UDP-запрос на мгновение держит сокет на случайном порту, и
 `ss -lntu` показывает его как UNCONN 0.0.0.0:порт. Аудит предупреждает только
 о портах, которые видны в двух снимках подряд, и печатает их.
+
+sing-box на ENTRY держит исходящие UDP-сокеты клиентов минутами; их аудит
+узнаёт по MainPID управляемой службы и диапазону временных портов ядра.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -39,11 +43,26 @@ KNOWN = textwrap.dedent(
 )
 
 
+SING_BOX_UNIT = "sing-box.service"
+SING_BOX_PID = 73355
+
+
+def ephemeral_port() -> int:
+    low, high = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+    return (int(low) + int(high)) // 2
+
+
+def socket(port: int, pid: int | None, name: str = "sing-box") -> str:
+    process = f' users:(("{name}",pid={pid},fd=43))' if pid else ""
+    return f"udp UNCONN 0 0 0.0.0.0:{port} 0.0.0.0:*{process}\n"
+
+
 def listener_functions() -> str:
     text = TEMPLATE.read_text(encoding="utf-8")
     snippet = text[text.index(START) : text.index(END)]
     environment = jinja2.Environment(trim_blocks=True, undefined=jinja2.StrictUndefined)
     environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
+    environment.filters["quote"] = lambda value: shlex.quote(str(value))
     return environment.from_string(snippet).render(
         awg_node_role="entry",
         front_backend_enabled=True,
@@ -59,8 +78,8 @@ def listener_functions() -> str:
 
 def run_check(first: str, second: str) -> tuple[int, str]:
     bash = shutil.which("bash")
-    if bash is None:
-        raise unittest.SkipTest("bash недоступен")
+    if bash is None or not Path("/proc/sys/net/ipv4/ip_local_port_range").exists():
+        raise unittest.SkipTest("нужен bash на Linux")
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         (root / "1").write_text(first, encoding="utf-8")
@@ -75,6 +94,10 @@ def run_check(first: str, second: str) -> tuple[int, str]:
                 snapshot=$(( $(cat "{root.as_posix()}/counter") + 1 ))
                 printf '%s' "$snapshot" >"{root.as_posix()}/counter"
                 cat "{root.as_posix()}/$snapshot"
+            }}
+            # MainPID управляемой службы sing-box; у остальных служб нет процесса.
+            systemctl() {{
+                if [[ " $* " == *" {SING_BOX_UNIT} "* ]]; then echo {SING_BOX_PID}; else echo 0; fi
             }}
             """
         )
@@ -124,6 +147,31 @@ class TransientListenerTests(unittest.TestCase):
     def test_private_addresses_are_not_checked(self) -> None:
         private = KNOWN + "tcp LISTEN 0 4096 10.0.0.5:9100 0.0.0.0:*\n"
         self.assertEqual(run_check(private, private), (0, ""))
+
+
+class SingBoxOutboundTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if not Path("/proc/sys/net/ipv4/ip_local_port_range").exists():
+            self.skipTest("нужен диапазон временных портов Linux")
+
+    def test_long_lived_sing_box_outbound_udp_is_ignored(self) -> None:
+        port = ephemeral_port()
+        snapshot = KNOWN + socket(port, SING_BOX_PID) + socket(port + 7, SING_BOX_PID)
+        self.assertEqual(run_check(snapshot, snapshot), (0, ""))
+
+    def test_sing_box_on_fixed_port_is_reported(self) -> None:
+        snapshot = KNOWN + socket(2053, SING_BOX_PID)
+        self.assertEqual(run_check(snapshot, snapshot), (1, "udp/2053"))
+
+    def test_other_process_on_ephemeral_port_is_reported(self) -> None:
+        port = ephemeral_port()
+        snapshot = KNOWN + socket(port, 4242, name="nc")
+        self.assertEqual(run_check(snapshot, snapshot), (1, f"udp/{port}"))
+
+    def test_unowned_ephemeral_port_is_reported(self) -> None:
+        port = ephemeral_port()
+        snapshot = KNOWN + socket(port, None)
+        self.assertEqual(run_check(snapshot, snapshot), (1, f"udp/{port}"))
 
 
 if __name__ == "__main__":
