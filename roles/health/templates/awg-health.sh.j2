@@ -527,6 +527,9 @@ check 'клиенты AWG изолированы от cloud metadata' \
 check 'клиенты AWG изолированы от служебной сети ENTRY-EXIT' \
     ufw_client_destination_denied {{ entry_client_interface | quote }} \
     {{ entry_client_subnet | quote }} {{ hostvars[groups['exit'][0]].exit_awg_subnet | quote }}
+check 'клиенты AWG изолированы друг от друга' \
+    ufw_client_destination_denied {{ entry_client_interface | quote }} \
+    {{ entry_client_subnet | quote }} {{ entry_client_subnet | quote }}
 {% if entry_legacy_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     check 'цепочка маршрутизации совместимого интерфейса' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_legacy_client_interface | quote }} -s {{ entry_legacy_client_subnet | quote }} -j AWG_RU_PROXY
@@ -534,6 +537,9 @@ fi
 check 'legacy-клиенты изолированы от cloud metadata' \
     ufw_client_destination_denied {{ entry_legacy_client_interface | quote }} \
     {{ entry_legacy_client_subnet | quote }} 169.254.0.0/16
+check 'legacy-клиенты изолированы друг от друга' \
+    ufw_client_destination_denied {{ entry_legacy_client_interface | quote }} \
+    {{ entry_legacy_client_subnet | quote }} {{ entry_legacy_client_subnet | quote }}
 check 'обычные и legacy-клиенты взаимно изолированы' ufw_client_zones_isolated \
     {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
     {{ entry_legacy_client_subnet | quote }} {{ entry_legacy_client_interface | quote }} \
@@ -547,6 +553,9 @@ fi
 check 'mobile-клиенты изолированы от cloud metadata' \
     ufw_client_destination_denied {{ entry_mobile_client_interface | quote }} \
     {{ entry_mobile_client_subnet | quote }} 169.254.0.0/16
+check 'mobile-клиенты изолированы друг от друга' \
+    ufw_client_destination_denied {{ entry_mobile_client_interface | quote }} \
+    {{ entry_mobile_client_subnet | quote }} {{ entry_mobile_client_subnet | quote }}
 check 'обычные и mobile-клиенты взаимно изолированы' ufw_client_zones_isolated \
     {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }} \
     {{ entry_mobile_client_subnet | quote }} {{ entry_mobile_client_interface | quote }} \

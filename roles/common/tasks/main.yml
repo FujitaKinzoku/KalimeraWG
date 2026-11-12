@@ -40,3 +40,28 @@
   when:
     - common_disable_fwupd_refresh | bool
     - common_fwupd_refresh_timer.stat.exists
+
+# KalimeraWG поддерживает только Ubuntu 24.04: после перехода на новый выпуск
+# deploy останавливается на preflight, а модуль AmneziaWG может не собраться.
+# Предложение «New release ... available» скрывается, обновления безопасности
+# 24.04 приходят как прежде.
+- name: Проверка настроек перехода на новый выпуск Ubuntu
+  ansible.builtin.stat:
+    path: /etc/update-manager/release-upgrades
+  register: common_release_upgrades_config
+  when: common_hide_release_upgrade_prompt | bool
+
+- name: Отключение предложения перейти на новый выпуск Ubuntu
+  ansible.builtin.lineinfile:
+    path: /etc/update-manager/release-upgrades
+    regexp: '^\s*Prompt\s*='
+    line: Prompt=never
+  when:
+    - common_hide_release_upgrade_prompt | bool
+    - common_release_upgrades_config.stat.exists
+
+- name: Удаление сохранённого предложения нового выпуска из MOTD
+  ansible.builtin.file:
+    path: /var/lib/ubuntu-release-upgrader/release-upgrade-available
+    state: absent
+  when: common_hide_release_upgrade_prompt | bool

@@ -60,6 +60,8 @@ awg_unattended_security_updates: true
 awg_apt_wait_timeout_seconds: 1800
 awg_server_audit_calendar: "*-*-* 04:40:00"
 awg_maintenance_calendar: "*-*-* 05:20:00"
+# full - ночью все обновления Ubuntu и новое ядро; security - только безопасность.
+awg_maintenance_upgrade_mode: full
 awg_telegram_monitor_enabled: false
 awg_telegram_monitor_interval: 60s
 

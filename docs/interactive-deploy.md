@@ -210,6 +210,26 @@ SSH, AWG, UFW, DNS, MTU и маршрутизацию:
 ./deploy --resume
 ```
 
+### Обновления системы
+
+Каждую ночь (`awg_maintenance_calendar`, по умолчанию 05:20) обслуживание
+ставит все обновления Ubuntu, новое ядро той же сборки (для generic -
+`linux-image-virtual`; на ENTRY и EXIT вместе с заголовками и сборкой модуля
+AmneziaWG через `awg-kernel-guard`) и удаляет ненужные пакеты. AmneziaWG и
+sing-box на это время удерживаются, Xray не затрагивается. Перезагрузки нет:
+после установки ядра `kalimera-updates` показывает `UPD` с командой
+перезагрузки. Вручную то же самое делает `update-all`.
+
+Только обновления безопасности через unattended-upgrades:
+
+```yaml
+awg_maintenance_upgrade_mode: security
+```
+
+Предложение перейти на новый выпуск Ubuntu скрыто (`Prompt=never`): KalimeraWG
+поддерживает только 24.04, и после перехода deploy остановится на preflight.
+Вернуть предложение: `common_hide_release_upgrade_prompt: false`.
+
 ### Обновления компонентов
 
 Каждый сервер раз в сутки проверяет, нет ли нового ядра, пакетов AmneziaWG

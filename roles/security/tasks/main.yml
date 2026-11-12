@@ -1116,6 +1116,28 @@
     }}
   when: awg_node_role == 'entry'
 
+# Внутри одной зоны клиентов изолирует и политика UFW «routed deny», но
+# явное правило не исчезнет, если кто-то добавит широкое разрешение
+# маршрутизации, и его проверяет awg-health (так же, как на EXIT).
+- name: "Запрет пересылки между клиентами одной AWG-зоны"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.subnet }}"
+    to_ip: "{{ item.subnet }}"
+    comment: Изоляция клиентов внутри AWG-зоны
+  loop: >-
+    {{
+      [{'interface': entry_client_interface, 'subnet': entry_client_subnet}] +
+      ([{'interface': entry_mobile_client_interface, 'subnet': entry_mobile_client_subnet}]
+       if entry_mobile_client_available | default(false) | bool else []) +
+      ([{'interface': entry_legacy_client_interface, 'subnet': entry_legacy_client_subnet}]
+       if entry_legacy_client_available | default(false) | bool else [])
+    }}
+  when: awg_node_role == 'entry'
+
 - name: "Разрешение маршрутизации legacy-клиентов AWG"
   community.general.ufw:
     rule: allow

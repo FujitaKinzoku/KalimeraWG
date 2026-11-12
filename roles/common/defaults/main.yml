@@ -18,6 +18,10 @@ awg_backup_root: /root/config-backups
 # server-audit не проходит. Пакет fwupd не удаляется, отключается только
 # таймер. false - не трогать таймер.
 common_disable_fwupd_refresh: true
+# Prompt=never в /etc/update-manager/release-upgrades: без сообщения
+# «New release ... available» и без случайного do-release-upgrade.
+# false - не трогать настройку.
+common_hide_release_upgrade_prompt: true
 awg_enable_fail2ban: true
 # Источник APT, недоступность которого не останавливает deploy, если
 # закреплённые пакеты AmneziaWG уже установлены (см. tasks/apt-refresh.yml).

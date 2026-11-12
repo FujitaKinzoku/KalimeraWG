@@ -181,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.10/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.11/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.0.10`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.0.11`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.10 --depth 1 \
+git clone --branch v3.0.11 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -306,6 +306,17 @@ entry-domain add example.org   # напрямую, минуя российски
 
 ## Обновление
 
+### Система
+
+Каждую ночь в 05:20 сервер сам ставит все обновления Ubuntu и новое ядро той
+же сборки, на ENTRY и EXIT сразу собирая под него модуль AmneziaWG. AmneziaWG,
+sing-box и Xray при этом не трогаются. Перезагрузка не выполняется: когда
+новое ядро установлено, появляется `UPD` «ядро … установлено, работает …».
+Перезагружайте серверы одного каскада по очереди, следующий - после
+`awg-health --strict` на предыдущем. То же самое вручную и сразу: `update-all`.
+Только обновления безопасности, как до v3.0.11:
+`awg_maintenance_upgrade_mode: security` в inventory.
+
 ### Компоненты
 
 Каждый сервер раз в сутки проверяет, не вышло ли новое ядро, AmneziaWG или
@@ -321,7 +332,7 @@ UPD  доступен Xray 26.11.9, работает 26.10.31
 
 | Что | Команда | Что происходит |
 |---|---|---|
-| ядро | `kalimera-updates install kernel`, затем `sudo reboot` | ставит новое ядро и собирает под него модуль AmneziaWG; серверы одного каскада перезагружайте по очереди |
+| ядро | ставится ночью само, или сразу: `kalimera-updates install kernel`; затем `sudo reboot` | ставит новое ядро и собирает под него модуль AmneziaWG; серверы одного каскада перезагружайте по очереди |
 | AmneziaWG | на ENTRY: `kalimera-deploy --resume --update-amneziawg` | обновляет пакеты на ENTRY и EXIT, проверяет каскад, при ошибке откатывает; клиентские конфиги не меняются |
 | Xray-core | на ENTRY: `kalimera-deploy --resume --update-xray` | ставит на FRONT последний стабильный выпуск с SHA-256 из GitHub, проверяет аплинк через CDN, при ошибке откатывает |
 
@@ -337,7 +348,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.10
+sudo git -C /root/KalimeraWG switch --detach v3.0.11
 kalimera-deploy --resume
 ```
 
@@ -364,6 +375,9 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.0.11:** ночное обслуживание ставит все обновления Ubuntu и новое
+  ядро (перезагрузка вручную); явная изоляция клиентов одной зоны на ENTRY
+  с проверкой в `awg-health`; предложение перейти на Ubuntu 26.04 скрыто.
 - **v3.0.10:** `server-audit` на ENTRY не принимает исходящие UDP-сокеты
   sing-box за посторонних слушателей.
 - **v3.0.9:** `kalimera-updates` на ENTRY и EXIT больше не завершается с

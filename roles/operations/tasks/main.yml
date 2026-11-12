@@ -6,6 +6,7 @@
       - awg_server_audit_calendar | length > 0
       - awg_telegram_monitor_interval is match('^[1-9][0-9]*s$')
       - awg_maintenance_calendar | length > 0
+      - awg_maintenance_upgrade_mode in ['full', 'security']
     fail_msg: "Для административных таймеров требуются проверенные интервалы systemd"
 
 - name: "Установка: администрирование - этап 2"

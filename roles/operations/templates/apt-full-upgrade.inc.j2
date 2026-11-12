@@ -1,0 +1,57 @@
+# Общая часть ночного обслуживания и update-all (подключается через include).
+# Ставит все обновления Ubuntu, новое ядро той же сборки (на ENTRY и EXIT -
+# вместе с заголовками для DKMS) и удаляет ненужные пакеты. AmneziaWG и
+# sing-box на это время удерживаются: они обновляются только транзакцией
+# с ENTRY (kalimera-deploy --resume --update-amneziawg). Перезагрузка не
+# выполняется. Замок /run/awg-apt-maintenance.lock держит вызывающий скрипт.
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+awg_held_packages=(amneziawg amneziawg-dkms amneziawg-tools sing-box)
+{% else %}
+awg_held_packages=()
+{% endif %}
+awg_new_holds=()
+
+awg_release_holds() {
+    [[ -z "${awg_new_holds[*]}" ]] || apt-mark unhold "${awg_new_holds[@]}" >/dev/null
+}
+
+awg_full_upgrade() {
+    local package held running flavour
+    local -a apt_options=(
+        -o DPkg::Lock::Timeout=600
+        -o Dpkg::Options::=--force-confdef
+        -o Dpkg::Options::=--force-confold
+    )
+    local -a kernel_packages=()
+
+    held="$(apt-mark showhold)"
+    for package in "${awg_held_packages[@]}"; do
+        dpkg-query -W "$package" >/dev/null 2>&1 || continue
+        if ! grep -Fxq -- "$package" <<<"$held"; then
+            apt-mark hold "$package" >/dev/null
+            awg_new_holds+=("$package")
+        fi
+    done
+    trap awg_release_holds EXIT
+
+    apt-get "${apt_options[@]}" -q update
+    apt-get "${apt_options[@]}" -y upgrade
+
+    # apt-get upgrade не ставит новое ядро: у него новое имя пакета. Его тянет
+    # метапакет той же сборки; для generic - облегчённый linux-image-virtual,
+    # как в kalimera-updates install kernel.
+    running="$(uname -r)"
+    flavour="${running##*-}"
+    [[ "$flavour" != generic ]] || flavour=virtual
+    kernel_packages+=("linux-image-$flavour")
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+    kernel_packages+=("linux-headers-$flavour")
+{% endif %}
+    if apt-cache show "linux-image-$flavour" >/dev/null 2>&1; then
+        apt-get "${apt_options[@]}" -y install "${kernel_packages[@]}"
+    else
+        printf 'Метапакет linux-image-%s не найден в репозиториях; новое ядро не устанавливается.\n' "$flavour" >&2
+    fi
+
+    apt-get "${apt_options[@]}" -y autoremove
+}

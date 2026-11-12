@@ -9,14 +9,28 @@ case "${1:-}" in
     *) usage >&2; exit 2 ;;
 esac
 export DEBIAN_FRONTEND=noninteractive
+
+{% include 'apt-full-upgrade.inc.j2' %}
+
 exec 9>/run/awg-apt-maintenance.lock
 flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
 if [[ "${1:-}" == "--scheduled" ]]; then
+{% if awg_maintenance_upgrade_mode | default('full') == 'security' %}
+    # Режим security: только обновления безопасности через unattended-upgrades.
     apt-get -o DPkg::Lock::Timeout=600 -q update
     unattended-upgrade -d
+{% else %}
+    # Режим full: то же, что update-all, - все обновления Ubuntu и новое ядро.
+    awg_full_upgrade
+{% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
     /usr/local/sbin/awg-kernel-guard
 {% endif %}
+    flock -u 9
+    exec 9>&-
+    # Свежее состояние для экрана входа и server-audit: например, UPD
+    # «ядро установлено, нужна перезагрузка». Сбой проверки не роняет обслуживание.
+    {{ kalimera_updates_path | default('/usr/local/sbin/kalimera-updates') | quote }} >/dev/null 2>&1 || true
     {{ awg_server_audit_path | quote }} --quiet
 else
     apt-get -o DPkg::Lock::Timeout=600 update
@@ -27,9 +41,14 @@ else
     {{ awg_server_audit_path | quote }}
     printf '\nТребуется перезагрузка: '
     [[ -e /var/run/reboot-required ]] && echo да || echo нет
+{% if awg_maintenance_upgrade_mode | default('full') == 'security' %}
+    printf '%s\n' 'Ночью автоматически ставятся только обновления безопасности; остальные: update-all'
+{% else %}
+    printf '%s\n' 'Ночью автоматически ставятся все обновления Ubuntu и новое ядро; перезагрузка - вручную.'
+{% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
     printf '%s\n' \
-      'Критические компоненты показаны в списке, но применяются только отдельной транзакцией.' \
+      'AmneziaWG и sing-box применяются только отдельной транзакцией.' \
       'Что доступно и как применить: kalimera-updates'
 {% else %}
     printf '%s\n' 'Что доступно и как применить: kalimera-updates'
