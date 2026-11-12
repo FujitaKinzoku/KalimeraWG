@@ -14,9 +14,14 @@ awg_telegram_monitor_start_immediately: true
 awg_telegram_monitor_deferred_flag: /run/awg-telegram-monitor.deferred
 awg_maintenance_path: /usr/local/sbin/maintenance
 awg_maintenance_calendar: "*-*-* 05:20:00"
+# Что ставит ночное обслуживание:
+#   full     - все обновления Ubuntu и новое ядро той же сборки (как update-all);
+#   security - только обновления безопасности через unattended-upgrades.
+# В обоих режимах AmneziaWG и sing-box не трогаются, перезагрузки нет.
+awg_maintenance_upgrade_mode: full
 # Проверка обновлений ядра, AmneziaWG и Xray: только сообщает (UPD), ничего
-# не устанавливает. Запускается после ночного обслуживания, которое обновляет
-# списки APT; версию Xray FRONT сверяет с последним стабильным выпуском.
+# не устанавливает. Запускается и после ночного обслуживания; версию Xray
+# FRONT сверяет с последним стабильным выпуском.
 kalimera_updates_path: /usr/local/sbin/kalimera-updates
 kalimera_updates_state_dir: /run/kalimera-updates
 kalimera_updates_apt_lock_path: /run/awg-apt-maintenance.lock

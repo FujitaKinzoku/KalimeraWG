@@ -8,36 +8,27 @@ case "${1:-}" in
   *) usage >&2; exit 2 ;;
 esac
 export DEBIAN_FRONTEND=noninteractive
+
+{% include 'apt-full-upgrade.inc.j2' %}
+
 exec 9>/run/awg-apt-maintenance.lock
 flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
-{% if awg_node_role | default('') in ['entry', 'exit'] %}
-packages=(amneziawg amneziawg-dkms amneziawg-tools sing-box)
-{% else %}
-packages=()
-{% endif %}
-new_holds=()
-for package in "${packages[@]}"; do
-  dpkg-query -W "$package" >/dev/null 2>&1 || continue
-  if ! apt-mark showhold | grep -Fxq "$package"; then apt-mark hold "$package" >/dev/null; new_holds+=("$package"); fi
-done
-cleanup() { [[ -z "${new_holds[*]}" ]] || apt-mark unhold "${new_holds[@]}" >/dev/null; }
-trap cleanup EXIT
-apt-get -o DPkg::Lock::Timeout=600 update
-apt-get -o DPkg::Lock::Timeout=600 -y upgrade
-apt-get -o DPkg::Lock::Timeout=600 -y autoremove
+awg_full_upgrade
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 /usr/local/sbin/awg-kernel-guard
 {% endif %}
+flock -u 9
+exec 9>&-
+{{ kalimera_updates_path | default('/usr/local/sbin/kalimera-updates') | quote }} >/dev/null 2>&1 || true
 {{ awg_server_audit_path | quote }}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 printf '%s\n' \
-  'AmneziaWG, sing-box и AWG3 не обновляются обычным update-all.' \
+  'AmneziaWG и sing-box не обновляются обычным update-all.' \
   'Пакеты AmneziaWG на ENTRY и EXIT с откатом, без смены клиентских конфигов:' \
-  '  kalimera-deploy --resume --update-amneziawg' \
-  'Новое ядро: kalimera-updates install kernel'
+  '  kalimera-deploy --resume --update-amneziawg'
 {% else %}
 printf '%s\n' \
-  'Xray-core обновляется с управляющего ENTRY: kalimera-deploy --resume --update-xray' \
-  'Новое ядро: kalimera-updates install kernel'
+  'Xray-core обновляется с управляющего ENTRY: kalimera-deploy --resume --update-xray'
 {% endif %}
-[[ ! -e /var/run/reboot-required ]] || echo 'Требуется перезагрузка; автоматически она не выполнялась.'
+[[ ! -e /var/run/reboot-required ]] ||
+  echo 'Требуется перезагрузка; автоматически она не выполняется: sudo reboot (серверы одного каскада по очереди).'

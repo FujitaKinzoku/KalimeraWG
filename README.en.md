@@ -181,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.10/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.11/install.sh | bash
 ```
 
-The command installs the pinned `v3.0.10` release rather than the moving `main`
+The command installs the pinned `v3.0.11` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.10 --depth 1 \
+git clone --branch v3.0.11 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -306,6 +306,17 @@ identical behaviour across carriers, hosting providers and client versions.
 
 ## Updating
 
+### System
+
+Every night at 05:20 a server installs all Ubuntu updates and a new kernel of
+the same flavour by itself, building the AmneziaWG module for it on ENTRY and
+EXIT right away. AmneziaWG, sing-box and Xray are left alone. There is no
+reboot: once a new kernel is installed, a `UPD` line says so. Reboot servers
+of one cascade one at a time, the next one after `awg-health --strict` on the
+previous one. The same by hand, right now: `update-all`. Security updates
+only, as before v3.0.11: `awg_maintenance_upgrade_mode: security` in the
+inventory.
+
 ### Components
 
 Every server checks daily whether a new kernel, AmneziaWG or Xray-core is
@@ -321,7 +332,7 @@ Check again and show the full list on a server (no sudo): `kalimera-updates`.
 
 | What | Command | What happens |
 |---|---|---|
-| kernel | `kalimera-updates install kernel`, then `sudo reboot` | installs the new kernel and builds the AmneziaWG module for it; reboot servers of one cascade one at a time |
+| kernel | installed nightly, or right now: `kalimera-updates install kernel`; then `sudo reboot` | installs the new kernel and builds the AmneziaWG module for it; reboot servers of one cascade one at a time |
 | AmneziaWG | on ENTRY: `kalimera-deploy --resume --update-amneziawg` | updates packages on ENTRY and EXIT, verifies the cascade, rolls back on failure; client configs stay the same |
 | Xray-core | on ENTRY: `kalimera-deploy --resume --update-xray` | installs the latest stable release on FRONT with SHA-256 from GitHub, checks the uplink through the CDN, rolls back on failure |
 
@@ -337,7 +348,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.10
+sudo git -C /root/KalimeraWG switch --detach v3.0.11
 kalimera-deploy --resume
 ```
 
@@ -364,6 +375,9 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.0.11:** nightly maintenance installs all Ubuntu updates and a new
+  kernel (reboot by hand); explicit isolation of clients within one zone on
+  ENTRY checked by `awg-health`; the Ubuntu 26.04 upgrade prompt is hidden.
 - **v3.0.10:** `server-audit` on ENTRY no longer mistakes sing-box outgoing
   UDP sockets for unexpected listeners.
 - **v3.0.9:** `kalimera-updates` on ENTRY and EXIT no longer exits with

@@ -1,5 +1,25 @@
 # Журнал изменений
 
+## [3.0.11] - 2026-11-12
+
+- Ночное обслуживание (`awg-maintenance.timer`, 05:20) ставит все
+  обновления Ubuntu, а не только обновления безопасности, и новое ядро
+  той же сборки: для generic - `linux-image-virtual`, на ENTRY и EXIT
+  вместе с заголовками; `awg-kernel-guard` сразу собирает под него модуль
+  AmneziaWG. Затем удаляются ненужные пакеты и обновляется состояние
+  `kalimera-updates`. AmneziaWG и sing-box удерживаются на время работы,
+  Xray не затрагивается, перезагрузки нет. `update-all` использует ту же
+  общую часть и тоже ставит новое ядро. Обновление больше не задаёт
+  вопросов о конфигурационных файлах (`--force-confdef --force-confold`).
+  Прежний режим: `awg_maintenance_upgrade_mode: security`.
+- На ENTRY явное правило UFW запрещает пересылку между клиентами одной
+  зоны (обычные, mobile, legacy). Раньше это держалось только на политике
+  `routed deny`. `awg-health --strict` проверяет правило, как на EXIT.
+- Роль `common` ставит `Prompt=never` в
+  `/etc/update-manager/release-upgrades`: пропадает предложение перейти на
+  Ubuntu 26.04, на которой deploy не работает. Отключается
+  `common_hide_release_upgrade_prompt: false`.
+
 ## [3.0.10] - 2026-11-12
 
 - `server-audit` на ENTRY временами предупреждал о неожиданных внешних
