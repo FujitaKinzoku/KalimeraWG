@@ -3,11 +3,16 @@
 # Найденное обновление - это не ошибка и не предупреждение: строка UPD
 # сообщает, что доступно и какой командой это применить. Ничего не
 # устанавливается автоматически; состояние живёт только в RAM (/run).
+#
+# Конвейеры здесь не обрывают чтение раньше времени (awk ... exit, grep -q):
+# при set -o pipefail писатель получил бы SIGPIPE и команда завершилась бы
+# с кодом 141 в интерактивном сеансе, хотя из systemd работала бы.
 set -Eeuo pipefail
 
 readonly STATE_DIR={{ kalimera_updates_state_dir | quote }}
 readonly STATE_FILE="$STATE_DIR/state"
 readonly ROLE={{ awg_node_role | quote }}
+readonly APT_LOCK={{ kalimera_updates_apt_lock_path | default('/run/awg-apt-maintenance.lock') | quote }}
 {% if awg_node_role == 'front' %}
 readonly XRAY_BINARY={{ front_xray_binary_path | default('/usr/local/bin/xray') | quote }}
 readonly XRAY_RELEASES_API={{ kalimera_updates_xray_releases_api | quote }}
@@ -15,14 +20,20 @@ readonly XRAY_RELEASES_API={{ kalimera_updates_xray_releases_api | quote }}
 
 usage() {
     cat <<'EOF'
-Использование:
-  kalimera-updates                 показать доступные обновления
-  kalimera-updates check           проверить заново, ничего не устанавливая
+Использование (без sudo):
+  kalimera-updates                 обновить списки пакетов, проверить и показать
+                                   доступные обновления; ничего не устанавливает
   kalimera-updates install kernel  установить новое ядро; перезагрузка вручную
+
+Та же проверка выполняется раз в сутки по таймеру; её результат показывают
+server-audit и экран входа.
 EOF
 }
 
-[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+[[ $EUID -eq 0 ]] || {
+    echo 'Нужны права root: в SSH-сеансе kalimera запускайте просто kalimera-updates, без sudo.' >&2
+    exit 1
+}
 
 record() {
     printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}"
@@ -48,9 +59,34 @@ kernel_meta_package() {
 
 latest_kernel_release() {
     apt-cache depends "$1" 2>/dev/null |
-        awk '$1 == "Depends:" && $2 ~ /^linux-image-[0-9]/ {
-            sub(/^linux-image-/, "", $2); print $2; exit
+        awk '!found && $1 == "Depends:" && $2 ~ /^linux-image-[0-9]/ {
+            sub(/^linux-image-/, "", $2); print $2; found = 1
         }'
+}
+
+# Перед проверкой списки пакетов обновляются, иначе новое ядро или пакет
+# AmneziaWG не были бы видны до следующего apt-get update. Недоступный
+# репозиторий не ошибка проверки: он показывается строкой INFO.
+refresh_package_lists() {
+    local output hosts
+    [[ ! -t 2 ]] || printf '%s\n' 'Обновление списков пакетов и проверка версий...' >&2
+    exec 9>"$APT_LOCK"
+    if ! flock -w 60 9; then
+        exec 9>&-
+        record INFO apt 'списки пакетов не обновлены: идёт другое обслуживание пакетов; результат может быть устаревшим'
+        return
+    fi
+    output="$(LC_ALL=C apt-get -o DPkg::Lock::Timeout=60 -q update 2>&1)" ||
+        output+=$'\nE: apt-get update failed'
+    flock -u 9
+    exec 9>&-
+    hosts="$(grep -oE '^(W|E): Failed to fetch [a-z+]+://[^/ ]+' <<<"$output" |
+        sed -E 's#^.*://##' | sort -u | paste -sd, - || true)"
+    if [[ -n "$hosts" ]]; then
+        record INFO apt "не ответили репозитории: ${hosts//,/, }; результат может быть устаревшим"
+    elif grep -E '^E:' <<<"$output" >/dev/null; then
+        record INFO apt 'apt-get update завершился с ошибкой; результат может быть устаревшим'
+    fi
 }
 
 check_kernel() {
@@ -66,7 +102,7 @@ check_kernel() {
         record OK kernel "ядро $running актуально"
         return
     fi
-    if dpkg-query -W -f='${db:Status-Abbrev}' "linux-image-$latest" 2>/dev/null | grep -q '^ii'; then
+    if [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "linux-image-$latest" 2>/dev/null || true)" == ii* ]]; then
 {% if awg_node_role in ['entry', 'exit'] %}
         record UPD kernel "ядро $latest установлено, работает $running" \
             "sudo /usr/local/sbin/awg-kernel-guard && sudo reboot (серверы одного каскада по очереди)"
@@ -91,7 +127,7 @@ check_amneziawg() {
         [[ -n "$installed" ]] || continue
         [[ -n "$current" ]] || current="$installed"
         candidate="$(apt-cache policy "$package" 2>/dev/null |
-            awk '$1 == "Candidate:" { print $2; exit }')"
+            awk '!found && $1 == "Candidate:" { print $2; found = 1 }')"
         if [[ -n "$candidate" && "$candidate" != '(none)' ]] &&
             dpkg --compare-versions "$candidate" gt "$installed"; then
             found+=("$package $installed → $candidate")
@@ -129,11 +165,12 @@ check_xray() {
 {% endif %}
 
 run_checks() {
-    local temporary
+    local temporary refresh="${1:-refresh}"
     install -d -m 0700 "$STATE_DIR"
     temporary="$(mktemp "$STATE_DIR/.state.XXXXXX")"
     {
         printf '#checked\t%s\n' "$(date -u '+%Y-%m-%d %H:%M UTC')"
+        [[ "$refresh" != refresh ]] || refresh_package_lists
         check_kernel
 {% if awg_node_role in ['entry', 'exit'] %}
         check_amneziawg
@@ -148,7 +185,6 @@ run_checks() {
 
 show_state() {
     local level component message action checked='' updates=0
-    [[ -s "$STATE_FILE" ]] || run_checks
     while IFS=$'\t' read -r level component message action; do
         case "$level" in
             '#checked') checked="$component" ;;
@@ -174,7 +210,7 @@ install_kernel() {
     packages+=("${meta/linux-image-/linux-headers-}")
 {% endif %}
     export DEBIAN_FRONTEND=noninteractive
-    exec 9>/run/awg-apt-maintenance.lock
+    exec 9>"$APT_LOCK"
     flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 install -y "${packages[@]}"
@@ -182,7 +218,8 @@ install_kernel() {
     /usr/local/sbin/awg-kernel-guard
 {% endif %}
     flock -u 9
-    run_checks
+    exec 9>&-
+    run_checks no-refresh
     show_state
     printf '%s\n' \
         'Ядро установлено, но начнёт работать после перезагрузки: sudo reboot' \
@@ -190,8 +227,8 @@ install_kernel() {
 }
 
 case "${1:-}" in
-    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; }; show_state ;;
-    check) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; run_checks; show_state ;;
+    # check - прежнее имя той же команды; оставлено для совместимости.
+    ''|check) [[ $# -le 1 ]] || { usage >&2; exit 2; }; run_checks; show_state ;;
     install)
         [[ $# -eq 2 && "$2" == kernel ]] || { usage >&2; exit 2; }
         install_kernel

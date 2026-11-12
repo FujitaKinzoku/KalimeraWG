@@ -19,6 +19,7 @@ awg_maintenance_calendar: "*-*-* 05:20:00"
 # списки APT; версию Xray FRONT сверяет с последним стабильным выпуском.
 kalimera_updates_path: /usr/local/sbin/kalimera-updates
 kalimera_updates_state_dir: /run/kalimera-updates
+kalimera_updates_apt_lock_path: /run/awg-apt-maintenance.lock
 kalimera_updates_calendar: "*-*-* 06:10:00"
 kalimera_updates_xray_releases_api: https://api.github.com/repos/XTLS/Xray-core/releases/latest
 awg_domain_policy_dir: /etc/awg/domain-policy

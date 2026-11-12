@@ -181,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.8/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.9/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.0.8`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.0.9`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.8 --depth 1 \
+git clone --branch v3.0.9 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -317,7 +317,7 @@ UPD  доступен Xray 26.11.9, работает 26.10.31
      → на ENTRY: kalimera-deploy --resume --update-xray (с проверкой через CDN и откатом)
 ```
 
-Полный список на сервере: `kalimera-updates`.
+Проверить заново и показать полный список на сервере (без sudo): `kalimera-updates`.
 
 | Что | Команда | Что происходит |
 |---|---|---|
@@ -337,7 +337,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.8
+sudo git -C /root/KalimeraWG switch --detach v3.0.9
 kalimera-deploy --resume
 ```
 
@@ -364,6 +364,9 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.0.9:** `kalimera-updates` на ENTRY и EXIT больше не завершается с
+  кодом 141; команда без sudo сама обновляет списки пакетов, проверяет и
+  показывает обновления, а недоступные репозитории называет строкой `INFO`.
 - **v3.0.8:** обычный `kalimera-deploy --resume` не обращается к
   `keyserver.ubuntu.com`, если правильный ключ PPA AmneziaWG уже установлен.
 - **v3.0.7:** обычный `kalimera-deploy --resume` не останавливается,
