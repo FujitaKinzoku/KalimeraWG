@@ -517,6 +517,7 @@ fi
 check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
 check 'маршрут по умолчанию в таблице 100' has_default_route {{ entry_exit_table }} {{ entry_exit_interface | quote }}
 check 'mark 0x1 направляется через EXIT сервер' route_uses_interface 8.8.8.8 {{ entry_exit_mark | quote }} {{ entry_exit_interface | quote }}
+check 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
 check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
 check 'ipset российских сетей' ipset list ru

@@ -1,0 +1,7 @@
+# Управляется KalimeraWG.
+# Вторая линия защиты к networkd.conf.d/60-kalimerawg-policy-rules.conf: после
+# каждого запуска systemd-networkd правила policy routing ENTRY применяются
+# заново. Префикс «+» выполняет действие от root, а не от systemd-network.
+# Восстановление best-effort и не делает networkd неисправной службой.
+[Service]
+ExecStartPost=+/bin/sh -c 'test ! -x {{ entry_routing_reconcile_path }} || {{ entry_routing_reconcile_path }} || true'

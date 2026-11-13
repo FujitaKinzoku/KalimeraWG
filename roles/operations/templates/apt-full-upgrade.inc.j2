@@ -54,4 +54,14 @@ awg_full_upgrade() {
     fi
 
     apt-get "${apt_options[@]}" -y autoremove
+{% if awg_node_role | default('') == 'entry' %}
+
+    # Обновление systemd перезапускает systemd-networkd, а он мог удалить
+    # правило fwmark -> таблица EXIT (на установках до v3.1.0 нет
+    # networkd.conf.d/60-kalimerawg-policy-rules.conf). Без правила трафик
+    # клиентов уходит с ENTRY без учёта гео. Применение идемпотентно.
+    systemctl reload {{ entry_routing_service_name | default('awg-entry-routing.service') }} \
+        || systemctl start {{ entry_routing_service_name | default('awg-entry-routing.service') }} \
+        || printf 'Не удалось повторно применить policy routing ENTRY.\n' >&2
+{% endif %}
 }

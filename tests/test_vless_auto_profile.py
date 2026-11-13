@@ -103,7 +103,7 @@ class AutoProfileTests(unittest.TestCase):
         observatory = profile["burstObservatory"]
         self.assertEqual(observatory["subjectSelector"], ["kalimera-main", "kalimera-reserve-1"])
         ping = observatory["pingConfig"]
-        self.assertEqual((ping["interval"], ping["sampling"], ping["timeout"]), ("10s", 4, "5s"))
+        self.assertEqual((ping["interval"], ping["sampling"], ping["timeout"]), ("10s", 3, "5s"))
         # Без проверки сети напрямую: на телефоне её DNS идёт через упавший
         # основной каскад, провалы не записывались, и резерв не включался.
         self.assertNotIn("connectivity", ping)

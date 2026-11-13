@@ -1,0 +1,10 @@
+# Управляется KalimeraWG.
+# Правило policy routing "fwmark {{ entry_exit_mark }} -> таблица {{ entry_exit_table }}"
+# (трафик клиентов через EXIT) создаёт служба {{ entry_routing_service_name }}, а не
+# systemd-networkd. По умолчанию networkd при каждом запуске удаляет такие
+# «чужие» правила. Ночное обслуживание ставит обновления systemd, networkd
+# перезапускается, правило пропадает, и весь трафик клиентов молча уходит
+# в интернет с ENTRY, без учёта гео. Маршруты таблицы {{ entry_exit_table }} висят на
+# интерфейсе AWG, которым networkd не управляет, и не страдают.
+[Network]
+ManageForeignRoutingPolicyRules=no

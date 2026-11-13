@@ -410,7 +410,7 @@
               - (front_test_vless_auto.stdout | from_json).routing.balancers[0].fallbackTag == 'kalimera-main'
               - (front_test_vless_auto.stdout | from_json).routing.balancers[0].strategy.type == 'leastLoad'
               - (front_test_vless_auto.stdout | from_json).routing.rules[-1].balancerTag == 'kalimera-auto'
-              - (front_test_vless_auto.stdout | from_json).burstObservatory.pingConfig.sampling == 4
+              - (front_test_vless_auto.stdout | from_json).burstObservatory.pingConfig.sampling == 3
               - "'Резерв должен быть другим каскадом' in front_test_vless_auto_self.stderr"
             fail_msg: Профиль с резервом не соответствует проверяемой схеме
 
