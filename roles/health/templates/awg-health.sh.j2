@@ -559,6 +559,14 @@ aaaa_filtered() {
     [[ -z "$(dig +short +time=3 +tries=1 @{{ entry_client_listen_address | default('127.0.0.1') }} example.com AAAA)" ]]
 }
 
+# dig возвращает 0 и при SERVFAIL, а при таймауте пишет ошибку в stdout,
+# поэтому успехом считается только полученный IPv4-адрес.
+dns_resolves_a() {
+    local answer
+    answer="$(dig +short +time=5 +tries=1 "@$1" "$2" A 2>/dev/null)" || return 1
+    grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"
+}
+
 ufw_interserver_restricted() {
     local interface="$1" peer="$2" port="$3" proto="${4:-udp}"
     iptables -w 10 -C ufw-user-input -i "$interface" -p "$proto" \
@@ -894,6 +902,7 @@ check 'backend FRONT прослушивает служебный порт' tcp_p
 check 'backend FRONT содержит только служебный peer' \
     jq -e '.inbounds[] | select(.tag == "front-reality-in") | (.users | length == 1) and (.users[0].name == "front-service")' \
     {{ front_backend_config_path | default('/etc/sing-box/front-backend.json') | quote }}
+check 'backend FRONT разрешает российские домены через dnsmasq' dns_resolves_a {{ entry_client_listen_address | quote }} yandex.ru
 {% else %}
 check 'REALITY RU-маршрут синхронизирован с состоянием SOAX' reality_ru_failover_synced {{ sing_box_config_path | quote }} {{ entry_ru_proxy_disabled_flag | quote }} {{ entry_ru_proxy_manual_disabled_flag | quote }}
 {% if entry_ru_proxy_manual_disabled_flag is defined %}

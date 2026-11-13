@@ -181,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.1.1/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.1.0`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.1.1`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.1.0 --depth 1 \
+git clone --branch v3.1.1 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -348,7 +348,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.1.0
+sudo git -C /root/KalimeraWG switch --detach v3.1.1
 kalimera-deploy --resume
 ```
 
@@ -375,6 +375,9 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.1.1:** VLESS разрешает российские имена на ENTRY по той же
+  DNS-политике, что AmneziaWG (российский DoH через dnsmasq), а не через
+  зарубежный Unbound.
 - **v3.1.0:** один VLESS-профиль на несколько каскадов (до шести) с
   переключением на следующий только при потере связи (`vless-user auto`);
   собственные имена маскировки XHTTP для каждой установки, на существующем
