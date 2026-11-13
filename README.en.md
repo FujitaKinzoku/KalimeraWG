@@ -375,10 +375,12 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
-- **v3.1.0:** one VLESS profile for two cascades, primary and backup, switching
-  only when the primary is unreachable (`vless-user auto`); own XHTTP
-  disguise names for every installation, on an existing FRONT -
-  `--rotate-front-disguise`.
+- **v3.1.0:** one VLESS profile for several cascades (up to six), moving to
+  the next one only when the connection is lost (`vless-user auto`); own
+  XHTTP disguise names for every installation, on an existing FRONT -
+  `--rotate-front-disguise`; colour reports of `awg-health`, `server-audit`
+  and `kalimera-updates` with a verdict and fixes; fixed the route via EXIT
+  being lost after nightly maintenance.
 - **v3.0.11:** nightly maintenance installs all Ubuntu updates and a new
   kernel (reboot by hand); explicit isolation of clients within one zone on
   ENTRY checked by `awg-health`; the Ubuntu 26.04 upgrade prompt is hidden.
