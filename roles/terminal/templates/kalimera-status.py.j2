@@ -477,6 +477,17 @@ def command_panels() -> None:
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
+        panel(
+            "ОДИН ПРОФИЛЬ НА НЕСКОЛЬКО КАСКАДОВ (АВТОПЕРЕКЛЮЧЕНИЕ)",
+            [
+                ("vless-user export ИМЯ", "1. на FRONT каждого резервного каскада: скопировать JSON целиком", "INFO"),
+                ("nano r1.json", "2. здесь: вставить JSON и сохранить; для следующих - r2.json и т.д.", "INFO"),
+                ("vless-user auto ИМЯ r1.json [r2.json ...]", "3. профиль: этот FRONT - основной, резервы по порядку файлов, до 5", "INFO"),
+                ("rm r1.json r2.json", "4. удалить файлы: в них ключи резервных каскадов", "INFO"),
+                ("Happ для iOS", "выключите No Limit Mode, иначе резерв не включится", "WARN"),
+            ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
     panel(
         "БЕЗОПАСНОСТЬ И УВЕДОМЛЕНИЯ",
         [

@@ -181,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.11/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.1.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.0.11` release rather than the moving `main`
+The command installs the pinned `v3.1.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.11 --depth 1 \
+git clone --branch v3.1.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -246,7 +246,7 @@ table at login. Full reference: `kalimera-help`.
 |---|---|
 | Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
 | AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
-| VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete` |
+| VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete`; profile with a backup cascade: `vless-user auto NAME FILE` |
 | Domain routing | `ru-domain add`, `se-domain add`, `entry-domain add` |
 | Russian proxy | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
@@ -348,7 +348,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.11
+sudo git -C /root/KalimeraWG switch --detach v3.1.0
 kalimera-deploy --resume
 ```
 
@@ -375,6 +375,12 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.1.0:** one VLESS profile for several cascades (up to six), moving to
+  the next one only when the connection is lost (`vless-user auto`); own
+  XHTTP disguise names for every installation, on an existing FRONT -
+  `--rotate-front-disguise`; colour reports of `awg-health`, `server-audit`
+  and `kalimera-updates` with a verdict and fixes; fixed the route via EXIT
+  being lost after nightly maintenance.
 - **v3.0.11:** nightly maintenance installs all Ubuntu updates and a new
   kernel (reboot by hand); explicit isolation of clients within one zone on
   ENTRY checked by `awg-health`; the Ubuntu 26.04 upgrade prompt is hidden.

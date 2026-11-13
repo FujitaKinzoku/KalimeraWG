@@ -43,6 +43,7 @@ FAKES = {
         """
     ),
     "uname": 'printf "%s\\n" "$FAKE_RUNNING_KERNEL"',
+    "systemctl": 'printf "systemctl %s\\n" "$*" >>"$CALLS"',
 }
 
 
@@ -112,6 +113,18 @@ class FullUpgradeTests(unittest.TestCase):
         for command in commands[1:]:
             self.assertIn("Dpkg::Options::=--force-confold", command)
             self.assertIn("Dpkg::Options::=--force-confdef", command)
+
+    def test_entry_reapplies_policy_routing_after_packages(self) -> None:
+        # needrestart после обновления libc перезапускал networkd, а он удалял правило
+        # fwmark -> таблица EXIT: трафик клиентов уходил с ENTRY без гео.
+        calls = run("entry")
+        autoremove = next(i for i, call in enumerate(calls) if call.endswith(" -y autoremove"))
+        reload = calls.index("systemctl reload awg-entry-routing.service")
+        self.assertLess(autoremove, reload)
+        for role in ("exit", "front"):
+            self.assertFalse(
+                [call for call in run(role) if call.startswith("systemctl ")], role
+            )
 
     def test_amneziawg_is_held_only_during_upgrade(self) -> None:
         calls = run("exit")

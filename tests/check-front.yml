@@ -348,6 +348,72 @@
               Экспортированный CDN JSON или активный список VLESS-пользователей
               не соответствует проверяемому профилю
 
+        # Профиль с резервом: резерв - экспорт «другого каскада» (тот же JSON
+        # с другим доменом), основной - CDN этого FRONT.
+        - name: Подготовка экспорта резервного каскада
+          ansible.builtin.copy:
+            content: "{{ front_test_vless_export.stdout | replace('edge.example.invalid', 'edge-reserve.example.invalid') }}"
+            dest: "{{ front_test_root }}/reserve-export.json"
+            mode: "0600"
+          no_log: true
+
+        - name: Подготовка экспорта второго резервного каскада
+          ansible.builtin.copy:
+            content: "{{ front_test_vless_export.stdout | replace('edge.example.invalid', 'edge-reserve2.example.invalid') }}"
+            dest: "{{ front_test_root }}/reserve2-export.json"
+            mode: "0600"
+          no_log: true
+
+        - name: Профиль с двумя резервами из экспортов других каскадов
+          ansible.builtin.command:
+            argv:
+              - "{{ front_vless_user_command_path }}"
+              - auto
+              - initial
+              - "{{ front_test_root }}/reserve-export.json"
+              - "{{ front_test_root }}/reserve2-export.json"
+          register: front_test_vless_auto
+          changed_when: false
+          no_log: true
+
+        - name: Семантическая проверка профиля с резервом закреплённым Xray-core
+          ansible.builtin.command:
+            argv:
+              - "{{ front_xray_binary_path }}"
+              - run
+              - -test
+              - -c
+              - "{{ front_vless_export_dir }}/initial-auto.json"
+          changed_when: false
+          no_log: true
+
+        - name: Резерв от этого же FRONT отклоняется
+          ansible.builtin.shell:
+            cmd: >-
+              {{ front_vless_user_command_path | quote }} auto initial -
+              < {{ (front_vless_export_dir ~ '/initial.json') | quote }}
+          register: front_test_vless_auto_self
+          changed_when: false
+          failed_when: front_test_vless_auto_self.rc != 2
+          no_log: true
+
+        - name: Проверка профиля с резервом
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - >-
+                (front_test_vless_auto.stdout | from_json).outbounds | map(attribute='tag') | list
+                == ['kalimera-main', 'kalimera-reserve-1', 'kalimera-reserve-2', 'direct', 'block']
+              - (front_test_vless_auto.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
+              - (front_test_vless_auto.stdout | from_json).outbounds[1].settings.vnext[0].address == 'edge-reserve.example.invalid'
+              - (front_test_vless_auto.stdout | from_json).outbounds[2].settings.vnext[0].address == 'edge-reserve2.example.invalid'
+              - (front_test_vless_auto.stdout | from_json).routing.balancers[0].fallbackTag == 'kalimera-main'
+              - (front_test_vless_auto.stdout | from_json).routing.balancers[0].strategy.type == 'leastLoad'
+              - (front_test_vless_auto.stdout | from_json).routing.rules[-1].balancerTag == 'kalimera-auto'
+              - (front_test_vless_auto.stdout | from_json).burstObservatory.pingConfig.sampling == 3
+              - "'Резерв должен быть другим каскадом' in front_test_vless_auto_self.stderr"
+            fail_msg: Профиль с резервом не соответствует проверяемой схеме
+
         - name: Создание тестового CDN-пользователя
           ansible.builtin.command:
             argv: ["{{ front_vless_user_command_path }}", create, test-cdn, cdn]

@@ -181,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.0.11/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.1.0/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.0.11`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.1.0`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.0.11 --depth 1 \
+git clone --branch v3.1.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -246,7 +246,7 @@ systemctl --failed --no-pager
 |---|---|
 | Состояние | `kalimera-status`, `awg-health --strict`, `server-audit` |
 | Клиенты AmneziaWG | `vpn-user ИМЯ ПРОФИЛЬ`, `vpn-user list`, `vpn-user delete ИМЯ` |
-| Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete` |
+| Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete`; профиль с резервным каскадом: `vless-user auto ИМЯ ФАЙЛ` |
 | Маршруты доменов | `ru-domain add`, `se-domain add`, `entry-domain add` |
 | Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
@@ -348,7 +348,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.0.11
+sudo git -C /root/KalimeraWG switch --detach v3.1.0
 kalimera-deploy --resume
 ```
 
@@ -375,6 +375,12 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.1.0:** один VLESS-профиль на несколько каскадов (до шести) с
+  переключением на следующий только при потере связи (`vless-user auto`);
+  собственные имена маскировки XHTTP для каждой установки, на существующем
+  FRONT - `--rotate-front-disguise`; цветные отчёты `awg-health`,
+  `server-audit` и `kalimera-updates` с итогом и рекомендациями;
+  исправлена потеря маршрута через EXIT после ночного обслуживания.
 - **v3.0.11:** ночное обслуживание ставит все обновления Ubuntu и новое
   ядро (перезагрузка вручную); явная изоляция клиентов одной зоны на ENTRY
   с проверкой в `awg-health`; предложение перейти на Ubuntu 26.04 скрыто.

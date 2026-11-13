@@ -74,6 +74,43 @@
     group: root
     mode: "0750"
 
+- name: "Каталог настроек systemd-networkd"
+  ansible.builtin.file:
+    path: /etc/systemd/networkd.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Без этого перезапуск networkd (needrestart после обновления libc и др.)
+# удаляет правило fwmark -> таблица EXIT, и трафик клиентов уходит с ENTRY.
+# Настройка читается при следующем запуске networkd; перезапускать его
+# здесь не нужно - именно перезапуск и удаляет правило.
+- name: "systemd-networkd не удаляет правила policy routing ENTRY"
+  ansible.builtin.template:
+    src: 60-kalimerawg-policy-rules.conf.j2
+    dest: /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "Каталог дополнений службы systemd-networkd"
+  ansible.builtin.file:
+    path: /etc/systemd/system/systemd-networkd.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Восстановление policy routing после запуска systemd-networkd"
+  ansible.builtin.template:
+    src: 50-awg-routing-reconcile-networkd.conf.j2
+    dest: /etc/systemd/system/systemd-networkd.service.d/50-awg-routing-reconcile.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Перезагрузить systemd
+
 - name: "Установка: маршрутизация ENTRY сервера - этап 8"
   ansible.builtin.template:
     src: awg-ru-zone-update.sh.j2
@@ -150,6 +187,15 @@
     name: "{{ entry_routing_service_name }}"
     enabled: true
     state: started
+
+# Служба oneshot с RemainAfterExit остаётся active, даже если правило
+# потом удалили извне (например, перезапуск networkd). Повторное применение
+# идемпотентно и восстанавливает правила при каждом развёртывании.
+- name: "Повторное применение policy routing ENTRY"
+  ansible.builtin.systemd_service:
+    name: "{{ entry_routing_service_name }}"
+    state: reloaded
+  changed_when: false
 
 - name: "Включение: маршрутизация ENTRY сервера - этап 16"
   ansible.builtin.systemd_service:

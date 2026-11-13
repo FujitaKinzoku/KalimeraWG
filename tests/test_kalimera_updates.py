@@ -8,6 +8,7 @@ apt-cache, dpkg-query, curl и xray. Найденное обновление - �
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -204,6 +205,34 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("Доступно обновлений: 2;", output)
         state = output.split("#STATE\n", 1)[1]
         self.assertEqual(sum(line.startswith("UPD\t") for line in state.splitlines()), 2)
+
+    def test_terminal_shows_yellow_box_with_commands(self) -> None:
+        output = run(
+            "entry",
+            KALIMERA_REPORT_STYLE="fancy",
+            FAKE_AWG_CANDIDATE="1.0.20251201-1",
+        ).split("#STATE")[0]
+        self.assertIn("\x1b[36mUPD  доступен AmneziaWG", output)
+        self.assertIn("\x1b[1;33m┌", output)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        self.assertIn("WARN kalimera-updates entry: доступно обновлений: 1", plain)
+        self.assertIn("→ на ENTRY: kalimera-deploy --resume", plain)
+        self.assertNotIn("Доступно обновлений: 1;", plain)
+
+    def test_terminal_shows_green_box_when_current(self) -> None:
+        output = run("exit", KALIMERA_REPORT_STYLE="fancy").split("#STATE")[0]
+        self.assertIn("\x1b[32mOK   ядро", output)
+        self.assertIn("\x1b[1;32m┌", output)
+        self.assertIn("kalimera-updates exit: всё актуально", output)
+
+    def test_unreachable_repository_makes_box_yellow(self) -> None:
+        output = run(
+            "entry",
+            KALIMERA_REPORT_STYLE="fancy",
+            FAKE_APT_STDERR="W: Failed to fetch http://mirror.example.invalid/ubuntu/dists/noble/InRelease",
+        ).split("#STATE")[0]
+        self.assertIn("\x1b[1;33m┌", output)
+        self.assertIn("проверка неполная", output)
 
 
 class CommandTests(unittest.TestCase):

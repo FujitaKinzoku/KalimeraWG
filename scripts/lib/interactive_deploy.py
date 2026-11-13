@@ -754,6 +754,8 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         # постоянным (входит в клиентские ссылки и правила кэширования CDN),
         # а не пересчитываться при каждом deploy.
         "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+        # Свой набор имён маскировки XHTTP вместо общих значений роли.
+        **new_front_disguise(),
         "front_origin_domain": front_origin_domain,
         "front_certbot_email": front_certbot_email,
     }
@@ -2577,6 +2579,93 @@ def apply_xray_release(production: Path, release: dict[str, object]) -> None:
     yaml_write(front_path, front_vars)
 
 
+# Легенды маскировки XHTTP: имя cookie сессии и формат её значения взяты из
+# настроек по умолчанию настоящих фреймворков, чтобы id выглядел так же, как
+# у реального приложения (у одного cookie на сайте длина id постоянна):
+#   PHP:     PHPSESSID, 32 hex (session.sid_length 32, sid_bits_per_character 4);
+#   Tomcat:  JSESSIONID, 32 HEX (sessionIdLength 16 байт, верхний регистр);
+#   Django:  sessionid, 32 символа [a-z0-9] (get_random_string(32, ...)).
+# Ключ паддинга - cookie CSRF-токена, обычный для того же фреймворка.
+# Таблицы - предопределённые имена Xray-core (splithttp.PredefinedTable).
+FRONT_DISGUISE_LEGENDS: tuple[dict[str, object], ...] = (
+    {"cookie": "PHPSESSID", "table": "hex", "length": 32,
+     "padding": ("csrf_token", "XSRF-TOKEN")},
+    {"cookie": "JSESSIONID", "table": "HEX", "length": 32,
+     "padding": ("XSRF-TOKEN", "_csrf")},
+    {"cookie": "sessionid", "table": "base36", "length": 32,
+     "padding": ("csrftoken",)},
+)
+# Имена заголовков аплинка (Xray добавляет к имени -0, -1, ...): только
+# латиница, цифры и дефис - nginx молча выбрасывает имена с подчёркиванием,
+# CDN передаёт произвольные X-...; длина как у прежнего X-Client-State, чтобы
+# не менялся проверенный бюджет заголовков CDN.
+FRONT_UPLINK_HEADER_NAMES: tuple[str, ...] = (
+    "X-Client-State",
+    "X-Request-State",
+    "X-Session-State",
+    "X-Sync-State",
+    "X-App-State",
+    "X-Client-Context",
+    "X-Request-Context",
+    "X-Page-State",
+)
+FRONT_DISGUISE_KEYS = (
+    "front_xhttp_disguise_session_cookie",
+    "front_xhttp_disguise_session_table",
+    "front_xhttp_disguise_session_length",
+    "front_xhttp_disguise_padding_key",
+    "front_xhttp_uplink_data_key",
+)
+
+
+def new_front_disguise(current: dict[str, object] | None = None) -> dict[str, object]:
+    """Собственный набор имён маскировки XHTTP для установки FRONT.
+
+    Общие для многих установок имена (прежние PHPESSID/mc_token/X-Client-State)
+    становятся приметой, по которой CDN или WAF может выделить такой трафик.
+    current - действующий набор: новый обязан отличаться от него хотя бы
+    именем cookie сессии или заголовка аплинка.
+    """
+    while True:
+        legend = FRONT_DISGUISE_LEGENDS[secrets.randbelow(len(FRONT_DISGUISE_LEGENDS))]
+        padding = legend["padding"]
+        assert isinstance(padding, tuple)
+        disguise: dict[str, object] = {
+            "front_xhttp_disguise_session_cookie": legend["cookie"],
+            "front_xhttp_disguise_session_table": legend["table"],
+            "front_xhttp_disguise_session_length": legend["length"],
+            "front_xhttp_disguise_padding_key": padding[secrets.randbelow(len(padding))],
+            "front_xhttp_uplink_data_key": FRONT_UPLINK_HEADER_NAMES[
+                secrets.randbelow(len(FRONT_UPLINK_HEADER_NAMES))
+            ],
+        }
+        if not current or any(
+            disguise[key] != current.get(key)
+            for key in ("front_xhttp_disguise_session_cookie", "front_xhttp_uplink_data_key")
+        ):
+            return disguise
+
+
+def current_front_disguise(repo: Path, front_vars: dict[str, object]) -> dict[str, object]:
+    """Действующий набор: значения inventory поверх значений роли по умолчанию."""
+    defaults = load_yaml(repo / "roles" / "front" / "defaults" / "main.yml")
+    return {key: front_vars.get(key, defaults.get(key)) for key in FRONT_DISGUISE_KEYS}
+
+
+def prepare_front_disguise_rotation(repo: Path, production: Path) -> dict[str, object]:
+    """Записать в front.yml новый набор имён маскировки; вернуть прежний."""
+    front_path = production / "group_vars" / "front.yml"
+    if not front_path.is_file():
+        fail("FRONT не установлен: менять маскировку XHTTP негде")
+    front_vars = load_yaml(front_path)
+    if not front_vars.get("front_xhttp_disguise_enabled", True):
+        fail("Маскировка XHTTP на FRONT выключена: менять нечего")
+    previous = current_front_disguise(repo, front_vars)
+    front_vars.update(new_front_disguise(previous))
+    yaml_write(front_path, front_vars)
+    return previous
+
+
 def restore_file(path: Path, content: bytes | None) -> None:
     """Атомарно восстановить файл транзакции либо удалить созданный файл."""
     if content is None:
@@ -3355,6 +3444,14 @@ def main() -> None:
             "Xray-core с проверкой через CDN и автоматическим откатом"
         ),
     )
+    parser.add_argument(
+        "--rotate-front-disguise",
+        action="store_true",
+        help=(
+            "при --resume заменить имена маскировки XHTTP на FRONT собственным "
+            "случайным набором; все VLESS-профили нужно выпустить заново"
+        ),
+    )
     args = parser.parse_args()
     update_flags = [
         name
@@ -3362,6 +3459,7 @@ def main() -> None:
             ("--update-components", args.update_components),
             ("--update-amneziawg", args.update_amneziawg),
             ("--update-xray", args.update_xray),
+            ("--rotate-front-disguise", args.rotate_front_disguise),
         )
         if value
     ]
@@ -3369,7 +3467,7 @@ def main() -> None:
         parser.error(f"{update_flags[0]} используется только вместе с --resume")
     if len(update_flags) > 1:
         parser.error("выберите только одно обновление за запуск")
-    if (args.update_amneziawg or args.update_xray) and any(
+    if (args.update_amneziawg or args.update_xray or args.rotate_front_disguise) and any(
         (
             args.enable_front,
             args.replace_front,
@@ -3465,6 +3563,18 @@ def main() -> None:
                 f"Будет установлен Xray-core {xray_release['front_xray_version']} "
                 f"вместо {xray_release['previous_version']}."
             )
+        if args.rotate_front_disguise:
+            if not (production / "group_vars" / "front.yml").is_file():
+                fail("FRONT не установлен: менять маскировку XHTTP негде")
+            print(
+                "Имена маскировки XHTTP на FRONT будут заменены. Все выданные "
+                "VLESS-профили этого каскада перестанут подключаться, пока их не "
+                "выпустят заново командой 'vless-user export ИМЯ' (и 'vless-user "
+                "auto' для профилей с резервом)."
+            )
+            if not prompt_bool("Продолжить", False):
+                print("Маскировка не изменена.")
+                return
         ensure_mobile_awg3_vault_material(production, vault_password)
         if args.rollback_front_replacement:
             rollback_front_replacement(production)
@@ -3488,7 +3598,7 @@ def main() -> None:
         # Обновление пакетов AmneziaWG: полный набор компонентов или только сами
         # пакеты. В обоих случаях нужна транзакция пакетов с откатом.
         package_update = args.update_components or args.update_amneziawg
-        transactional = package_update or args.update_xray
+        transactional = package_update or args.update_xray or args.rotate_front_disguise
         all_vars = load_yaml(all_vars_path)
         if (
             all_vars.get("awg_package_version_mode") == "candidate"
@@ -3552,6 +3662,10 @@ def main() -> None:
             front_vars_path = production / "group_vars" / "front.yml"
             component_backup[front_vars_path] = front_vars_path.read_bytes()
             apply_xray_release(production, xray_release)
+        if args.rotate_front_disguise:
+            front_vars_path = production / "group_vars" / "front.yml"
+            component_backup[front_vars_path] = front_vars_path.read_bytes()
+            prepare_front_disguise_rotation(repo, production)
         final_variables = {
             "awg_enable_fail2ban": True,
             "awg_health_run_during_deploy": False,
@@ -3639,9 +3753,15 @@ def main() -> None:
         except SystemExit as update_error:
             if not transactional:
                 raise
+            if package_update:
+                rollback_target = "ENTRY и EXIT..."
+            elif args.rotate_front_disguise:
+                rollback_target = "прежней маскировки XHTTP на FRONT..."
+            else:
+                rollback_target = "Xray-core на FRONT..."
             print(
                 "Обновление не прошло проверку. Выполняется автоматический откат "
-                + ("ENTRY и EXIT..." if package_update else "Xray-core на FRONT...")
+                + rollback_target
             )
             for path, content in component_backup.items():
                 restore_file(path, content)
@@ -3659,6 +3779,12 @@ def main() -> None:
                 )
                 ansible(repo, hosts_path, vault_password, "playbooks/verify.yml")
             except SystemExit:
+                if args.rotate_front_disguise:
+                    fail(
+                        "Смена маскировки XHTTP и автоматический откат завершились "
+                        "ошибкой. Прежние имена возвращены в inventory; повторите "
+                        "'kalimera-deploy --resume'"
+                    )
                 if not package_update:
                     fail(
                         "Обновление Xray-core и автоматический откат завершились "
@@ -3694,6 +3820,14 @@ def main() -> None:
             print(
                 f"Xray-core {xray_release['front_xray_version']} установлен на FRONT "
                 "и проверен через CDN; клиентские профили не изменились."
+            )
+        elif args.rotate_front_disguise:
+            print(
+                "Маскировка XHTTP на FRONT заменена и проверена через CDN. Выпустите "
+                "заново все VLESS-профили этого каскада на FRONT: 'vless-user list', "
+                "затем 'vless-user export ИМЯ' для каждого; профили с резервом - "
+                "'vless-user auto ИМЯ ФАЙЛ_РЕЗЕРВА'. Старые профили больше не "
+                "подключаются."
             )
         elif args.replace_front:
             print(
@@ -4522,6 +4656,7 @@ def main() -> None:
                 ),
                 "front_certbot_email": front_certbot_email,
                 "front_xhttp_path": "/" + secrets.token_urlsafe(9),
+                **new_front_disguise(),
                 "front_subscription_enabled": False,
                 "front_vless_encryption_enabled": True,
                 "front_xhttp_disguise_enabled": True,
