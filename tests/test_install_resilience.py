@@ -62,8 +62,8 @@ class InstallResilienceTests(unittest.TestCase):
         installer = (ROOT / "install.sh").read_text(encoding="utf-8")
         deploy = (ROOT / "deploy").read_text(encoding="utf-8")
 
-        self.assertEqual(version, "3.1.0")
-        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v3.1.0}"', installer)
+        self.assertEqual(version, "3.1.1")
+        self.assertIn('REPOSITORY_REF="${KALIMERA_VERSION:-v3.1.1}"', installer)
         self.assertIn('installed_version', installer)
         self.assertIn('if [[ $# -eq 1 && $1 == --version ]]', deploy)
 
@@ -225,6 +225,18 @@ class InstallResilienceTests(unittest.TestCase):
         # за её присутствие.
         self.assertNotIn('"default_interface":', backend)
         self.assertIn('"disabled": true', backend)
+        # Российские назначения VLESS разрешает dnsmasq ENTRY (та же политика,
+        # что у клиентов AmneziaWG: .ru/.рф и ru-domain - российский DoH),
+        # остальные - зарубежный Unbound. Порт RU-DoH напрямую не годится:
+        # без службы RU-прокси его нет.
+        ru_outbound = backend[backend.index('"tag": "direct-ru"'):]
+        ru_outbound = ru_outbound[: ru_outbound.index("}\n")]
+        self.assertIn('"server": "entry-split-dns"', ru_outbound)
+        exit_outbound = backend[backend.index('"tag": "direct-exit"'):]
+        exit_outbound = exit_outbound[: exit_outbound.index("}\n")]
+        self.assertIn('"server": "bootstrap-unbound"', exit_outbound)
+        self.assertIn('"server": "{{ entry_client_listen_address }}"', backend)
+        self.assertNotIn("{{ entry_dns_ru_port", backend)
         self.assertIn("{'source': '/etc/letsencrypt', 'target': 'letsencrypt'}", runtime_config)
         runtime_tasks = (
             ROOT / "roles/runtime_secrets/tasks/main.yml"

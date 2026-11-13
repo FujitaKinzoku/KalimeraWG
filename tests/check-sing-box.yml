@@ -160,6 +160,13 @@
               - sing_box_test_front_backend.outbounds[0].routing_mark == '0x1'
               - sing_box_test_front_backend.outbounds[1].tag == 'direct-ru'
               - sing_box_test_front_backend.outbounds[1].routing_mark == '0x2'
+              - sing_box_test_front_backend.outbounds[0].domain_resolver.server == 'bootstrap-unbound'
+              - sing_box_test_front_backend.outbounds[1].domain_resolver.server == 'entry-split-dns'
+              - >-
+                sing_box_test_front_backend.dns.servers
+                | selectattr('tag', 'equalto', 'entry-split-dns')
+                | map(attribute='server') | list == [entry_client_listen_address]
+              - sing_box_test_front_backend.dns.final == 'bootstrap-unbound'
               - sing_box_test_front_backend.route.final == 'direct-exit'
             fail_msg: >-
               Backend FRONT должен содержать только служебный peer, не иметь

@@ -45,11 +45,21 @@
       "tag": "direct-ru",
       "routing_mark": "{{ entry_ru_mark }}",
       "domain_resolver": {
-        "server": "bootstrap-unbound",
+        "server": "entry-split-dns",
         "strategy": "ipv4_only"
       }
     }
   ],
+{#
+   Российские назначения разрешает dnsmasq ENTRY, тот же, что обслуживает
+   клиентов AmneziaWG, а не зарубежный Unbound. dnsmasq отправляет .ru/.рф и
+   ru-domain в российский DoH (порт entry_dns_ru_port, через RU-прокси), а при
+   выключенном или упавшем прокси awg-dns-policy и ru-domain sync сами
+   переключают его на Unbound. Раньше backend разрешал всё через Unbound
+   (DoT за рубежом или DNS через EXIT): российский сайт за гео-CDN получал
+   адрес зарубежного узла, хотя трафик выходил с ENTRY. Порт 5354 напрямую
+   здесь не годится: он есть только пока работает служба RU-прокси.
+#}
 {#
    Здесь НЕ должно быть "default_interface". Эта опция привязывает исходящий
    сокет к WAN-интерфейсу и тем самым фиксирует и интерфейс, и исходный адрес
@@ -115,6 +125,12 @@
         "tag": "bootstrap-unbound",
         "server": "127.0.0.1",
         "server_port": {{ entry_dns_default_port }}
+      },
+      {
+        "type": "udp",
+        "tag": "entry-split-dns",
+        "server": "{{ entry_client_listen_address }}",
+        "server_port": 53
       }
     ],
     "final": "bootstrap-unbound",
