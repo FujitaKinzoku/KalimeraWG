@@ -10,26 +10,296 @@ case "${1:-}" in
     *) usage >&2; exit 2 ;;
 esac
 failures=0
+critical=0
+passed=0
 
-check() {
-    local label="$1"
-    shift
+{% raw %}
+# >>> kalimera-report: общий блок оформления отчёта.
+# Блок одинаков в awg-health, server-audit и kalimera-updates, совпадение
+# проверяет tests/test_report_style.py. Цвет, итоговая рамка и рекомендации
+# выводятся только в терминал. В файл, журнал, Ansible и Telegram-монитор
+# уходит прежний текст: без управляющих символов, с префиксами
+# OK/FAIL/WARN/UPD/INFO, по которым эти строки разбирают.
+# KALIMERA_REPORT_STYLE=fancy|plain нужен тестам; sudo эту переменную не
+# пропускает.
+case "${KALIMERA_REPORT_STYLE:-auto}" in
+    fancy) report_fancy=true ;;
+    plain) report_fancy=false ;;
+    *)
+        report_fancy=false
+        if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
+            report_fancy=true
+        fi
+        ;;
+esac
+report_reset=$'\033[0m'
+# Замечания для итоговой рамки: "FAIL|WARN<TAB>что не так<TAB>что сделать".
+# FAIL - работа каскада нарушена критически, WARN - каскад работает.
+report_notes=()
+report_box_lines=()
+
+# Строка результата: OK зелёная, FAIL и WARN жёлтые, UPD голубая.
+report_line() {
+    local level="$1" text="$2" color=''
+    if [[ "$report_fancy" == true ]]; then
+        case "$level" in
+            OK) color=$'\033[32m' ;;
+            FAIL|WARN) color=$'\033[33m' ;;
+            UPD) color=$'\033[36m' ;;
+        esac
+    fi
+    printf '%s%-4s %s%s\n' "$color" "$level" "$text" "${color:+$report_reset}"
+}
+
+report_note() {
+    report_notes+=("$1"$'\t'"$2"$'\t'"${3:-}")
+}
+
+# $1 - цвет рамки, $2 - ширина текста, $3 - строка, $4 - цвет строки.
+report_box_emit() {
+    local pad=$(( $2 - ${#3} ))
+    (( pad > 0 )) || pad=0
+    printf '%s│%s %s%s%s%*s %s│%s\n' "$1" "$report_reset" "${4:-}" "$3" \
+        "${4:+$report_reset}" "$pad" '' "$1" "$report_reset"
+}
+
+# Перенос по словам. Продолжение строки с маркером (→, ✗, !) выравнивается
+# по тексту после маркера.
+report_box_row() {
+    local lead rest hang line word has_word=false
+    local -a words=()
+    lead="${3%%[![:space:]]*}"
+    rest="${3#"$lead"}"
+    hang="$lead"
+    case "$rest" in
+        '→ '*|'✗ '*|'! '*) hang+='  ' ;;
+    esac
+    read -r -a words <<<"$rest" || true
+    line="$lead"
+    for word in "${words[@]}"; do
+        if [[ "$has_word" == true ]] && (( ${#line} + 1 + ${#word} > $2 )); then
+            report_box_emit "$1" "$2" "$line" "${4:-}"
+            line="$hang$word"
+        elif [[ "$has_word" == true ]]; then
+            line+=" $word"
+        else
+            line+="$word"
+        fi
+        has_word=true
+    done
+    report_box_emit "$1" "$2" "$line" "${4:-}"
+}
+
+# Итоговая рамка: $1 - OK (зелёная), WARN (жёлтая) или FAIL (красная),
+# $2 - заголовок, дальше строки содержимого.
+report_box() {
+    [[ "$report_fancy" == true ]] || return 0
+    local LC_ALL=C.UTF-8
+    local status="$1" title="$2" color width inner rule line
+    shift 2
+    case "$status" in
+        OK) color=$'\033[1;32m' ;;
+        WARN) color=$'\033[1;33m' ;;
+        *) color=$'\033[1;31m' ;;
+    esac
+    width="$(tput cols 2>/dev/null || true)"
+    [[ "$width" =~ ^[0-9]+$ ]] || width=80
+    (( width <= 100 )) || width=100
+    (( width >= 40 )) || width=40
+    inner=$(( width - 4 ))
+    printf -v rule '%*s' "$(( width - 2 ))" ''
+    rule="${rule// /─}"
+    printf '\n%s┌%s┐%s\n' "$color" "$rule" "$report_reset"
+    report_box_row "$color" "$inner" "$status  $title" "$color"
+    if (( $# > 0 )); then
+        printf '%s├%s┤%s\n' "$color" "$rule" "$report_reset"
+        for line in "$@"; do
+            report_box_row "$color" "$inner" "$line"
+        done
+    fi
+    printf '%s└%s┘%s\n' "$color" "$rule" "$report_reset"
+}
+
+# Замечания -> строки рамки в report_box_lines: сначала критичные (✗), потом
+# остальные (!). Одинаковая рекомендация печатается один раз после всех
+# замечаний, к которым она относится. Не больше 12 замечаний: остальные
+# видны в строках выше.
+report_note_lines() {
+    local severity marker note level text hint key shown=0 hidden=0 group_shown
+    local -a order=()
+    local -A texts=()
+    report_box_lines=()
+    for severity in FAIL WARN; do
+        marker='!'
+        [[ "$severity" != FAIL ]] || marker='✗'
+        order=()
+        texts=()
+        for note in "${report_notes[@]}"; do
+            IFS=$'\t' read -r level text hint <<<"$note" || true
+            [[ "$level" == "$severity" ]] || continue
+            key="k:$hint"
+            if [[ -z "${texts[$key]+set}" ]]; then
+                order+=("$key")
+                texts[$key]=''
+            fi
+            texts[$key]+="$text"$'\n'
+        done
+        for key in "${order[@]}"; do
+            group_shown=false
+            while IFS= read -r text; do
+                [[ -n "$text" ]] || continue
+                if (( shown < 12 )); then
+                    report_box_lines+=("$marker $text")
+                    shown=$((shown + 1))
+                    group_shown=true
+                else
+                    hidden=$((hidden + 1))
+                fi
+            done <<<"${texts[$key]}"
+            hint="${key#k:}"
+            if [[ "$group_shown" == true && -n "$hint" ]]; then
+                report_box_lines+=("  → $hint")
+            fi
+        done
+    done
+    if (( hidden > 0 )); then
+        report_box_lines+=("… и ещё замечаний: $hidden, они отмечены в строках выше")
+    fi
+}
+# <<< kalimera-report
+{% endraw %}
+
+# check - проверка, без которой каскад не работает или открыта граница
+# безопасности: её провал даёт красную рамку FAIL. check_minor - замечание:
+# трафик идёт, но нарушена гигиена (журналы, Fail2Ban, таймеры, срок
+# сертификата, синтаксис конфигурации работающей службы) - жёлтая рамка WARN.
+# Обе печатают FAIL и обе проваливают --strict: deploy по-прежнему требует
+# всех проверок. Код --strict: 1 - есть критичные ошибки, 3 - только
+# замечания; так server-audit отличает одно от другого.
+check() { run_check FAIL "$@"; }
+check_minor() { run_check WARN "$@"; }
+
+run_check() {
+    local severity="$1" label="$2"
+    shift 2
     if "$@" >/dev/null 2>&1; then
-        printf 'OK   %s\n' "$label"
+        check_passed "$label"
     else
-        printf 'FAIL %s\n' "$label"
-        failures=$((failures + 1))
+        check_failed "$severity" "$label" "$(health_hint "$label" "$@")"
     fi
 }
 
+check_passed() {
+    report_line OK "$1"
+    passed=$((passed + 1))
+}
+
+# $1 - FAIL или WARN, $2 - проверка, $3 - рекомендация, $4 - подробности.
+check_failed() {
+    report_line FAIL "$2${4:+ $4}"
+    failures=$((failures + 1))
+    [[ "$1" != FAIL ]] || critical=$((critical + 1))
+    report_note "$1" "$2" "$3"
+}
+
+# $4 - FAIL (по умолчанию) или WARN.
 check_value() {
-    local label="$1" actual="$2" expected="$3"
+    local label="$1" actual="$2" expected="$3" severity="${4:-FAIL}"
     if [[ "$actual" == "$expected" ]]; then
-        printf 'OK   %s\n' "$label"
+        check_passed "$label"
     else
-        printf 'FAIL %s (ожидалось %s, получено %s)\n' "$label" "$expected" "$actual"
-        failures=$((failures + 1))
+        check_failed "$severity" "$label" "$(health_hint "$label")" \
+            "(ожидалось $expected, получено $actual)"
     fi
+}
+
+# Рекомендация для непройденной проверки: по смыслу проверки, затем по
+# команде (служба или таймер systemd), иначе общая. Команды kalimera
+# запускаются без sudo; kalimera-deploy - на ENTRY, он настраивает весь
+# каскад.
+health_hint() {
+    local label="$1" hint='' unit
+    shift
+    case "$label" in
+        'запуск от root')
+            hint='запускайте от пользователя kalimera без sudo: awg-health --strict' ;;
+        'Ubuntu 24.04')
+            hint='поддерживается только Ubuntu 24.04; не обновляйте выпуск системы (do-release-upgrade)' ;;
+        'модуль AmneziaWG')
+            hint='модуль не собран под текущее ядро: sudo /usr/local/sbin/awg-kernel-guard, затем sudo reboot' ;;
+        *'завершилась с ошибкой'*)
+            hint='служба видна в sudo systemctl --failed; причина: sudo journalctl -u ИМЯ -b --no-pager; затем на ENTRY: kalimera-deploy --resume' ;;
+        *networkd*)
+            hint='на ENTRY: kalimera-deploy --resume (вернёт защиту правил маршрутизации)' ;;
+        *'только в RAM'*|*'журналирование UFW'*|*rsyslog*|*coredump*|*'не журналир'*|*'не сохраняет журналы'*)
+            hint='на ENTRY: kalimera-deploy --resume восстановит политику без журналов' ;;
+        *'mark 0x2'*|*'таблице 200'*|*'российский TUN'*|*'российского DoH'*|*'RU UDP'*|*'российский UDP'*|*'force_ru UDP'*|*'российского прокси'*|*sing-box*|*SOAX*)
+            hint='ru-proxy status; если SOCKS5 недоступен - ru-proxy-set (новые данные) или ru-proxy off' ;;
+        *'policy routing'*|*'mark 0x1'*|*'таблице 100'*|*'через EXIT'*|*'идут напрямую'*|*'цепочка маршрутизации'*|*ipset*|*'прямой'*|*'прямых'*|*'порт 25'*|*'служба маршрутизации'*|*'перенаправление DNS'*|*'принудительный DNS'*)
+            hint='sudo systemctl reload {{ entry_routing_service_name | default("awg-entry-routing.service") }}; если ошибка вернётся - на ENTRY: kalimera-deploy --resume' ;;
+        *handshake*)
+            hint='проверьте, что второй сервер каскада включён и хостинг не блокирует его UDP-порт; затем на ENTRY: kalimera-deploy --resume' ;;
+        *MTU*|*'полный профиль'*)
+            hint='на ENTRY: kalimera-deploy --resume (профиль AWG и MTU задаются при установке)' ;;
+        *'DNS EXIT'*)
+            hint='sudo systemctl restart unbound.service; если не помогло - на ENTRY: kalimera-deploy --resume' ;;
+        *DNS*|*Unbound*|*dnsmasq*|*резолвер*|*AAAA*|*'разрешение имён'*)
+            hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status' ;;
+        *Fail2Ban*)
+            hint='sudo systemctl restart fail2ban.service; если не помогло - на ENTRY: kalimera-deploy --resume' ;;
+        *'TLS-сертификат'*)
+            hint='sudo systemctl start certbot.service; origin-домен должен указывать на FRONT, TCP/80 открыт' ;;
+        *'TLS endpoint'*)
+            hint='проверьте DNS-запись домена и nginx: sudo systemctl status nginx.service --no-pager' ;;
+        *аплинк*)
+            hint='проверьте ресурс CDN: источник - origin-домен FRONT, HTTP/2, без кеширования; см. docs/front-relay.md' ;;
+        *'dest-сайт REALITY'*)
+            hint='reality-dest-switch list, затем reality-dest-switch set ДОМЕН' ;;
+        *'REALITY-порт ENTRY'*)
+            hint='на ENTRY: awg-health --strict (служба backend FRONT и правило UFW для адреса FRONT)' ;;
+        *'пороговое хранилище'*|*'systemd credentials'*)
+            hint='kalimera-secretctl status; если хранилище закрыто - на ENTRY: kalimera-deploy --resume' ;;
+        *VLESS*)
+            hint='vless-user list; при расхождении - на ENTRY: kalimera-deploy --resume' ;;
+        *синтаксис*)
+            hint='служба работает на прежней конфигурации, но после перезапуска не стартует; на ENTRY: kalimera-deploy --resume' ;;
+        *UFW*|*изолирован*|*изоляция*|*NAT*|*MSS*)
+            hint='на ENTRY: kalimera-deploy --resume восстановит правила UFW и iptables' ;;
+    esac
+    if [[ -z "$hint" && "${1:-}" == systemctl && "${2:-}" == is-active ]]; then
+        unit="${*: -1}"
+        if [[ "$unit" == *.timer ]]; then
+            hint="sudo systemctl enable --now $unit"
+        else
+            hint="причина: sudo systemctl status $unit --no-pager -l; после исправления: sudo systemctl restart $unit"
+        fi
+    fi
+    printf '%s\n' "${hint:-на ENTRY: kalimera-deploy --resume; если ошибка повторяется - сообщите вывод awg-health --strict}"
+}
+
+# Итог: рамка в терминале, прежняя строка GOOD/BAD в остальных случаях.
+health_finish() {
+    local title={{ ('awg-health ' ~ (awg_node_role | default(''))) | quote }}
+    if [[ "$report_fancy" == true ]]; then
+        report_note_lines
+        if (( failures == 0 )); then
+            report_box OK "$title: все проверки пройдены ($passed)"
+        elif (( critical == 0 )); then
+            report_box WARN "$title: каскад работает, замечаний: $failures" \
+                "${report_box_lines[@]}"
+        else
+            report_box FAIL "$title: работа каскада нарушена, критичных ошибок: $critical из $failures" \
+                "${report_box_lines[@]}"
+        fi
+    elif (( failures == 0 )); then
+        printf 'GOOD: все проверки пройдены\n'
+    else
+        printf 'BAD: ошибок проверки: %d\n' "$failures"
+    fi
+    (( failures > 0 )) || exit 0
+    [[ "$strict" == true ]] || exit 0
+    (( critical == 0 )) || exit 1
+    exit 3
 }
 
 has_rule() {
@@ -384,7 +654,7 @@ reality_ru_failover_synced() {
 
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
-check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+check_minor 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 # В этом блоке находятся только проверки ядра и сетевого профиля AWG.
 # FRONT получает общие политики security, operations и no-logs, но не
@@ -392,14 +662,14 @@ check 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
 check 'модуль AmneziaWG' modprobe -n amneziawg
 check_value 'пересылка IPv4' "$(sysctl -n net.ipv4.ip_forward)" 1
 check_value 'rp_filter all' "$(sysctl -n net.ipv4.conf.all.rp_filter)" 2
-check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1
+check_value 'ответы на ICMP echo отключены' "$(sysctl -n net.ipv4.icmp_echo_ignore_all)" 1 WARN
 check 'UFW активен' ufw_active
-check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
-check 'журналирование UFW отключено' ufw_logging_is_disabled
-check 'systemd journal хранится только в RAM' journald_is_volatile
-check 'постоянный rsyslog отключён' rsyslog_is_disabled
-check 'coredump не сохраняются' coredump_storage_is_disabled
-check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+check_minor 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check_minor 'журналирование UFW отключено' ufw_logging_is_disabled
+check_minor 'systemd journal хранится только в RAM' journald_is_volatile
+check_minor 'постоянный rsyslog отключён' rsyslog_is_disabled
+check_minor 'coredump не сохраняются' coredump_storage_is_disabled
+check_minor 'учёт входов хранится только в RAM' login_accounting_is_volatile
 {% endif %}
 {% if awg_node_role == 'exit' or (awg3_transit_enabled | default(false) | bool) %}
 check 'UFW ограничивает межсерверный AWG адресом второго сервера' \
@@ -414,27 +684,27 @@ check 'UFW не разрешает межсерверный AWG для всех 
     {{ security_interserver_listen_port | quote }}
 {% endif %}
 {% if awg_enable_fail2ban | default(true) | bool %}
-check 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
-check 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
-check 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
+check_minor 'Fail2Ban активен' systemctl is-active --quiet fail2ban.service
+check_minor 'строгая политика Fail2Ban применяется' fail2ban_sshd_policy_is_strict
+check_minor 'состояние Fail2Ban хранится только в RAM' fail2ban_state_is_volatile
 {% else %}
-printf 'OK   включение Fail2Ban намеренно отложено\n'
+check_passed 'включение Fail2Ban намеренно отложено'
 {% endif %}
 check 'SSH активен' systemctl is-active --quiet ssh.service
 {% if awg_node_role | default('') in ['entry', 'exit', 'front'] and security_manage_admin_account | default(false) | bool %}
-check 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
+check_minor 'рабочий администратор kalimera и ограниченный sudo' managed_admin_is_ready
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit', 'front'] %}
 {% if runtime_secrets_enabled | default(false) | bool %}
 check 'пороговое хранилище 2-of-N открыто и аутентифицировано' runtime_secrets_are_healthy
 check 'защищённые службы получают конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
-check 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
+check_minor 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
 {% if awg_telegram_monitor_enabled | default(false) | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
-    printf 'OK   запуск мониторинга Telegram отложен до финальной проверки\n'
+    check_passed 'запуск мониторинга Telegram отложен до финальной проверки'
 else
-    check 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
+    check_minor 'таймер мониторинга Telegram' systemctl is-active --quiet awg-telegram-monitor.timer
 fi
 {% endif %}
 {% endif %}
@@ -458,7 +728,7 @@ if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.ser
 elif systemctl is-failed --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     check 'служба совместимого AWG не завершилась с ошибкой' false
 else
-    printf 'OK   совместимый интерфейс AWG намеренно неактивен\n'
+    check_passed 'совместимый интерфейс AWG намеренно неактивен'
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
@@ -472,7 +742,7 @@ if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
 elif systemctl is-failed --quiet {{ awg3_mobile_service_name | quote }}; then
     check 'служба мобильного AWG не завершилась с ошибкой' false
 else
-    printf 'OK   мобильный интерфейс AWG намеренно неактивен\n'
+    check_passed 'мобильный интерфейс AWG намеренно неактивен'
     check 'внешний UDP/8443 неактивного мобильного AWG закрыт' {{ entry_mobile_firewall_path | quote }} check-absent
 fi
 check 'внешний UDP/53 не перехватывается мобильным AWG' {{ entry_mobile_firewall_path | quote }} check-dns-clean
@@ -497,10 +767,10 @@ check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
 check 'служба Unbound' systemctl is-active --quiet unbound.service
 check 'системный резолвер использует локальный Unbound' grep -Fxq 'DNS=127.0.0.1:{{ entry_dns_default_port | int }}' {{ entry_dns_resolved_dropin_path | quote }}
 check 'системное разрешение имён' getent ahostsv4 example.com
-check 'синтаксис dnsmasq' dnsmasq --test
-check 'синтаксис Unbound' unbound-checkconf
-check 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
-check 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
+check_minor 'синтаксис dnsmasq' dnsmasq --test
+check_minor 'синтаксис Unbound' unbound-checkconf
+check_minor 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
+check_minor 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
 check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} example.com A
 check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
@@ -517,7 +787,7 @@ fi
 check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
 check 'маршрут по умолчанию в таблице 100' has_default_route {{ entry_exit_table }} {{ entry_exit_interface | quote }}
 check 'mark 0x1 направляется через EXIT сервер' route_uses_interface 8.8.8.8 {{ entry_exit_mark | quote }} {{ entry_exit_interface | quote }}
-check 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
+check_minor 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
 check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
 check 'ipset российских сетей' ipset list ru
@@ -573,7 +843,7 @@ done <{{ entry_ru_direct_tcp_ports_file | quote }}
 if [[ "$direct_ports_present" == false ]]; then
     check 'политика прямых российских портов пуста' direct_bypass_absent
 else
-    printf 'OK   все прямые российские TCP-порты применены без ограничения multiport\n'
+    check_passed 'все прямые российские TCP-порты применены без ограничения multiport'
 fi
 check 'почтовый порт 25 не обходится' mail_port_25_absent
 check 'исходящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
@@ -603,7 +873,7 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
         check 'российский UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy ru
     fi
 else
-    printf 'OK   активен fail-open российского прокси\n'
+    check_passed 'активен fail-open российского прокси'
 fi
 {% if entry_ru_proxy_manual_disabled_flag is defined %}
 fi
@@ -635,7 +905,7 @@ check 'REALITY RU-маршрут синхронизирован с состоя�
 if [[ ! -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
     check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
 else
-    printf 'OK   запасной транспорт REALITY остановлен вместе с отключённым прокси\n'
+    check_passed 'запасной транспорт REALITY остановлен вместе с отключённым прокси'
 fi
 {% else %}
 check 'запасной транспорт REALITY прослушивает порт' tcp_port_listening {{ reality_fallback_port | int }}
@@ -702,12 +972,12 @@ nginx_no_logs_policy_is_active() {
 }
 
 check 'UFW активен' ufw_active
-check 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
-check 'журналирование UFW отключено' ufw_logging_is_disabled
-check 'systemd journal хранится только в RAM' journald_is_volatile
-check 'постоянный rsyslog отключён' rsyslog_is_disabled
-check 'coredump не сохраняются' coredump_storage_is_disabled
-check 'учёт входов хранится только в RAM' login_accounting_is_volatile
+check_minor 'UFW соответствует последней управляемой политике' ufw_matches_managed_snapshot
+check_minor 'журналирование UFW отключено' ufw_logging_is_disabled
+check_minor 'systemd journal хранится только в RAM' journald_is_volatile
+check_minor 'постоянный rsyslog отключён' rsyslog_is_disabled
+check_minor 'coredump не сохраняются' coredump_storage_is_disabled
+check_minor 'учёт входов хранится только в RAM' login_accounting_is_volatile
 # Xray-core поднимает исходящее REALITY-соединение к ENTRY лениво - только
 # когда через XHTTP приходит настоящий клиент. Во время deploy клиентов нет,
 # поэтому проверка established-соединения всегда падала бы, а health
@@ -977,13 +1247,13 @@ front_uplink_reaches_xray() {
 
 check 'служба Xray-core FRONT-релея' systemctl is-active --quiet {{ front_xray_service_name }}
 check 'служба Nginx FRONT-релея' systemctl is-active --quiet nginx.service
-check 'синтаксис Nginx FRONT-релея' nginx -t
+check_minor 'синтаксис Nginx FRONT-релея' nginx -t
 check 'реестр VLESS-пользователей согласован с Xray' front_vless_users_are_consistent
 check 'VLESS Encryption ML-KEM-768 включён на FRONT и в клиентских JSON' \
     front_vless_encryption_is_enabled
-check 'Xray не может изменять каталог конфигурации' front_xray_permissions_are_restricted
-check 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
-check 'TLS-сертификат FRONT origin-домена не близок к истечению' \
+check_minor 'Xray не может изменять каталог конфигурации' front_xray_permissions_are_restricted
+check_minor 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
+check_minor 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
 {% if 'direct' in front_access_modes %}
 check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_ready {{ front_direct_domain | quote }}
@@ -1008,17 +1278,10 @@ check 'аплинк packet-up через CDN доходит до Xray (GET бе�
 {% endif %}
 {% endif %}
 {% if front_entry_reality_stopped | default(false) | bool %}
-printf 'OK   REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси\n'
+check_passed 'REALITY-инбаунд ENTRY намеренно остановлен вместе с прокси'
 {% else %}
 check 'REALITY-порт ENTRY доступен с FRONT' front_entry_reality_reachable
 {% endif %}
 {% endif %}
 
-if [[ "$failures" -eq 0 ]]; then
-    printf 'GOOD: все проверки пройдены\n'
-    exit 0
-fi
-
-printf 'BAD: ошибок проверки: %d\n' "$failures"
-[[ "$strict" == true ]] && exit 1
-exit 0
+health_finish
