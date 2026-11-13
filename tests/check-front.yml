@@ -357,9 +357,21 @@
             mode: "0600"
           no_log: true
 
-        - name: Профиль с резервом из экспорта другого каскада
+        - name: Подготовка экспорта второго резервного каскада
+          ansible.builtin.copy:
+            content: "{{ front_test_vless_export.stdout | replace('edge.example.invalid', 'edge-reserve2.example.invalid') }}"
+            dest: "{{ front_test_root }}/reserve2-export.json"
+            mode: "0600"
+          no_log: true
+
+        - name: Профиль с двумя резервами из экспортов других каскадов
           ansible.builtin.command:
-            argv: ["{{ front_vless_user_command_path }}", auto, initial, "{{ front_test_root }}/reserve-export.json"]
+            argv:
+              - "{{ front_vless_user_command_path }}"
+              - auto
+              - initial
+              - "{{ front_test_root }}/reserve-export.json"
+              - "{{ front_test_root }}/reserve2-export.json"
           register: front_test_vless_auto
           changed_when: false
           no_log: true
@@ -391,9 +403,10 @@
             that:
               - >-
                 (front_test_vless_auto.stdout | from_json).outbounds | map(attribute='tag') | list
-                == ['kalimera-main', 'kalimera-reserve', 'direct', 'block']
+                == ['kalimera-main', 'kalimera-reserve-1', 'kalimera-reserve-2', 'direct', 'block']
               - (front_test_vless_auto.stdout | from_json).outbounds[0].settings.vnext[0].address == 'edge.example.invalid'
               - (front_test_vless_auto.stdout | from_json).outbounds[1].settings.vnext[0].address == 'edge-reserve.example.invalid'
+              - (front_test_vless_auto.stdout | from_json).outbounds[2].settings.vnext[0].address == 'edge-reserve2.example.invalid'
               - (front_test_vless_auto.stdout | from_json).routing.balancers[0].fallbackTag == 'kalimera-main'
               - (front_test_vless_auto.stdout | from_json).routing.balancers[0].strategy.type == 'leastLoad'
               - (front_test_vless_auto.stdout | from_json).routing.rules[-1].balancerTag == 'kalimera-auto'

@@ -473,7 +473,7 @@ def command_panels() -> None:
                 ("vless-user list", "пользователи и режим direct или CDN", "INFO"),
                 ("vless-user create ИМЯ [direct|cdn]", "создать пользователя и показать JSON", "INFO"),
                 ("vless-user export ИМЯ", "повторно показать JSON для импорта", "INFO"),
-                ("vless-user auto ИМЯ ФАЙЛ", "профиль с резервным каскадом", "INFO"),
+                ("vless-user auto ИМЯ ФАЙЛ...", "профиль с резервными каскадами (до 5)", "INFO"),
                 ("vless-user delete ИМЯ --yes", "отозвать пользователя с безопасным откатом", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,

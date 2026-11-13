@@ -291,9 +291,9 @@ def client_config(record: dict, settings: dict) -> dict:
     return profile
 
 
-# Профиль с резервом: два независимых каскада. Основной - CDN этого FRONT
-# (прямой путь только у FRONT без CDN), резервный - экспорт другого
-# каскада. Поведение выбрано по исходникам Xray-core
+# Профиль с резервом: до шести независимых каскадов. Основной - CDN этого
+# FRONT (прямой путь только у FRONT без CDN), резервные - экспорты других
+# каскадов в порядке очереди. Поведение выбрано по исходникам Xray-core
 # (app/router/strategy_leastload.go, app/observatory/burst) и проверено
 # живым тестом переключения на настоящем Xray:
 #
@@ -303,8 +303,18 @@ def client_config(record: dict, settings: dict) -> dict:
 #   С резервом в fallbackTag каждый запуск начинался бы через резервный
 #   каскад с другим внешним IP. Поэтому fallbackTag - основной путь.
 # * leastLoad сортирует по разбросу RTT, умноженному на корень из цены.
-#   Цена резерва 1e8 (множитель 10 000): резерв выбирается, только когда
-#   основной путь исключён, - разброс живого пути меньше таймаута 5 с.
+#   Цена первого резерва 1e8 (множитель 10 000): резерв выбирается, только
+#   когда основной путь исключён, - разброс живого пути меньше таймаута 5 с.
+#   Следующие резервы (до пяти, всего шесть каскадов) получают множители,
+#   растущие с равным шагом до 3e9. Больше нельзя: разброс живого пути
+#   доходит до 2,5 с (2,5e9 нс), а Xray переводит произведение в
+#   time.Duration (int64, до 9,2e18). При переполнении на amd64 получается
+#   отрицательное число, и последний резерв встал бы впереди основного.
+#   Шаг между резервами тем меньше, чем их больше (2 резерва - 300 000,
+#   5 резервов - 23), поэтому при многих резервах порядок между ними мягче:
+#   резерв с разбросом в 23 раза больше следующего уступит ему очередь.
+#   Цены задаются регулярными выражениями с якорями: без них совпадение по
+#   подстроке отдало бы kalimera-reserve-1 цену kalimera-reserve-10.
 # * Узел исключается, когда провалились 3 из 4 последних проверок
 #   (интервал 10 с - минимум Xray; проверки идут в случайные моменты
 #   раунда; на живом Xray резерв включался через 20-24 с настоящего
@@ -314,6 +324,11 @@ def client_config(record: dict, settings: dict) -> dict:
 #   каскадами с разными внешними IP. maxRTT не задан: на медленной
 #   мобильной сети он увёл бы трафик в резерв с другим IP без настоящего
 #   отказа; путь, который не отвечает за 5 с, и так считается провалом.
+#   Быстрее без ложных переключений нельзя: Xray проверяет путь не чаще
+#   раза в 10 с, и скорость определяется только числом провалов подряд.
+#   Модель алгоритма (Монте-Карло по healthping.go): 4 проверки и 0.5 -
+#   переключение в среднем через 26 с, обрыв на 10 с уводит в резерв в 6%
+#   случаев; 3 проверки - 15 с, но уже в 26% случаев.
 # * connectivity не задан. С ним Xray после неудачной проверки через каскад
 #   проверяет сеть обычным HTTP-клиентом и не записывает провал, если сеть
 #   «недоступна». На телефоне этот клиент разрешает имя через системный DNS,
@@ -336,7 +351,9 @@ def client_config(record: dict, settings: dict) -> dict:
 #   на iPhone с двумя настоящими каскадами.
 AUTO_BALANCER_TAG = "kalimera-auto"
 AUTO_MAIN_TAG = "kalimera-main"
-AUTO_RESERVE_TAG = "kalimera-reserve"
+AUTO_MAX_RESERVES = 5
+AUTO_FIRST_RESERVE_FACTOR = 10_000
+AUTO_FACTOR_BUDGET = 3_000_000_000
 AUTO_PROBE_URL = "https://www.gstatic.com/generate_204"
 AUTO_MAX_RESERVE_BYTES = 262144
 AUTO_HOSTNAME = re.compile(
@@ -345,7 +362,44 @@ AUTO_HOSTNAME = re.compile(
 )
 
 
-def load_reserve_outbound(source: str, settings: dict) -> dict:
+def reserve_tag(position: int) -> str:
+    return f"kalimera-reserve-{position}"
+
+
+def reserve_costs(count: int) -> list:
+    """Цены резервов по порядку: каждый следующий дороже предыдущего."""
+    factors = [AUTO_FIRST_RESERVE_FACTOR]
+    if count > 1:
+        step = int((AUTO_FACTOR_BUDGET / AUTO_FIRST_RESERVE_FACTOR) ** (1 / (count - 1)))
+        for _ in range(count - 1):
+            factors.append(factors[-1] * step)
+    return [
+        {"regexp": True, "match": f"^{reserve_tag(position)}$", "value": factor * factor}
+        for position, factor in enumerate(factors, 1)
+    ]
+
+
+def load_reserves(sources: list, settings: dict) -> list:
+    if len(sources) > AUTO_MAX_RESERVES:
+        fail(
+            f"Резервов не больше {AUTO_MAX_RESERVES} (всего {AUTO_MAX_RESERVES + 1} "
+            "каскадов): при большем числе Xray не может гарантировать, что "
+            "основной каскад останется первым.",
+            2,
+        )
+    if sources.count("-") > 1:
+        fail("Из stdin можно передать только один резерв", 2)
+    reserves = [
+        load_reserve_outbound(source, settings, reserve_tag(position))
+        for position, source in enumerate(sources, 1)
+    ]
+    addresses = [item["settings"]["vnext"][0]["address"] for item in reserves]
+    if len(set(addresses)) != len(addresses):
+        fail("Один и тот же каскад указан резервом дважды", 2)
+    return reserves
+
+
+def load_reserve_outbound(source: str, settings: dict, tag: str) -> dict:
     """Основной outbound из JSON, выданного 'vless-user export' другого каскада."""
     try:
         if source == "-":
@@ -423,11 +477,11 @@ def load_reserve_outbound(source: str, settings: dict) -> dict:
             2,
         )
     reserve = copy.deepcopy(reserve)
-    reserve["tag"] = AUTO_RESERVE_TAG
+    reserve["tag"] = tag
     return reserve
 
 
-def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
+def auto_config(record: dict, settings: dict, reserves: list) -> dict:
     # Основной путь - CDN этого каскада; прямой путь только у FRONT без CDN.
     mode = "cdn" if "cdn" in settings["access_modes"] else "direct"
     profile = base_profile(settings)
@@ -436,17 +490,18 @@ def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
         for server in profile["dns"].get("servers", [])
     ]
     main = proxy_outbound(record, settings, mode, AUTO_MAIN_TAG)
-    for outbound in (main, reserve):
+    cascades = [main, *reserves]
+    tags = [outbound["tag"] for outbound in cascades]
+    for outbound in cascades:
         sockopt = outbound["streamSettings"].setdefault("sockopt", {})
         sockopt["domainStrategy"] = "UseIPv4"
     profile["outbounds"] = [
-        main,
-        reserve,
+        *cascades,
         {"protocol": "freedom", "tag": "direct"},
         {"protocol": "blackhole", "tag": "block"},
     ]
     profile["burstObservatory"] = {
-        "subjectSelector": [AUTO_MAIN_TAG, AUTO_RESERVE_TAG],
+        "subjectSelector": tags,
         "pingConfig": {
             "destination": AUTO_PROBE_URL,
             "interval": "10s",
@@ -460,16 +515,14 @@ def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
         "balancers": [
             {
                 "tag": AUTO_BALANCER_TAG,
-                "selector": [AUTO_MAIN_TAG, AUTO_RESERVE_TAG],
+                "selector": tags,
                 "fallbackTag": AUTO_MAIN_TAG,
                 "strategy": {
                     "type": "leastLoad",
                     "settings": {
                         "expected": 1,
                         "tolerance": 0.5,
-                        "costs": [
-                            {"regexp": False, "match": AUTO_RESERVE_TAG, "value": 100000000},
-                        ],
+                        "costs": reserve_costs(len(reserves)),
                     },
                 },
             }
@@ -520,8 +573,8 @@ def print_export(record: dict, settings: dict) -> Path:
     return path
 
 
-def print_auto_export(record: dict, settings: dict, reserve: dict) -> Path:
-    payload = json_payload(auto_config(record, settings, reserve))
+def print_auto_export(record: dict, settings: dict, reserves: list) -> Path:
+    payload = json_payload(auto_config(record, settings, reserves))
     path = write_export(f"{record['name']}-auto.json", payload)
     emit_export(path, payload)
     return path
@@ -544,7 +597,11 @@ def main() -> int:
     auto.add_argument("name")
     auto.add_argument(
         "reserve",
-        help="JSON от 'vless-user export ИМЯ' резервного каскада; - читать из stdin",
+        nargs="+",
+        help=(
+            "JSON от 'vless-user export ИМЯ' резервных каскадов в порядке очереди; "
+            "- читать из stdin"
+        ),
     )
     delete = subparsers.add_parser("delete")
     delete.add_argument("name")
@@ -580,12 +637,13 @@ def main() -> int:
             record = next((item for item in users if item["name"] == args.name), None)
             if record is None:
                 fail(f"Пользователь {args.name} не найден", 2)
-            reserve = load_reserve_outbound(args.reserve, settings)
-            print_auto_export(record, settings, reserve)
+            reserves = load_reserves(args.reserve, settings)
+            print_auto_export(record, settings, reserves)
             print(
-                "Профиль с резервом: основной каскад - этот FRONT, резервный "
-                "включается только при недоступности основного. Для CDN-профиля "
-                "резерв должен быть CDN-экспортом второго каскада.",
+                "Профиль с резервом: основной каскад - этот FRONT, резервные "
+                "включаются по очереди, только когда недоступны все каскады "
+                "перед ними. Для CDN-профиля резервы должны быть CDN-экспортами "
+                "других каскадов.",
                 file=sys.stderr,
             )
             return 0
