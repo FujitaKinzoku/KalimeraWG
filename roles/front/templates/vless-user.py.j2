@@ -319,11 +319,17 @@ def client_config(record: dict, settings: dict) -> dict:
 #   «недоступна». На телефоне этот клиент разрешает имя через системный DNS,
 #   а DNS идёт в туннель - через тот самый упавший основной каскад. Проверка
 #   сети проваливается вместе с ним, провалы не записываются, и резерв
-#   включается только после устаревания старых результатов (80 с); на
-#   телефоне с настоящими каскадами переключения так и не дождались.
+#   включается только после устаревания старых результатов (80 с).
 #   Без connectivity при полном отсутствии сети
 #   проваливаются оба пути, живых нет, и балансировщик отдаёт fallbackTag -
 #   основной путь, так что метро и лифт в резерв не уводят.
+# * Адреса обоих каскадов Xray разрешает сам (sockopt.domainStrategy) через
+#   DNS по TCP напрямую (tcp+local), минуя маршрутизацию. Без этого имя
+#   сервера разрешает система, а системный DNS телефона идёт в туннель, то
+#   есть через балансировщик и основной каскад. Когда основной падал, имя
+#   резервного сервера не разрешалось, все проверки резерва проваливались
+#   (журнал HAPP: "error ping ... with kalimera-reserve: closed pipe"), живых
+#   путей не оставалось, и балансировщик держался за основной.
 AUTO_BALANCER_TAG = "kalimera-auto"
 AUTO_MAIN_TAG = "kalimera-main"
 AUTO_RESERVE_TAG = "kalimera-reserve"
@@ -421,8 +427,16 @@ def auto_config(record: dict, settings: dict, reserve: dict) -> dict:
     # Основной путь - CDN этого каскада; прямой путь только у FRONT без CDN.
     mode = "cdn" if "cdn" in settings["access_modes"] else "direct"
     profile = base_profile(settings)
+    profile["dns"]["servers"] = [
+        server if not isinstance(server, str) or "://" in server else f"tcp+local://{server}"
+        for server in profile["dns"].get("servers", [])
+    ]
+    main = proxy_outbound(record, settings, mode, AUTO_MAIN_TAG)
+    for outbound in (main, reserve):
+        sockopt = outbound["streamSettings"].setdefault("sockopt", {})
+        sockopt["domainStrategy"] = "UseIPv4"
     profile["outbounds"] = [
-        proxy_outbound(record, settings, mode, AUTO_MAIN_TAG),
+        main,
         reserve,
         {"protocol": "freedom", "tag": "direct"},
         {"protocol": "blackhole", "tag": "block"},

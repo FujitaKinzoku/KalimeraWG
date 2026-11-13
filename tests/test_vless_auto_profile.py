@@ -109,6 +109,22 @@ class AutoProfileTests(unittest.TestCase):
         rules = profile["routing"]["rules"]
         self.assertEqual(rules, [{"network": "tcp,udp", "balancerTag": "kalimera-auto", "type": "field"}])
 
+    def test_cascade_names_resolved_by_xray_outside_tunnel(self) -> None:
+        # Системный DNS телефона идёт в туннель, то есть через основной
+        # каскад: при его отказе имя резерва не разрешалось, и проверки
+        # резерва проваливались. Xray разрешает имена сам по TCP напрямую.
+        profile = self.ns["auto_config"](RECORD, self.settings, self.load(self.reserve_export))
+        for outbound in profile["outbounds"][:2]:
+            self.assertEqual(outbound["streamSettings"]["sockopt"], {"domainStrategy": "UseIPv4"})
+        servers = profile["dns"]["servers"]
+        self.assertTrue(servers)
+        self.assertTrue(all(server.startswith("tcp+local://") for server in servers))
+        # Обычный профиль и выгрузка резерва не меняются.
+        single = self.ns["client_config"](RECORD, self.settings)
+        self.assertNotIn("sockopt", single["outbounds"][0]["streamSettings"])
+        self.assertFalse(any("://" in server for server in single["dns"]["servers"]))
+        self.assertNotIn("sockopt", self.reserve_export["outbounds"][0]["streamSettings"])
+
     def test_front_without_cdn_uses_direct_path(self) -> None:
         direct_only = uplink.client_settings(front_access_modes=["direct"])
         reserve = self.load(self.reserve_export, direct_only)
