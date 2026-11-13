@@ -56,7 +56,8 @@ awg_full_upgrade() {
     apt-get "${apt_options[@]}" -y autoremove
 {% if awg_node_role | default('') == 'entry' %}
 
-    # Обновление systemd перезапускает systemd-networkd, а он мог удалить
+    # После обновления библиотек needrestart перезапускает systemd-networkd,
+    # а он мог удалить
     # правило fwmark -> таблица EXIT (на установках до v3.1.0 нет
     # networkd.conf.d/60-kalimerawg-policy-rules.conf). Без правила трафик
     # клиентов уходит с ENTRY без учёта гео. Применение идемпотентно.

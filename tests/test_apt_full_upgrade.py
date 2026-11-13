@@ -115,7 +115,7 @@ class FullUpgradeTests(unittest.TestCase):
             self.assertIn("Dpkg::Options::=--force-confdef", command)
 
     def test_entry_reapplies_policy_routing_after_packages(self) -> None:
-        # Обновление systemd перезапускает networkd, а он удалял правило
+        # needrestart после обновления libc перезапускал networkd, а он удалял правило
         # fwmark -> таблица EXIT: трафик клиентов уходил с ENTRY без гео.
         calls = run("entry")
         autoremove = next(i for i, call in enumerate(calls) if call.endswith(" -y autoremove"))
