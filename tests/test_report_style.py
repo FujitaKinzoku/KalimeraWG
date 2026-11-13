@@ -73,7 +73,7 @@ def bash(script: str, *args: str, style: str = "fancy", columns: str = "80") -> 
 
 def box_lines(output: str) -> list[str]:
     plain = ANSI.sub("", output)
-    return [line for line in plain.splitlines() if line[:1] in "┌│├└"]
+    return [line for line in plain.splitlines() if line and line[0] in "┌│├└"]
 
 
 class SharedBlockTests(unittest.TestCase):
@@ -139,7 +139,7 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("\x1b[32mOK   служба", result.stdout)
         self.assertIn("\x1b[1;32m┌", result.stdout)
-        self.assertIn("OK  awg-health entry: все проверки пройдены (1)", ANSI.sub("", result.stdout))
+        self.assertIn("OK awg-health entry: все проверки пройдены (1)", ANSI.sub("", result.stdout))
 
     def test_only_minor_failures_are_yellow_and_exit_3(self) -> None:
         result = self.run_health(
@@ -148,7 +148,7 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3, result.stderr)
         plain = ANSI.sub("", result.stdout)
         self.assertIn("\x1b[33mFAIL журналирование UFW отключено", result.stdout)
-        self.assertIn("WARN  awg-health entry: каскад работает, замечаний: 1", plain)
+        self.assertIn("WARN awg-health entry: каскад работает, замечаний: 1", plain)
         self.assertIn("→ на ENTRY: kalimera-deploy --resume восстановит политику без журналов", plain)
 
     def test_critical_failure_is_red_and_exit_1(self) -> None:

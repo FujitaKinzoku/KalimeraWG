@@ -215,7 +215,7 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("\x1b[36mUPD  доступен AmneziaWG", output)
         self.assertIn("\x1b[1;33m┌", output)
         plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
-        self.assertIn("WARN  kalimera-updates entry: доступно обновлений: 1", plain)
+        self.assertIn("WARN kalimera-updates entry: доступно обновлений: 1", plain)
         self.assertIn("→ на ENTRY: kalimera-deploy --resume", plain)
         self.assertNotIn("Доступно обновлений: 1;", plain)
 
