@@ -14,7 +14,6 @@ readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) 
 readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
 readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
-readonly exit_tunnel_ip={{ (cascade_check_exit_tunnel_ip | default('')) | quote }}
 readonly front_entry_host={{ (front_entry_address | default('')) | quote }}
 readonly front_entry_port={{ (front_entry_reality_port | default(0)) | int }}
 
@@ -152,35 +151,43 @@ check_dns() {
         route_ru='маршрут: Unbound (RU DoH недоступен, RU-прокси выключен)'
     fi
     dns_row 'DNS: yandex.ru (РФ) через клиентский резолвер' "$entry_client_listen" 53 yandex.ru "$route_ru" "$dns_hint"
-    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или рекурсия EXIT)' "$dns_hint"
+    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или EXIT по политике ENTRY)' "$dns_hint"
     dns_row 'DNS: example.com напрямую через Unbound' 127.0.0.1 "$entry_dns_port" example.com 'маршрут: Unbound на 127.0.0.1' "$dns_hint"
     if [[ "$ru_state" == active ]]; then
         dns_row 'DNS: yandex.ru напрямую через RU DoH' 127.0.0.1 "$entry_dns_ru_port" yandex.ru 'маршрут: RU DoH на 127.0.0.1' 'ru-proxy status; если SOCKS5 недоступен - ru-proxy-set или ru-proxy off'
     fi
 }
 
-# Шесть запросов по туннелю к резолверу EXIT: сколько ответили и средняя задержка.
+# Задержка через туннель: три TCP-подключения к example.com через интерфейс AWG
+# ENTRY–EXIT, то есть выход через EXIT. Считается только установление
+# соединения, без DNS. Рекурсивный DNS EXIT здесь не нужен: по умолчанию он
+# выключен (entry_dns_default_via_exit: false), и его адрес не отвечает.
 check_tunnel() {
-    local answer _ms ok=0 sum=0 avg
-    [[ -n "$exit_tunnel_ip" ]] || return 0
+    local output code lookup connect ms ok=0 sum=0 avg
+    [[ -n "$entry_exit_iface" ]] || return 0
     for _ in 1 2 3; do
-        if answer="$(dns_probe "$exit_tunnel_ip" 53 example.com)"; then
-            read -r _ _ms <<<"$answer"
-            ok=$((ok + 1))
-            sum=$((sum + _ms))
+        if output="$(curl -4 -sS -o /dev/null --max-time 10 --interface "$entry_exit_iface" -w '%{http_code} %{time_namelookup} %{time_connect}' https://example.com/ 2>/dev/null)"; then
+            read -r code lookup connect <<<"$output"
+            case "$code" in
+                2??|3??)
+                    ms="$(awk -v c="$connect" -v l="$lookup" 'BEGIN { printf "%d", (c - l) * 1000 }')"
+                    ok=$((ok + 1))
+                    sum=$((sum + ms))
+                    ;;
+            esac
         fi
     done
     if (( ok == 0 )); then
-        emit LINK FAIL 'туннель ENTRY–EXIT: DNS через туннель' '0 из 3 запросов' 'проверьте handshake туннеля: awg-health --strict; затем на ENTRY: kalimera-deploy --resume'
+        emit LINK FAIL 'туннель ENTRY–EXIT: TCP через туннель' 'ни одного подключения за 10 с' 'проверьте handshake туннеля: awg-health --strict; затем на ENTRY: kalimera-deploy --resume'
         return 0
     fi
     avg=$((sum / ok))
     if (( ok < 3 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: DNS через туннель' "$ok из 3 ответов, среднее $avg мс: часть запросов потеряна" 'проверьте канал до EXIT и нагрузку: awg-health --strict'
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict'
     elif (( avg > 250 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: DNS через туннель' "3 из 3 ответов, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict'
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict'
     else
-        emit LINK OK 'туннель ENTRY–EXIT: DNS через туннель' "3 из 3 ответов, среднее $avg мс"
+        emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)"
     fi
 }
 

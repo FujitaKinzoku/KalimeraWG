@@ -18,7 +18,6 @@ cascade_check_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
 cascade_check_exit_port: >-
   {{ hostvars[groups['exit'][0]].ssh_listen_port |
      default(hostvars[groups['exit'][0]].ansible_port | default(22)) }}
-cascade_check_exit_tunnel_ip: "{{ hostvars[groups['exit'][0]].exit_awg_address.split('/')[0] }}"
 cascade_check_front_present: "{{ (groups['front'] | default([])) | length > 0 }}"
 cascade_check_front_host: >-
   {{ hostvars[groups['front'][0]].ansible_host

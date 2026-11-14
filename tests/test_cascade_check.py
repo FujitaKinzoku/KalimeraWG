@@ -282,7 +282,6 @@ class KalimeraReportTests(unittest.TestCase):
                 entry_ru_proxy_enabled=True,
                 entry_ru_proxy_manual_disabled_flag=str(self.dir / "no-manual"),
                 entry_ru_proxy_disabled_flag=str(self.dir / "no-failopen"),
-                cascade_check_exit_tunnel_ip="10.77.0.1",
             ),
             encoding="utf-8",
         )
@@ -351,10 +350,13 @@ class CascadeRolePolicyTests(unittest.TestCase):
         self.assertIn("system: true", tasks)
         self.assertNotIn("password:", tasks)
 
-    def test_cascade_role_follows_security_on_every_host(self) -> None:
+    def test_cascade_role_follows_health_on_every_host(self) -> None:
+        # После health: к этому моменту роли уже задали переменные (адрес ENTRY
+        # для FRONT из роли front), которые попадают в отчёт kalimera-report.
         expected = {"site.yml": 3, "entry.yml": 1, "exit.yml": 1, "front.yml": 1}
         pattern = re.compile(
-            r"- role: security\n\s+when: awg_adoption_mode == 'apply'\n"
+            r"- role: health\n\s+when: awg_adoption_mode == 'apply'\n"
+            r"(?:\s+#[^\n]*\n)*"
             r"\s+- role: cascade_check\n"
         )
         for name, count in expected.items():

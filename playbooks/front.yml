@@ -37,8 +37,6 @@
       when: awg_adoption_mode == 'apply'
     - role: security
       when: awg_adoption_mode == 'apply'
-    - role: cascade_check
-      when: awg_adoption_mode == 'apply'
     - role: front
       when: awg_adoption_mode == 'apply'
     - role: operations
@@ -50,6 +48,8 @@
         - awg_adoption_mode == 'apply'
         - runtime_secrets_enabled | default(false) | bool
     - role: health
+      when: awg_adoption_mode == 'apply'
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
   post_tasks:
     - name: Фиксация целостности после автономного применения FRONT

@@ -441,8 +441,6 @@
       when: awg_adoption_mode == 'apply'
     - role: security
       when: awg_adoption_mode == 'apply'
-    - role: cascade_check
-      when: awg_adoption_mode == 'apply'
     - role: entry
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit
@@ -464,6 +462,10 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    # После health: к этому моменту все переменные ролей (например, адрес ENTRY
+    # для FRONT из роли front) известны и попадают в отчёт kalimera-report.
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
   post_tasks:
     - name: Передача закреплённых версий AmneziaWG управляющему компьютеру
@@ -502,8 +504,6 @@
       when: awg_adoption_mode == 'apply'
     - role: security
       when: awg_adoption_mode == 'apply'
-    - role: cascade_check
-      when: awg_adoption_mode == 'apply'
     - role: exit
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit
@@ -515,6 +515,8 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
 
 # Опциональный третий узел (docs/front-relay.md) - группа `front` в inventory
@@ -560,8 +562,6 @@
       when: awg_adoption_mode == 'apply'
     - role: security
       when: awg_adoption_mode == 'apply'
-    - role: cascade_check
-      when: awg_adoption_mode == 'apply'
     - role: front
       when: awg_adoption_mode == 'apply'
     - role: operations
@@ -569,6 +569,8 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
 
 - name: Проверка DNS зарубежной ветки через рекурсивный резолвер EXIT
