@@ -26,3 +26,8 @@ cascade_check_front_port: >-
   {{ hostvars[groups['front'][0]].ssh_listen_port |
      default(hostvars[groups['front'][0]].ansible_port | default(22))
      if (groups['front'] | default([]) | length > 0) else 22 }}
+# CDN: домен и признак берутся из inventory FRONT (front_cdn_domain, front_access_modes).
+cascade_check_cdn_enabled: "{{ (groups['front'] | default([]) | length > 0) and ('cdn' in (hostvars[groups['front'][0]].front_access_modes | default([]))) }}"
+cascade_check_cdn_domain: >-
+  {{ hostvars[groups['front'][0]].front_cdn_domain | default('')
+     if (groups['front'] | default([]) | length > 0) else '' }}

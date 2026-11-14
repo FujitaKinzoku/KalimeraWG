@@ -15,6 +15,8 @@ readonly exit_port={{ cascade_check_exit_port | int }}
 readonly front_present={{ 'true' if (cascade_check_front_present | bool) else 'false' }}
 readonly front_host={{ cascade_check_front_host | quote }}
 readonly front_port={{ cascade_check_front_port | int }}
+readonly cdn_enabled={{ 'true' if (cascade_check_cdn_enabled | bool) else 'false' }}
+readonly cdn_domain={{ cascade_check_cdn_domain | quote }}
 
 {% raw %}
 usage() { echo 'Использование: cascade-check'; }
@@ -333,6 +335,44 @@ collect_remote() {
     fi
 }
 
+# Цвет и отметка строки детального отчёта: OK - зелёный, WARN - жёлтый, FAIL -
+# красный. Без терминала - прежний формат report_line.
+status_line() {
+    local color
+    if [[ "$report_fancy" != true ]]; then
+        report_line "$1" "$2"
+        return 0
+    fi
+    case "$1" in
+        OK) color=$'\033[32m' ;;
+        WARN) color=$'\033[33m' ;;
+        *) color=$'\033[31m' ;;
+    esac
+    printf '%s%-4s %s%s\n' "$color" "$1" "$2" "$report_reset"
+}
+
+# CDN с точки зрения ENTRY: TLS-рукопожатие с проверкой сертификата и ответ
+# edge-узла по HTTPS без тела запроса. Аплинк через CDN проверяет FRONT: его
+# строки CDN попадают в одну группу сводки.
+cdn_rows() {
+    local output code appconnect total tls_ms ms
+    if output="$(curl -4 -sS -o /dev/null --max-time 10 -w '%{http_code} %{time_appconnect} %{time_total}' "https://$cdn_domain/" 2>/dev/null)"; then
+        read -r code appconnect total <<<"$output"
+        tls_ms="$(awk -v t="$appconnect" 'BEGIN { printf "%d", t * 1000 }')"
+        ms="$(awk -v t="$total" 'BEGIN { printf "%d", t * 1000 }')"
+        case "$code" in
+            5??)
+                emit_row CDN WARN 'CDN: HTTPS-ответ edge' "HTTP $code, TLS за $tls_ms мс" 'edge CDN отвечает ошибкой: проверьте origin-домен FRONT и настройки CDN в панели провайдера' "$ms"
+                ;;
+            *)
+                emit_row CDN OK 'CDN: TLS и HTTPS' "TLS за $tls_ms мс, HTTP $code, всего $ms мс" '' "$ms"
+                ;;
+        esac
+    else
+        emit_row CDN FAIL 'CDN: TLS и HTTPS' 'нет ответа или сертификат не прошёл проверку за 10 с' 'проверьте домен CDN, сертификат origin и настройки CDN; на FRONT: awg-health --strict'
+    fi
+}
+
 section_title() {
     if [[ "$report_fancy" == true ]]; then
         printf '\n\033[1;36m%s\033[0m\n' "$1"
@@ -363,10 +403,11 @@ print_recommendations() {
         done
         if [[ "$severity" == FAIL ]]; then
             marker='✗'
+            color=$'\033[31m'
         else
             marker='!'
+            color=$'\033[33m'
         fi
-        color=$'\033[33m'
         for key in "${order[@]}"; do
             if [[ "$printed" == false ]]; then
                 printf '\nРекомендации:\n'
@@ -431,7 +472,7 @@ build_summary() {
     local total_ok=0 total_warn=0 total_fail=0
     local dns_total=0 dns_passed=0 dns_worst=OK
 
-    for section in ENTRY EXIT FRONT LINK DNS; do
+    for section in ENTRY EXIT FRONT LINK CDN DNS; do
         ok="${counts[$section:OK]:-0}"
         warn="${counts[$section:WARN]:-0}"
         fail="${counts[$section:FAIL]:-0}"
@@ -492,6 +533,24 @@ build_summary() {
         [[ -z "$value" ]] || text+=": $value"
         sum_add "$color" "$text"
     done <"$rows_file"
+
+    sum_head 'CDN'
+    if [[ "$cdn_enabled" != true ]]; then
+        sum_add "$c_info" 'CDN не используется в каскаде'
+    else
+        while IFS= read -r line; do
+            split_row "$line"
+            [[ "$seg" == CDN ]] || [[ "$seg" == FRONT && "$label" == *CDN* ]] || continue
+            case "$status" in
+                OK) color="$c_info" ;;
+                WARN) color="$c_warn" ;;
+                *) color="$c_fail" ;;
+            esac
+            text="$label"
+            [[ -z "$value" ]] || text+=": $value"
+            sum_add "$color" "$text"
+        done <"$rows_file"
+    fi
 
     sum_head 'DNS'
     while IFS= read -r line; do
@@ -565,17 +624,18 @@ print_summary() {
 
 render() {
     local section seg status label value hint text line
-    local -a sections=(ENTRY DNS LINK EXIT FRONT)
+    local -a sections=(ENTRY DNS LINK CDN EXIT FRONT)
     local -A titles=()
     titles[ENTRY]='ENTRY: локальные проверки'
     titles[DNS]='DNS: резолверы и маршруты'
     titles[LINK]='СВЯЗИ КАСКАДА: задержки и выход'
     titles[EXIT]='EXIT: удалённый отчёт'
     titles[FRONT]='FRONT: удалённый отчёт'
+    titles[CDN]='CDN: проверка с ENTRY'
 
     for section in "${sections[@]}"; do
         section_title "${titles[$section]}"
-        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+        if [[ ( "$section" == FRONT && "$front_present" != true ) || ( "$section" == CDN && "$cdn_enabled" != true ) ]]; then
             printf 'в каскаде не используется\n'
             continue
         fi
@@ -584,7 +644,7 @@ render() {
             [[ "$seg" == "$section" ]] || continue
             text="$label"
             [[ -z "$value" ]] || text+=": $value"
-            report_line "$status" "$text"
+            status_line "$status" "$text"
             counts["$section:$status"]=$(( ${counts["$section:$status"]:-0} + 1 ))
             [[ "$status" == OK ]] || report_note "$status" "$text" "$hint"
         done <"$rows_file"
@@ -609,6 +669,9 @@ main() {
 
     collect_local
     link_rows
+    if [[ "$cdn_enabled" == true ]]; then
+        cdn_rows
+    fi
     collect_remote EXIT "$exit_host" "$exit_port"
     if [[ "$front_present" == true ]]; then
         collect_remote FRONT "$front_host" "$front_port"

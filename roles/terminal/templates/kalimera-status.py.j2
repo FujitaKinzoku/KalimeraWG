@@ -63,6 +63,10 @@ GREEN = "\033[1;32m"
 YELLOW = "\033[1;33m"
 WHITE = "\033[1;37m"
 MAGENTA = "\033[1;35m"
+RED = "\033[1;31m"
+# Схема цветов: зелёный - OK, синий - информация, жёлтый - нужно действие или
+# есть несоответствие, красный - критическая ошибка, розовый - требуется
+# перезагрузка.
 DIM = "\033[2m"
 BOOT_GRACE_SECONDS = 120
 STARTUP_WAIT_SECONDS = 10
@@ -334,7 +338,8 @@ def panel(
     for label, value, level in rows:
         prefix = (
             "✓ " if level == "OK"
-            else "! " if level in {"WARN", "FAIL", "REBOOT"}
+            else "✗ " if level == "FAIL"
+            else "! " if level in {"WARN", "REBOOT"}
             else "↑ " if level == "UPD"
             else ""
         )
@@ -348,10 +353,10 @@ def panel(
             value_text = f"{value_part:<{value_width}}"
             value_colour = (
                 GREEN if level == "OK"
-                else YELLOW if level in {"WARN", "FAIL"}
+                else RED if level == "FAIL"
+                else YELLOW if level in {"WARN", "UPD", "NOTE"}
                 else MAGENTA if level == "REBOOT"
-                else CYAN if level == "UPD"
-                else WHITE
+                else BLUE
             )
             print(
                 paint("│ ", BLUE)
@@ -389,7 +394,7 @@ def updates_panel() -> None:
         label = UPDATE_LABELS.get(fields[1], fields[1])
         rows.append((label, fields[2], "UPD"))
         if len(fields) > 3 and fields[3]:
-            rows.append(("", "→ " + fields[3], "INFO"))
+            rows.append(("", "→ " + fields[3], "NOTE"))
     if rows:
         panel("ДОСТУПНЫ ОБНОВЛЕНИЯ · kalimera-updates", rows)
 
@@ -578,7 +583,7 @@ def command_panels() -> None:
                 ("nano r1.json", "2. здесь: вставить JSON и сохранить; для следующих - r2.json и т.д.", "INFO"),
                 ("vless-user auto ИМЯ r1.json [r2.json ...]", "3. профиль: этот FRONT - основной, резервы по порядку файлов, до 5", "INFO"),
                 ("rm r1.json r2.json", "4. удалить файлы: в них ключи резервных каскадов", "INFO"),
-                ("Happ для iOS", "выключите No Limit Mode, иначе резерв не включится", "WARN"),
+                ("Happ для iOS", "выключите No Limit Mode, иначе резерв не включится", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )

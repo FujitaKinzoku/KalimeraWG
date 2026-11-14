@@ -58,6 +58,8 @@ def cascade_values(directory: Path, key: Path | None = None) -> dict:
         "cascade_check_front_present": True,
         "cascade_check_front_host": "192.0.2.30",
         "cascade_check_front_port": 56777,
+        "cascade_check_cdn_enabled": True,
+        "cascade_check_cdn_domain": "cdn.example.invalid",
     }
 
 
@@ -328,6 +330,33 @@ class CascadeCheckTests(unittest.TestCase):
         self.assertIn("в каскаде не используется", result.stdout)
         self.assertNotIn("FRONT: OK", result.stdout)
 
+    def test_cdn_group_combines_the_edge_probe_and_front_checks(self) -> None:
+        self.rows.write_text(
+            row("CDN", "OK", "CDN: TLS и HTTPS", "TLS за 35 мс, HTTP 404, всего 80 мс", "", "80")
+            + row("FRONT", "OK", "TLS endpoint CDN доступен"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n")
+        plain = ANSI.sub("", result.stdout)
+        # Заголовок группы - отдельная строка сводки; заголовок раздела деталей
+        # ("CDN: проверка с ENTRY") на отдельной строке не стоит.
+        group = plain.index("\nCDN\n")
+        self.assertIn("CDN: TLS и HTTPS", plain[group:])
+        self.assertIn("TLS endpoint CDN доступен", plain[group:])
+        self.assertLess(plain.index("\nСВЯЗИ И ЗАДЕРЖКИ\n"), group)
+        self.assertLess(group, plain.index("\nDNS\n"))
+
+    def test_cdn_group_says_when_cdn_is_not_used(self) -> None:
+        text = self.script.read_text(encoding="utf-8")
+        self.assertIn("readonly cdn_enabled=true", text)
+        self.script.write_text(
+            text.replace("readonly cdn_enabled=true", "readonly cdn_enabled=false"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n")
+        self.assertIn("CDN не используется в каскаде", result.stdout)
+        self.assertIn("в каскаде не используется", result.stdout)
+
     def test_block_is_identical_to_awg_health(self) -> None:
         self.assertEqual(
             shared_block(self.script.read_text(encoding="utf-8")),
@@ -474,6 +503,20 @@ class CascadeRolePolicyTests(unittest.TestCase):
         )
         self.assertIn('"ПЕРЕЗАГРУЗКА"', status)
         self.assertIn('("Статус", "перезагрузка не требуется", "OK")', status)
+
+    def test_menu_colours_follow_the_scheme(self) -> None:
+        # Зелёный - OK, синий - информация, жёлтый - действие или несоответствие,
+        # красный - критическая ошибка.
+        status = (ROOT / "roles" / "terminal" / "templates" / "kalimera-status.py.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('RED = "\\033[1;31m"', status)
+        self.assertIn('else RED if level == "FAIL"', status)
+        self.assertIn('else YELLOW if level in {"WARN", "UPD", "NOTE"}', status)
+        self.assertIn('rows.append(("", "→ " + fields[3], "NOTE"))', status)
+        self.assertIn(
+            '"выключите No Limit Mode, иначе резерв не включится", "INFO"', status
+        )
 
     def test_admin_gateway_allows_only_the_named_command(self) -> None:
         gateway = (
