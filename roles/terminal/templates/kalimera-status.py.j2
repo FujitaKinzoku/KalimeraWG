@@ -334,7 +334,7 @@ def panel(
     for label, value, level in rows:
         prefix = (
             "✓ " if level == "OK"
-            else "! " if level in {"WARN", "FAIL"}
+            else "! " if level in {"WARN", "FAIL", "REBOOT"}
             else "↑ " if level == "UPD"
             else ""
         )
@@ -349,6 +349,7 @@ def panel(
             value_colour = (
                 GREEN if level == "OK"
                 else YELLOW if level in {"WARN", "FAIL"}
+                else MAGENTA if level == "REBOOT"
                 else CYAN if level == "UPD"
                 else WHITE
             )
@@ -394,34 +395,23 @@ def updates_panel() -> None:
 
 
 def reboot_required_panel() -> None:
-    """Показать уведомление о необходимости перезагрузки, если перезагрузка требуется."""
-    try:
-        Path("/var/run/reboot-required").stat()
-        reboot_required = True
-    except OSError:
-        reboot_required = False
+    """Показать строку о перезагрузке в общем стиле панелей, если она требуется.
 
-    if reboot_required:
-        print(paint("\n", MAGENTA))
-        width = shutil.get_terminal_size((100, 24)).columns
-        panel_width = max(24, min(TABLE_MAX_WIDTH, width - 2))
-        top = "┌" + "─" * (panel_width - 2) + "┐"
-        bottom = "└" + "─" * (panel_width - 2) + "┘"
-
-        message = "⚠ ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА"
-        padding = (panel_width - len(message) - 4) // 2
-        msg_line = "│ " + " " * padding + message + " " * (panel_width - len(message) - 4 - padding) + " │"
-
-        print(paint(top, MAGENTA))
-        print(paint(msg_line, MAGENTA))
-
-        detail_line = "│ Выполните: sudo systemctl reboot" + " " * (panel_width - len("│ Выполните: sudo systemctl reboot") - 2) + "│"
-        print(paint(detail_line, MAGENTA))
-        print(paint(bottom, MAGENTA))
-        print(paint("\n", MAGENTA))
-
-        # Send Telegram notification if configured
-        send_telegram_reboot_notification()
+    Строка выводится последней в меню входа. Рамка и выравнивание берутся из
+    panel(), поэтому правый край совпадает с остальными блоками; розовым
+    окрашивается только значение статуса.
+    """
+    if not Path("/var/run/reboot-required").exists():
+        return
+    panel(
+        "ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА",
+        [
+            ("Статус", "обновления системы требуют перезагрузки сервера", "REBOOT"),
+            ("Команда", "sudo systemctl reboot", "INFO"),
+        ],
+        preferred_label_width=COMMAND_LABEL_WIDTH,
+    )
+    send_telegram_reboot_notification()
 
 
 def send_telegram_reboot_notification() -> None:
@@ -665,6 +655,7 @@ def main() -> int:
         updates_panel()
         if with_commands:
             command_panels()
+        reboot_required_panel()
         return 0
 
     old_active = service_active(f"awg-quick@{CONFIG['legacy_interface']}.service")
@@ -788,9 +779,9 @@ def main() -> int:
         ],
     )
     updates_panel()
-    reboot_required_panel()
     if with_commands:
         command_panels()
+    reboot_required_panel()
     return 0
 
 
