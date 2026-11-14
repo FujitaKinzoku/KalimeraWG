@@ -490,6 +490,9 @@ class CascadeRolePolicyTests(unittest.TestCase):
         self.assertIn("$SSH_CONNECTION", source)
         self.assertIn("become: false", source)
         self.assertIn("security_cascade_report_source_ipv4", source)
+        # Запасной путь: маршрут с самого ENTRY, а не с сервера, куда он идёт.
+        self.assertIn("delegate_to: \"{{ groups['entry'][0] }}\"", source)
+        self.assertIn("/usr/sbin/ip", source)
         # Адрес выбирается в pre_tasks EXIT и FRONT, то есть до их ролей.
         plays = {
             "site.yml": ("Настройка EXIT сервера", "Настройка FRONT сервера"),
