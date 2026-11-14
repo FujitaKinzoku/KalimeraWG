@@ -1,0 +1,30 @@
+---
+# Адрес, с которого ENTRY подключается к этому серверу. Сам сервер видит его в
+# SSH_CONNECTION сессии деплоя, поэтому задавать его вручную не нужно: ключ отчёта
+# cascade-check пускается ровно с этого адреса, в том числе за NAT. Задача без
+# become - sudo сбросил бы SSH_CONNECTION. Ничего не меняет на сервере; вызывается
+# из pre_tasks плейбуков EXIT и FRONT, то есть до их ролей.
+- name: Адрес ENTRY, с которого он подключается к этому серверу
+  ansible.builtin.command:
+    argv: [/bin/sh, -c, 'printf "%s" "$SSH_CONNECTION"']
+  register: cascade_check_connection
+  changed_when: false
+  become: false
+  when: (hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4 | default('')) | length == 0
+
+- name: Выбор адреса ENTRY для отчёта cascade-check
+  ansible.builtin.set_fact:
+    security_cascade_report_source_ipv4: >-
+      {{ hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4
+         if (hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4 | default('')) | length > 0
+         else ((cascade_check_connection.stdout | default('')).split() + [''])[0] }}
+
+- name: Проверка адреса ENTRY для отчёта cascade-check
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - security_cascade_report_source_ipv4 is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+      - security_cascade_report_source_ipv4 is not match('^127\.')
+    fail_msg: >-
+      Не удалось определить адрес ENTRY, с которого он подключается к этому серверу.
+      Задайте cascade_check_entry_source_ipv4 во inventory ENTRY.
