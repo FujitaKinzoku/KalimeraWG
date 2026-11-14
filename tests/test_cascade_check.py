@@ -362,6 +362,30 @@ class CascadeRolePolicyTests(unittest.TestCase):
                 text = (ROOT / "playbooks" / name).read_text(encoding="utf-8")
                 self.assertEqual(len(pattern.findall(text)), count)
 
+    def test_entry_source_address_is_checked_before_any_entry_role(self) -> None:
+        # ENTRY часто управляется локально (ansible_host 127.0.0.1): без явного
+        # внешнего адреса from= записался бы как 127.0.0.1. Проверка - в pre_tasks
+        # ENTRY, то есть до ролей, которые что-то меняют на сервере.
+        for name in ("site.yml", "entry.yml"):
+            with self.subTest(playbook=name):
+                text = (ROOT / "playbooks" / name).read_text(encoding="utf-8")
+                start = text.index("Настройка ENTRY сервера")
+                check = text.index("Проверка внешнего адреса ENTRY для отчёта cascade-check", start)
+                roles = text.index("roles:", start)
+                self.assertLess(start, check)
+                self.assertLess(check, roles)
+                self.assertIn("cascade_check_entry_source_ipv4", text)
+
+    def test_report_source_uses_the_explicit_entry_address(self) -> None:
+        defaults = (ROOT / "roles" / "security" / "defaults" / "main.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4 | default("
+            "hostvars[groups['entry'][0]].ansible_host)",
+            defaults,
+        )
+
     def test_admin_gateway_allows_only_the_named_command(self) -> None:
         gateway = (
             ROOT / "roles" / "security" / "templates" / "kalimera-admin-command.sh.j2"

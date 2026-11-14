@@ -29,7 +29,9 @@ security_admin_command_path: /usr/local/libexec/kalimera-admin-command
 # административный вход этими правилами не ограничивается.
 security_cascade_report_enabled: "{{ awg_node_role | default('') in ['exit', 'front'] }}"
 security_cascade_report_user: kalimera-report
-security_cascade_report_source_ipv4: "{{ hostvars[groups['entry'][0]].ansible_host }}"
+# Внешний IPv4 ENTRY, с которого он ходит на EXIT и FRONT. Если ansible_host ENTRY
+# локальный (ENTRY управляет сам себе), задайте cascade_check_entry_source_ipv4.
+security_cascade_report_source_ipv4: "{{ hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4 | default(hostvars[groups['entry'][0]].ansible_host) }}"
 security_runtime_secrets_export_path: >-
   {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
 security_admin_authorized_keys: []
