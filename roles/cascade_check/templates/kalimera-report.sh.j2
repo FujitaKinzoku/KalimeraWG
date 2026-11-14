@@ -161,9 +161,9 @@ check_dns() {
 
 # Шесть запросов по туннелю к резолверу EXIT: сколько ответили и средняя задержка.
 check_tunnel() {
-    local attempt answer _ms ok=0 sum=0 avg
+    local answer _ms ok=0 sum=0 avg
     [[ -n "$exit_tunnel_ip" ]] || return 0
-    for attempt in 1 2 3; do
+    for _ in 1 2 3; do
         if answer="$(dns_probe "$exit_tunnel_ip" 53 example.com)"; then
             read -r _ _ms <<<"$answer"
             ok=$((ok + 1))
