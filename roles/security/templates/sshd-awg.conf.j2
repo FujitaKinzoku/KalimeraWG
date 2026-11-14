@@ -18,17 +18,20 @@ RequiredRSASize 2048
 {% set finalize_admin = security_finalize_admin_access | default(false) | bool %}
 {% set managed_admin = security_admin_user if manage_admin else ansible_user %}
 {% set effective_root_login = 'no' if (manage_admin and finalize_admin) else ssh_root_login %}
+{# Отдельный токен user@адрес только для отчёта cascade-check: основной администратор
+   по-прежнему входит без ограничения адреса. Токен пуст, если отчёт не включён. #}
+{% set cascade_report_allow = (' ' ~ security_cascade_report_user ~ '@' ~ security_cascade_report_source_ipv4) if (security_cascade_report_enabled | default(false) | bool) else '' %}
 PermitRootLogin {{ effective_root_login }}
 PermitEmptyPasswords no
 {% if manage_admin and finalize_admin %}
-AllowUsers {{ managed_admin }}
+AllowUsers {{ managed_admin }}{{ cascade_report_allow }}
 {% elif manage_admin %}
 {# Выражение, а не {% if %} в конце строки: Ansible рендерит с trim_blocks,
    и перевод строки после {% endif %} склеивал AllowUsers с "Banner none".
    sshd получал "AllowUsers kalimera rootBanner none" и отказывал root. #}
-AllowUsers {{ managed_admin }} root{{ (' ' ~ ansible_user) if ansible_user not in [managed_admin, 'root'] else '' }}
+AllowUsers {{ managed_admin }} root{{ (' ' ~ ansible_user) if ansible_user not in [managed_admin, 'root'] else '' }}{{ cascade_report_allow }}
 {% else %}
-AllowUsers {{ managed_admin }}
+AllowUsers {{ managed_admin }}{{ cascade_report_allow }}
 {% endif %}
 Banner none
 DebianBanner no

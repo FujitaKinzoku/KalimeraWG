@@ -245,6 +245,7 @@ systemctl --failed --no-pager
 | Задача | Команды |
 |---|---|
 | Состояние | `kalimera-status`, `awg-health --strict`, `server-audit` |
+| Полная проверка каскада (на ENTRY) | `cascade-check`: ENTRY, EXIT, FRONT, связи и DNS; итог OK / WARN / FAIL |
 | Клиенты AmneziaWG | `vpn-user ИМЯ ПРОФИЛЬ`, `vpn-user list`, `vpn-user delete ИМЯ` |
 | Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete`; профиль с резервным каскадом: `vless-user auto ИМЯ ФАЙЛ` |
 | Маршруты доменов | `ru-domain add`, `se-domain add`, `entry-domain add` |

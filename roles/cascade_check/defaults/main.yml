@@ -1,0 +1,33 @@
+---
+# cascade-check на ENTRY проверяет весь каскад. EXIT и FRONT отвечают отчётом
+# kalimera-report по отдельному ключу: он разрешён только с адреса ENTRY, без
+# терминала, пробросов и любой другой команды. Основной административный вход
+# на EXIT и FRONT этими правилами не ограничивается (см. security).
+cascade_check_report_path: /usr/local/sbin/kalimera-report
+cascade_check_script_path: /usr/local/sbin/cascade-check
+cascade_check_key_dir: /etc/kalimera/cascade-check
+cascade_check_key_path: /etc/kalimera/cascade-check/id_ed25519
+cascade_check_known_hosts_path: /etc/kalimera/cascade-check/known_hosts
+cascade_check_user: "{{ security_cascade_report_user }}"
+cascade_check_home: /var/lib/kalimera-report
+cascade_check_ssh_port: "{{ ssh_listen_port | default(ansible_port | default(22)) }}"
+cascade_check_host_spec: >-
+  {{ ('[' ~ ansible_host ~ ']:' ~ (cascade_check_ssh_port | string))
+     if (cascade_check_ssh_port | int) != 22 else ansible_host }}
+cascade_check_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
+cascade_check_exit_port: >-
+  {{ hostvars[groups['exit'][0]].ssh_listen_port |
+     default(hostvars[groups['exit'][0]].ansible_port | default(22)) }}
+cascade_check_front_present: "{{ (groups['front'] | default([])) | length > 0 }}"
+cascade_check_front_host: >-
+  {{ hostvars[groups['front'][0]].ansible_host
+     if (groups['front'] | default([]) | length > 0) else '' }}
+cascade_check_front_port: >-
+  {{ hostvars[groups['front'][0]].ssh_listen_port |
+     default(hostvars[groups['front'][0]].ansible_port | default(22))
+     if (groups['front'] | default([]) | length > 0) else 22 }}
+# CDN: домен и признак берутся из inventory FRONT (front_cdn_domain, front_access_modes).
+cascade_check_cdn_enabled: "{{ (groups['front'] | default([]) | length > 0) and ('cdn' in (hostvars[groups['front'][0]].front_access_modes | default([]))) }}"
+cascade_check_cdn_domain: >-
+  {{ hostvars[groups['front'][0]].front_cdn_domain | default('')
+     if (groups['front'] | default([]) | length > 0) else '' }}

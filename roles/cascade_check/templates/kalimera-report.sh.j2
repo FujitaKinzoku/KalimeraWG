@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# Управляется Ansible. Отчёт о роли сервера для cascade-check: одна строка на
+# проверку, поля разделены табуляцией: СЕГМЕНТ, СТАТУС (OK, WARN или FAIL),
+# ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ (пусто, если не измерялось).
+# Запускается от root: локально cascade-check и удалённо по ключу, который
+# разрешает через sudo только эту команду.
+set -Eeuo pipefail
+
+readonly segment={{ (awg_node_role | default('unknown')) | upper | quote }}
+readonly entry_client_listen={{ (entry_client_listen_address | default('')) | quote }}
+readonly entry_dns_port={{ (entry_dns_default_port | default(5353)) | int }}
+readonly entry_dns_ru_port={{ (entry_dns_ru_port | default(5354)) | int }}
+readonly entry_exit_iface={{ (entry_exit_interface | default('')) | quote }}
+readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
+readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
+readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
+readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
+readonly front_entry_host={{ (front_entry_address | default('')) | quote }}
+readonly front_entry_port={{ (front_entry_reality_port | default(0)) | int }}
+
+{% raw %}
+usage() { echo 'Использование: kalimera-report --tsv'; }
+
+work=''
+ru_state=off
+
+# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ.
+# Табуляции и переводы строк в тексте заменяются пробелом, миллисекунды - только
+# цифры, поэтому полей всегда шесть.
+emit() {
+    local seg="$1" status="$2" label="$3" value="${4:-}" hint="${5:-}" ms="${6:-}"
+    label="${label//$'\t'/ }"
+    value="${value//$'\t'/ }"
+    hint="${hint//$'\t'/ }"
+    label="${label//$'\n'/ }"
+    value="${value//$'\n'/ }"
+    hint="${hint//$'\n'/ }"
+    ms="${ms//[!0-9]/}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$seg" "$status" "$label" "$value" "$hint" "$ms"
+}
+
+# Строка текущего сервера.
+add() {
+    emit "$segment" "$@"
+}
+
+# Строки awg-health и server-audit: "СТАТУС<TAB>проверка<TAB>рекомендация".
+# Строка "строгая проверка роли" дублирует awg-health и пропускается.
+import_rows() {
+    local file="$1" status label hint
+    [[ -r "$file" ]] || return 0
+    while IFS=$'\t' read -r status label hint; do
+        case "$status" in
+            OK|WARN|FAIL) ;;
+            *) continue ;;
+        esac
+        case "$label" in
+            'строгая проверка роли'*) continue ;;
+        esac
+        add "$status" "$label" '' "${hint:-}"
+    done <"$file"
+}
+
+# Запуск команды без её вывода: awg-health и server-audit пишут строки в файл
+# результатов, а ненулевой код возврата - обычный итог проверки.
+run_report() {
+    local file="$1"
+    shift
+    KALIMERA_REPORT_STYLE=plain KALIMERA_REPORT_RESULTS="$file" "$@" >/dev/null 2>&1 || true
+}
+
+check_services() {
+    local failed units
+    failed="$(systemctl --failed --no-legend --plain --no-pager 2>/dev/null |
+        awk 'NF && $1 != "awg-server-audit.service" { print $1 }' || true)"
+    if [[ -z "$failed" ]]; then
+        add OK 'неисправные модули systemd отсутствуют'
+    else
+        units="$(paste -sd ',' <<<"$failed" | sed 's/,/, /g')"
+        add FAIL 'неисправные модули systemd' "$units" 'причина: sudo journalctl -u ИМЯ -b --no-pager; затем sudo systemctl restart ИМЯ'
+    fi
+}
+
+check_reboot() {
+    if [[ -e /var/run/reboot-required ]]; then
+        add WARN 'требуется перезагрузка после обновления системы' 'файл /var/run/reboot-required' 'перезагрузите сервер: sudo systemctl reboot; серверы каскада перезагружайте по одному'
+    else
+        add OK 'перезагрузка не требуется'
+    fi
+}
+
+check_health() {
+    if [[ ! -x /usr/local/sbin/awg-health ]]; then
+        add FAIL 'awg-health не установлен' '' 'на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    run_report "$work/health" /usr/local/sbin/awg-health --strict
+    import_rows "$work/health"
+}
+
+check_audit() {
+    if [[ ! -x /usr/local/sbin/server-audit ]]; then
+        add FAIL 'server-audit не установлен' '' 'на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    run_report "$work/audit" /usr/local/sbin/server-audit
+    import_rows "$work/audit"
+}
+
+# Состояние RU-прокси: active, failopen или manual. Прокси не настроен - off.
+check_ru_proxy() {
+    if [[ "$ru_proxy_enabled" != true ]]; then
+        return 0
+    fi
+    if [[ -e "$ru_proxy_manual_flag" ]]; then
+        ru_state=manual
+        add WARN 'RU-прокси (sing-box)' 'выключен вручную; РФ-трафик клиентов идёт напрямую с ENTRY' 'ru-proxy status; включить: ru-proxy on'
+    elif [[ -e "$ru_proxy_failopen_flag" ]] || ! systemctl is-active --quiet "$ru_proxy_service"; then
+        ru_state=failopen
+        add WARN 'RU-прокси (sing-box)' 'fail-open: РФ-трафик клиентов идёт напрямую с ENTRY' 'ru-proxy status; если SOCKS5 снова доступен: ru-proxy on'
+    else
+        ru_state=active
+        add OK 'RU-прокси (sing-box)' 'активен: РФ-трафик клиентов идёт через SOCKS5/TUN'
+    fi
+}
+
+# Ответ A-запроса: "адрес миллисекунды" или ошибка. Время берётся из dig +stats.
+dns_probe() {
+    local server="$1" port="$2" name="$3" output ip ms
+    output="$(dig +time=3 +tries=1 +stats "@$server" -p "$port" "$name" A 2>/dev/null || true)"
+    ip="$(awk '$4 == "A" { print $5; exit }' <<<"$output")"
+    ms="$(awk '/Query time:/ { print $4; exit }' <<<"$output")"
+    [[ -n "$ip" ]] || return 1
+    printf '%s %s\n' "$ip" "${ms:-0}"
+}
+
+# Одна строка DNS: $1 - проверка, $2 - резолвер, $3 - порт, $4 - имя,
+# $5 - маршрут для успешного ответа, $6 - рекомендация при ошибке.
+# Строка идёт в сегмент DNS: в сводке она попадает в свою группу.
+dns_row() {
+    local label="$1" server="$2" port="$3" name="$4" route="$5" hint="$6" answer ip ms
+    if answer="$(dns_probe "$server" "$port" "$name")"; then
+        read -r ip ms <<<"$answer"
+        emit DNS OK "$label" "$ip за $ms мс; $route" '' "$ms"
+    else
+        emit DNS FAIL "$label" 'нет ответа' "$hint"
+    fi
+}
+
+check_dns() {
+    local route_ru dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
+    if [[ "$ru_state" == active ]]; then
+        route_ru='маршрут: RU DoH через RU-прокси'
+    else
+        route_ru='маршрут: Unbound (RU DoH недоступен, RU-прокси выключен)'
+    fi
+    dns_row 'DNS: yandex.ru (РФ) через клиентский резолвер' "$entry_client_listen" 53 yandex.ru "$route_ru" "$dns_hint"
+    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или EXIT по политике ENTRY)' "$dns_hint"
+    dns_row 'DNS: example.com напрямую через Unbound' 127.0.0.1 "$entry_dns_port" example.com 'маршрут: Unbound на 127.0.0.1' "$dns_hint"
+    if [[ "$ru_state" == active ]]; then
+        dns_row 'DNS: yandex.ru напрямую через RU DoH' 127.0.0.1 "$entry_dns_ru_port" yandex.ru 'маршрут: RU DoH на 127.0.0.1' 'ru-proxy status; если SOCKS5 недоступен - ru-proxy-set или ru-proxy off'
+    fi
+}
+
+# Задержка через туннель: три TCP-подключения к example.com через интерфейс AWG
+# ENTRY–EXIT, то есть выход через EXIT. Считается только установление
+# соединения, без DNS. Рекурсивный DNS EXIT здесь не нужен: по умолчанию он
+# выключен (entry_dns_default_via_exit: false), и его адрес не отвечает.
+check_tunnel() {
+    local output code lookup connect ms ok=0 sum=0 avg
+    [[ -n "$entry_exit_iface" ]] || return 0
+    for _ in 1 2 3; do
+        if output="$(curl -4 -sS -o /dev/null --max-time 10 --interface "$entry_exit_iface" -w '%{http_code} %{time_namelookup} %{time_connect}' https://example.com/ 2>/dev/null)"; then
+            read -r code lookup connect <<<"$output"
+            case "$code" in
+                2??|3??)
+                    ms="$(awk -v c="$connect" -v l="$lookup" 'BEGIN { printf "%d", (c - l) * 1000 }')"
+                    ok=$((ok + 1))
+                    sum=$((sum + ms))
+                    ;;
+            esac
+        fi
+    done
+    if (( ok == 0 )); then
+        emit LINK FAIL 'туннель ENTRY–EXIT: TCP через туннель' 'ни одного подключения за 10 с' 'проверьте handshake туннеля: awg-health --strict; затем на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    avg=$((sum / ok))
+    if (( ok < 3 )); then
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict' "$avg"
+    elif (( avg > 250 )); then
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict' "$avg"
+    else
+        emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
+    fi
+}
+
+# HTTPS-проверка: $1 - сегмент, $2 - проверка, $3 - интерфейс (пусто - прямой
+# маршрут узла), $4 - адрес, $5 - рекомендация при ошибке. Время - до ответа.
+report_http() {
+    local seg="$1" label="$2" interface="$3" url="$4" hint="$5" output code secs ms
+    local -a args=(-4 -sS -o /dev/null --max-time 10 -w '%{http_code} %{time_total}')
+    if [[ -n "$interface" ]]; then
+        args+=(--interface "$interface")
+    fi
+    if output="$(curl "${args[@]}" "$url" 2>/dev/null)"; then
+        read -r code secs <<<"$output"
+        ms="$(awk -v t="$secs" 'BEGIN { printf "%d", t * 1000 }')"
+        case "$code" in
+            2??|3??) emit "$seg" OK "$label" "HTTP $code за $secs с" '' "$ms" ;;
+            *) emit "$seg" FAIL "$label" "HTTP $code" "$hint" "$ms" ;;
+        esac
+    else
+        emit "$seg" FAIL "$label" 'нет ответа за 10 с' "$hint"
+    fi
+}
+
+# Время установления TCP-соединения в миллисекундах; ошибка, если порт молчит 5 с.
+tcp_ms() {
+    local host="$1" port="$2" started finished
+    if [[ -z "$host" ]] || (( port <= 0 )); then
+        return 1
+    fi
+    started="$(date +%s%N)"
+    # shellcheck disable=SC2016
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null || return 1
+    finished="$(date +%s%N)"
+    printf '%s\n' $(( (finished - started) / 1000000 ))
+}
+
+# Связь FRONT с REALITY-портом ENTRY: строка связи, измеряется TCP-подключением.
+check_front_backend() {
+    local ms
+    if [[ -z "$front_entry_host" ]]; then
+        emit LINK FAIL 'backend FRONT → ENTRY (REALITY)' 'адрес ENTRY не задан' 'на FRONT: kalimera-deploy --resume'
+        return 0
+    fi
+    if ms="$(tcp_ms "$front_entry_host" "$front_entry_port")"; then
+        emit LINK OK 'backend FRONT → ENTRY (REALITY)' "TCP $ms мс" '' "$ms"
+    else
+        emit LINK FAIL 'backend FRONT → ENTRY (REALITY)' 'порт недоступен' 'на ENTRY: awg-health --strict (служба backend FRONT и правило UFW для адреса FRONT)'
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        --tsv) [[ $# -eq 1 ]] || { usage >&2; exit 2; } ;;
+        --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    [[ $EUID -eq 0 ]] || { echo 'kalimera-report запускается от root.' >&2; exit 1; }
+    work="$(mktemp -d /run/kalimera-report.XXXXXX)"
+    trap 'rm -rf "$work"' EXIT
+
+    check_services
+    check_reboot
+    check_health
+    check_audit
+    case "$segment" in
+        ENTRY)
+            check_ru_proxy
+            check_dns
+            check_tunnel
+            report_http LINK 'выход через EXIT: example.com' "$entry_exit_iface" https://example.com/ 'туннель и NAT EXIT: awg-health --strict на ENTRY и EXIT'
+            report_http LINK 'выход напрямую с ENTRY: yandex.ru' '' https://yandex.ru/ 'проверьте WAN ENTRY и DNS: dns-status'
+            ;;
+        EXIT)
+            report_http LINK 'выход в Интернет с EXIT: example.com' '' https://example.com/ 'проверьте WAN EXIT и NAT: awg-health --strict'
+            ;;
+        FRONT)
+            check_front_backend
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
+{% endraw %}

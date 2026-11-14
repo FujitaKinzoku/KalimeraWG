@@ -63,6 +63,10 @@ GREEN = "\033[1;32m"
 YELLOW = "\033[1;33m"
 WHITE = "\033[1;37m"
 MAGENTA = "\033[1;35m"
+RED = "\033[1;31m"
+# Схема цветов: зелёный - OK, синий - информация, жёлтый - нужно действие или
+# есть несоответствие, красный - критическая ошибка, розовый - требуется
+# перезагрузка.
 DIM = "\033[2m"
 BOOT_GRACE_SECONDS = 120
 STARTUP_WAIT_SECONDS = 10
@@ -334,7 +338,8 @@ def panel(
     for label, value, level in rows:
         prefix = (
             "✓ " if level == "OK"
-            else "! " if level in {"WARN", "FAIL"}
+            else "✗ " if level == "FAIL"
+            else "! " if level in {"WARN", "REBOOT"}
             else "↑ " if level == "UPD"
             else ""
         )
@@ -348,9 +353,10 @@ def panel(
             value_text = f"{value_part:<{value_width}}"
             value_colour = (
                 GREEN if level == "OK"
-                else YELLOW if level in {"WARN", "FAIL"}
-                else CYAN if level == "UPD"
-                else WHITE
+                else RED if level == "FAIL"
+                else YELLOW if level in {"WARN", "UPD", "NOTE"}
+                else MAGENTA if level == "REBOOT"
+                else BLUE
             )
             print(
                 paint("│ ", BLUE)
@@ -388,40 +394,35 @@ def updates_panel() -> None:
         label = UPDATE_LABELS.get(fields[1], fields[1])
         rows.append((label, fields[2], "UPD"))
         if len(fields) > 3 and fields[3]:
-            rows.append(("", "→ " + fields[3], "INFO"))
+            rows.append(("", "→ " + fields[3], "NOTE"))
     if rows:
         panel("ДОСТУПНЫ ОБНОВЛЕНИЯ · kalimera-updates", rows)
 
 
 def reboot_required_panel() -> None:
-    """Показать уведомление о необходимости перезагрузки, если перезагрузка требуется."""
-    try:
-        Path("/var/run/reboot-required").stat()
-        reboot_required = True
-    except OSError:
-        reboot_required = False
+    """Показать строку о перезагрузке в общем стиле панелей, если она требуется.
 
-    if reboot_required:
-        print(paint("\n", MAGENTA))
-        width = shutil.get_terminal_size((100, 24)).columns
-        panel_width = max(24, min(TABLE_MAX_WIDTH, width - 2))
-        top = "┌" + "─" * (panel_width - 2) + "┐"
-        bottom = "└" + "─" * (panel_width - 2) + "┘"
-
-        message = "⚠ ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА"
-        padding = (panel_width - len(message) - 4) // 2
-        msg_line = "│ " + " " * padding + message + " " * (panel_width - len(message) - 4 - padding) + " │"
-
-        print(paint(top, MAGENTA))
-        print(paint(msg_line, MAGENTA))
-
-        detail_line = "│ Выполните: sudo systemctl reboot" + " " * (panel_width - len("│ Выполните: sudo systemctl reboot") - 2) + "│"
-        print(paint(detail_line, MAGENTA))
-        print(paint(bottom, MAGENTA))
-        print(paint("\n", MAGENTA))
-
-        # Send Telegram notification if configured
-        send_telegram_reboot_notification()
+    Строка выводится последней в меню входа на том же месте, где было бы
+    требование о перезагрузке. Рамка и выравнивание берутся из panel(), поэтому
+    правый край совпадает с остальными блоками; розовым окрашивается только
+    значение статуса, а при отсутствии перезагрузки статус зелёный.
+    """
+    if not Path("/var/run/reboot-required").exists():
+        panel(
+            "ПЕРЕЗАГРУЗКА",
+            [("Статус", "перезагрузка не требуется", "OK")],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
+        return
+    panel(
+        "ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА",
+        [
+            ("Статус", "обновления системы требуют перезагрузки сервера", "REBOOT"),
+            ("Команда", "sudo systemctl reboot", "INFO"),
+        ],
+        preferred_label_width=COMMAND_LABEL_WIDTH,
+    )
+    send_telegram_reboot_notification()
 
 
 def send_telegram_reboot_notification() -> None:
@@ -515,6 +516,13 @@ def command_panels() -> None:
     )
     if CONFIG["role"] == "entry":
         panel(
+            "ПОЛНАЯ ПРОВЕРКА КАСКАДА",
+            [
+                ("cascade-check", "ENTRY, EXIT, FRONT, связи и DNS; итог OK / WARN / FAIL", "INFO"),
+            ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
+        panel(
             "VPN-КЛИЕНТЫ",
             [
                 ("vpn-user list", "пользователи и последний handshake", "INFO"),
@@ -575,7 +583,7 @@ def command_panels() -> None:
                 ("nano r1.json", "2. здесь: вставить JSON и сохранить; для следующих - r2.json и т.д.", "INFO"),
                 ("vless-user auto ИМЯ r1.json [r2.json ...]", "3. профиль: этот FRONT - основной, резервы по порядку файлов, до 5", "INFO"),
                 ("rm r1.json r2.json", "4. удалить файлы: в них ключи резервных каскадов", "INFO"),
-                ("Happ для iOS", "выключите No Limit Mode, иначе резерв не включится", "WARN"),
+                ("Happ для iOS", "выключите No Limit Mode, иначе резерв не включится", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
@@ -665,6 +673,7 @@ def main() -> int:
         updates_panel()
         if with_commands:
             command_panels()
+        reboot_required_panel()
         return 0
 
     old_active = service_active(f"awg-quick@{CONFIG['legacy_interface']}.service")
@@ -788,9 +797,9 @@ def main() -> int:
         ],
     )
     updates_panel()
-    reboot_required_panel()
     if with_commands:
         command_panels()
+    reboot_required_panel()
     return 0
 
 

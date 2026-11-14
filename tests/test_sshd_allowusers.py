@@ -84,5 +84,48 @@ class SshdAllowUsersTests(unittest.TestCase):
                     self.assertNotRegex(token, r"[a-z][A-Z]", line)
 
 
+class CascadeReportAllowUsersTests(unittest.TestCase):
+    """Отчёт cascade-check: пользователь пускается только с адреса ENTRY.
+
+    Токен user@адрес добавляется к AllowUsers. Основной администратор остаётся
+    без ограничения адреса, поэтому его доступ не меняется.
+    """
+
+    REPORT = {
+        "security_cascade_report_enabled": True,
+        "security_cascade_report_user": "kalimera-report",
+        "security_cascade_report_source_ipv4": "192.0.2.10",
+    }
+
+    def test_report_user_is_limited_to_entry_address(self) -> None:
+        lines = render(ansible_user="kalimera", **self.REPORT)
+        self.assertEqual(
+            allow_users(lines), ["kalimera", "root", "kalimera-report@192.0.2.10"]
+        )
+        self.assertIn("Banner none", lines)
+
+    def test_finalized_policy_keeps_admin_unrestricted_and_adds_report(self) -> None:
+        lines = render(
+            ansible_user="kalimera", security_finalize_admin_access=True, **self.REPORT
+        )
+        self.assertEqual(
+            allow_users(lines), ["kalimera", "kalimera-report@192.0.2.10"]
+        )
+        self.assertIn("PermitRootLogin no", lines)
+
+    def test_disabled_report_leaves_the_policy_unchanged(self) -> None:
+        disabled = dict(self.REPORT, security_cascade_report_enabled=False)
+        self.assertEqual(
+            allow_users(render(ansible_user="kalimera", **disabled)),
+            allow_users(render(ansible_user="kalimera")),
+        )
+
+    def test_admin_token_has_no_address_restriction(self) -> None:
+        lines = render(ansible_user="kalimera", **self.REPORT)
+        tokens = allow_users(lines)
+        self.assertIn("kalimera", tokens)
+        self.assertNotIn("kalimera@192.0.2.10", tokens)
+
+
 if __name__ == "__main__":
     unittest.main()

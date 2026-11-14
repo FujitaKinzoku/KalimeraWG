@@ -405,6 +405,20 @@
   gather_facts: false
   any_errors_fatal: true
   pre_tasks:
+    # Проверка до любых изменений: без внешнего адреса ENTRY вход отчёта на
+    # EXIT и FRONT был бы записан как 127.0.0.1 и не работал.
+    - name: Проверка внешнего адреса ENTRY для отчёта cascade-check
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - cascade_check_source is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+          - cascade_check_source is not match('^127\.')
+        fail_msg: >-
+          Задайте cascade_check_entry_source_ipv4: внешний IPv4 ENTRY, с которого он
+          ходит на EXIT и FRONT. ansible_host ENTRY здесь локальный или не подходит.
+      vars:
+        cascade_check_source: "{{ cascade_check_entry_source_ipv4 | default(ansible_host) }}"
+      when: awg_adoption_mode == 'apply'
     - name: Сбор сведений об ENTRY сервере
       ansible.builtin.setup:
 
@@ -448,6 +462,10 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    # После health: к этому моменту все переменные ролей (например, адрес ENTRY
+    # для FRONT из роли front) известны и попадают в отчёт kalimera-report.
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
   post_tasks:
     - name: Передача закреплённых версий AmneziaWG управляющему компьютеру
@@ -497,6 +515,8 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
 
 # Опциональный третий узел (docs/front-relay.md) - группа `front` в inventory
@@ -549,6 +569,8 @@
     - role: fail2ban
       when: awg_adoption_mode == 'apply'
     - role: health
+      when: awg_adoption_mode == 'apply'
+    - role: cascade_check
       when: awg_adoption_mode == 'apply'
 
 - name: Проверка DNS зарубежной ветки через рекурсивный резолвер EXIT

@@ -245,6 +245,7 @@ table at login. Full reference: `kalimera-help`.
 | Task | Commands |
 |---|---|
 | Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
+| Full cascade check (on ENTRY) | `cascade-check`: ENTRY, EXIT, FRONT, links and DNS; summary OK / WARN / FAIL |
 | AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
 | VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete`; profile with a backup cascade: `vless-user auto NAME FILE` |
 | Domain routing | `ru-domain add`, `se-domain add`, `entry-domain add` |

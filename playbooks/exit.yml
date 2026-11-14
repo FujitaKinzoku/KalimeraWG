@@ -37,3 +37,5 @@
       when: awg_adoption_mode == 'apply'
     - role: health
       when: awg_adoption_mode == 'apply'
+    - role: cascade_check
+      when: awg_adoption_mode == 'apply'

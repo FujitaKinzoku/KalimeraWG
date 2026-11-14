@@ -1,0 +1,112 @@
+---
+- name: Установка проверки роли сервера для cascade-check
+  ansible.builtin.template:
+    src: kalimera-report.sh.j2
+    dest: "{{ cascade_check_report_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
+
+- name: Каталог ключа cascade-check на ENTRY
+  ansible.builtin.file:
+    path: "{{ cascade_check_key_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: awg_node_role == 'entry'
+
+- name: Ключ cascade-check на ENTRY (закрытый ключ не выводится командами KalimeraWG)
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ssh-keygen
+      - -q
+      - -t
+      - ed25519
+      - -N
+      - ""
+      - -C
+      - kalimerawg-cascade-check
+      - -f
+      - "{{ cascade_check_key_path }}"
+    creates: "{{ cascade_check_key_path }}"
+  when: awg_node_role == 'entry'
+
+- name: Файл доверенных ключей cascade-check на ENTRY
+  ansible.builtin.file:
+    path: "{{ cascade_check_known_hosts_path }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg_node_role == 'entry'
+
+- name: Установка cascade-check на ENTRY
+  ansible.builtin.template:
+    src: cascade-check.sh.j2
+    dest: "{{ cascade_check_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    validate: /usr/bin/bash -n %s
+  when: awg_node_role == 'entry'
+
+- name: Системный пользователь удалённого отчёта cascade-check
+  ansible.builtin.user:
+    name: "{{ security_cascade_report_user }}"
+    comment: KalimeraWG cascade-check report
+    system: true
+    shell: /bin/sh
+    home: "{{ cascade_check_home }}"
+    create_home: true
+    state: present
+  when: awg_node_role in ['exit', 'front']
+
+- name: Право пользователя отчёта - одна команда через sudo без пароля
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/91-kalimera-report
+    owner: root
+    group: root
+    mode: "0440"
+    content: |
+      # Управляется Ansible. Пользователь отчёта получает только одну команду.
+      {{ security_cascade_report_user }} ALL=(root) NOPASSWD: {{ cascade_check_report_path }} --tsv
+    validate: /usr/sbin/visudo -cf %s
+  when: awg_node_role in ['exit', 'front']
+
+- name: Чтение публичного ключа cascade-check с ENTRY
+  ansible.builtin.slurp:
+    src: "{{ cascade_check_key_path }}.pub"
+  delegate_to: "{{ groups['entry'][0] }}"
+  register: cascade_check_entry_public_key_file
+  when: awg_node_role in ['exit', 'front']
+
+- name: Ключ ENTRY только для отчёта - адрес ENTRY и одна команда
+  ansible.posix.authorized_key:
+    user: "{{ security_cascade_report_user }}"
+    key: "{{ cascade_check_entry_public_key_file.content | b64decode | trim }}"
+    key_options: >-
+      from="{{ security_cascade_report_source_ipv4 }}",command="sudo -n {{ cascade_check_report_path }} --tsv",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
+    state: present
+    exclusive: true
+    manage_dir: true
+  when: awg_node_role in ['exit', 'front']
+
+- name: Чтение публичного ключа SSH этого сервера для cascade-check
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  register: cascade_check_host_public_key_file
+  when: awg_node_role in ['exit', 'front']
+
+- name: Запись ключа SSH сервера в доверенные ключи cascade-check на ENTRY
+  ansible.builtin.lineinfile:
+    path: "{{ cascade_check_known_hosts_path }}"
+    regexp: "^{{ cascade_check_host_spec | regex_escape }} "
+    line: "{{ cascade_check_host_spec }} {{ cascade_check_host_public_key_file.content | b64decode | trim }}"
+    owner: root
+    group: root
+    mode: "0644"
+    create: true
+  delegate_to: "{{ groups['entry'][0] }}"
+  when: awg_node_role in ['exit', 'front']
