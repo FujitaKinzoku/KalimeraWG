@@ -3,8 +3,8 @@
 ## [Unreleased]
 
 - Адрес ENTRY для отчёта cascade-check определяется при деплое сам: EXIT и
-  FRONT видят его в `SSH_CONNECTION` сессии ENTRY (запасной путь - маршрут с
-  ENTRY), поэтому ручная переменная
+  FRONT видят его в `SSH_CONNECTION` или в TCP-соединении сессии деплоя (это
+  работает и за NAT), поэтому ручная переменная
   `cascade_check_entry_source_ipv4` больше не нужна. Она остаётся для явного
   задания адреса. Адрес проверяется в pre_tasks EXIT и FRONT, до их ролей.
 
