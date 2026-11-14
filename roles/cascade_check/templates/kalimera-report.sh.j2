@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Управляется Ansible. Отчёт о роли сервера для cascade-check: одна строка на
 # проверку, поля разделены табуляцией: СЕГМЕНТ, СТАТУС (OK, WARN или FAIL),
-# ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ. Запускается от root: локально cascade-check
-# и удалённо по ключу, который разрешает через sudo только эту команду.
+# ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ (пусто, если не измерялось).
+# Запускается от root: локально cascade-check и удалённо по ключу, который
+# разрешает через sudo только эту команду.
 set -Eeuo pipefail
 
 readonly segment={{ (awg_node_role | default('unknown')) | upper | quote }}
@@ -23,17 +24,19 @@ usage() { echo 'Использование: kalimera-report --tsv'; }
 work=''
 ru_state=off
 
-# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ. Табуляции и
-# переводы строк в тексте заменяются пробелом, поэтому полей всегда пять.
+# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ.
+# Табуляции и переводы строк в тексте заменяются пробелом, миллисекунды - только
+# цифры, поэтому полей всегда шесть.
 emit() {
-    local seg="$1" status="$2" label="$3" value="${4:-}" hint="${5:-}"
+    local seg="$1" status="$2" label="$3" value="${4:-}" hint="${5:-}" ms="${6:-}"
     label="${label//$'\t'/ }"
     value="${value//$'\t'/ }"
     hint="${hint//$'\t'/ }"
     label="${label//$'\n'/ }"
     value="${value//$'\n'/ }"
     hint="${hint//$'\n'/ }"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$seg" "$status" "$label" "$value" "$hint"
+    ms="${ms//[!0-9]/}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$seg" "$status" "$label" "$value" "$hint" "$ms"
 }
 
 # Строка текущего сервера.
@@ -133,13 +136,14 @@ dns_probe() {
 
 # Одна строка DNS: $1 - проверка, $2 - резолвер, $3 - порт, $4 - имя,
 # $5 - маршрут для успешного ответа, $6 - рекомендация при ошибке.
+# Строка идёт в сегмент DNS: в сводке она попадает в свою группу.
 dns_row() {
     local label="$1" server="$2" port="$3" name="$4" route="$5" hint="$6" answer ip ms
     if answer="$(dns_probe "$server" "$port" "$name")"; then
         read -r ip ms <<<"$answer"
-        add OK "$label" "$ip за $ms мс; $route"
+        emit DNS OK "$label" "$ip за $ms мс; $route" '' "$ms"
     else
-        add FAIL "$label" 'нет ответа' "$hint"
+        emit DNS FAIL "$label" 'нет ответа' "$hint"
     fi
 }
 
@@ -183,27 +187,28 @@ check_tunnel() {
     fi
     avg=$((sum / ok))
     if (( ok < 3 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict'
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict' "$avg"
     elif (( avg > 250 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict'
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict' "$avg"
     else
-        emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)"
+        emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
     fi
 }
 
 # HTTPS-проверка: $1 - сегмент, $2 - проверка, $3 - интерфейс (пусто - прямой
-# маршрут узла), $4 - адрес, $5 - рекомендация при ошибке.
+# маршрут узла), $4 - адрес, $5 - рекомендация при ошибке. Время - до ответа.
 report_http() {
-    local seg="$1" label="$2" interface="$3" url="$4" hint="$5" output code secs
+    local seg="$1" label="$2" interface="$3" url="$4" hint="$5" output code secs ms
     local -a args=(-4 -sS -o /dev/null --max-time 10 -w '%{http_code} %{time_total}')
     if [[ -n "$interface" ]]; then
         args+=(--interface "$interface")
     fi
     if output="$(curl "${args[@]}" "$url" 2>/dev/null)"; then
         read -r code secs <<<"$output"
+        ms="$(awk -v t="$secs" 'BEGIN { printf "%d", t * 1000 }')"
         case "$code" in
-            2??|3??) emit "$seg" OK "$label" "HTTP $code за $secs с" ;;
-            *) emit "$seg" FAIL "$label" "HTTP $code" "$hint" ;;
+            2??|3??) emit "$seg" OK "$label" "HTTP $code за $secs с" '' "$ms" ;;
+            *) emit "$seg" FAIL "$label" "HTTP $code" "$hint" "$ms" ;;
         esac
     else
         emit "$seg" FAIL "$label" 'нет ответа за 10 с' "$hint"
@@ -223,16 +228,17 @@ tcp_ms() {
     printf '%s\n' $(( (finished - started) / 1000000 ))
 }
 
+# Связь FRONT с REALITY-портом ENTRY: строка связи, измеряется TCP-подключением.
 check_front_backend() {
     local ms
     if [[ -z "$front_entry_host" ]]; then
-        add FAIL 'backend FRONT → ENTRY (REALITY)' 'адрес ENTRY не задан' 'на FRONT: kalimera-deploy --resume'
+        emit LINK FAIL 'backend FRONT → ENTRY (REALITY)' 'адрес ENTRY не задан' 'на FRONT: kalimera-deploy --resume'
         return 0
     fi
     if ms="$(tcp_ms "$front_entry_host" "$front_entry_port")"; then
-        add OK 'backend FRONT → ENTRY (REALITY)' "TCP $ms мс"
+        emit LINK OK 'backend FRONT → ENTRY (REALITY)' "TCP $ms мс" '' "$ms"
     else
-        add FAIL 'backend FRONT → ENTRY (REALITY)' 'порт недоступен' 'на ENTRY: awg-health --strict (служба backend FRONT и правило UFW для адреса FRONT)'
+        emit LINK FAIL 'backend FRONT → ENTRY (REALITY)' 'порт недоступен' 'на ENTRY: awg-health --strict (служба backend FRONT и правило UFW для адреса FRONT)'
     fi
 }
 
@@ -256,10 +262,10 @@ main() {
             check_dns
             check_tunnel
             report_http LINK 'выход через EXIT: example.com' "$entry_exit_iface" https://example.com/ 'туннель и NAT EXIT: awg-health --strict на ENTRY и EXIT'
-            report_http ENTRY 'выход напрямую с ENTRY: yandex.ru' '' https://yandex.ru/ 'проверьте WAN ENTRY и DNS: dns-status'
+            report_http LINK 'выход напрямую с ENTRY: yandex.ru' '' https://yandex.ru/ 'проверьте WAN ENTRY и DNS: dns-status'
             ;;
         EXIT)
-            report_http EXIT 'выход в Интернет с EXIT: example.com' '' https://example.com/ 'проверьте WAN EXIT и NAT: awg-health --strict'
+            report_http LINK 'выход в Интернет с EXIT: example.com' '' https://example.com/ 'проверьте WAN EXIT и NAT: awg-health --strict'
             ;;
         FRONT)
             check_front_backend

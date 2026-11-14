@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Управляется Ansible. Полная проверка каскада с ENTRY: сам ENTRY, связи
-# ENTRY–EXIT и ENTRY–FRONT, отчёты EXIT и FRONT по отдельному ключу, который
+# ENTRY–EXIT и ENTRY–FRONT, DNS, отчёты EXIT и FRONT по отдельному ключу, который
 # разрешает только kalimera-report. Оформление как у awg-health; в конце - сводка
-# OK, WARN и FAIL. Код возврата: 0 - всё в порядке, 3 - есть замечания, 1 - ошибки.
+# по группам: серверы, связи и задержки, DNS и итог. Код возврата: 0 - всё в
+# порядке, 3 - есть замечания, 1 - ошибки.
 set -Eeuo pipefail
 
 readonly report_bin={{ cascade_check_report_path | quote }}
@@ -21,7 +22,13 @@ usage() { echo 'Использование: cascade-check'; }
 work=''
 rows_file=''
 exit_code=0
+sum_verdict=OK
+sum_title=''
+plain_line=''
 declare -A counts=()
+# Строки итоговой сводки: цвет (или SEP - разделитель групп) и текст.
+sum_color=()
+sum_text=()
 
 # >>> kalimera-report: общий блок оформления отчёта.
 # Блок одинаков в awg-health, server-audit и kalimera-updates, совпадение
@@ -190,19 +197,27 @@ report_note_lines() {
 }
 # <<< kalimera-report
 
+# Цвета итоговой сводки: серверы - по статусу сервера, связи и задержки - голубым
+# при OK, DNS - по статусу, итог - по общему статусу.
+c_ok=$'\033[32m'
+c_info=$'\033[36m'
+c_warn=$'\033[33m'
+c_fail=$'\033[31m'
+c_head=$'\033[1m'
+
 # Текст с удалённых серверов очищается от управляющих символов: чужой вывод не
 # должен менять экран или подменять строки отчёта.
 clean_text() {
     LC_ALL=C tr -d '\000-\010\013-\037\177' <<<"$1"
 }
 
-# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ.
+# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ.
 emit_row() {
-    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$rows_file"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" "${5:-}" "${6:-}" >>"$rows_file"
 }
 
-# Разбор строки на пять полей. read с IFS-табуляцией сдвинул бы пустое поле,
-# поэтому делим по табуляциям вручную: пустые значения сохраняются.
+# Разбор строки на шесть полей. Пустые поля сохраняются: read с IFS-табуляцией
+# сдвинул бы их, поэтому делим вручную.
 split_row() {
     local rest="$1"
     seg="${rest%%$'\t'*}"
@@ -212,32 +227,38 @@ split_row() {
     label="${rest%%$'\t'*}"
     rest="${rest#*$'\t'}"
     value="${rest%%$'\t'*}"
-    hint="${rest#*$'\t'}"
+    rest="${rest#*$'\t'}"
+    hint="${rest%%$'\t'*}"
+    ms="${rest#*$'\t'}"
 }
 
-# Строки из kalimera-report: local - локальный отчёт, где сегмент ENTRY или LINK;
-# имя сегмента для удалённого отчёта задаётся здесь, а не берётся из ответа.
+# Строки kalimera-report: local - свой отчёт (сегменты ENTRY, LINK или DNS);
+# удалённый отчёт получает сегмент от этого вызова, а связь (LINK) сохраняет.
 import_rows() {
-    local expected="$1" raw="$2" line tabs seg status label value hint
+    local expected="$1" raw="$2" line tabs seg status label value hint ms
     while IFS= read -r line || [[ -n "$line" ]]; do
         line="$(clean_text "$line")"
         tabs="${line//[^$'\t']/}"
-        [[ ${#tabs} -eq 4 ]] || continue
+        [[ ${#tabs} -eq 5 ]] || continue
         split_row "$line"
         case "$status" in
             OK|WARN|FAIL) ;;
             *) continue ;;
         esac
         [[ -n "$label" ]] || continue
+        ms="${ms//[!0-9]/}"
         if [[ "$expected" == local ]]; then
             case "$seg" in
-                ENTRY|LINK) ;;
+                ENTRY|LINK|DNS) ;;
                 *) seg=ENTRY ;;
             esac
         else
-            seg="$expected"
+            case "$seg" in
+                LINK) ;;
+                *) seg="$expected" ;;
+            esac
         fi
-        emit_row "$seg" "$status" "$label" "$value" "$hint"
+        emit_row "$seg" "$status" "$label" "$value" "$hint" "$ms"
     done <"$raw"
 }
 
@@ -259,9 +280,9 @@ tcp_row() {
     local label="$1" host="$2" port="$3" ms
     if ms="$(tcp_ms "$host" "$port")"; then
         if (( ms > 300 )); then
-            emit_row LINK WARN "$label" "TCP $ms мс: высокая задержка" 'проверьте загрузку сервера и хостинг; awg-health --strict на нём'
+            emit_row LINK WARN "$label" "TCP $ms мс: высокая задержка" 'проверьте загрузку сервера и хостинг; awg-health --strict на нём' "$ms"
         else
-            emit_row LINK OK "$label" "TCP $ms мс"
+            emit_row LINK OK "$label" "TCP $ms мс" '' "$ms"
         fi
     else
         emit_row LINK FAIL "$label" 'порт не отвечает за 5 с' 'проверьте UFW и доступность сервера; SSH-порт должен совпадать с inventory'
@@ -320,7 +341,7 @@ section_title() {
     fi
 }
 
-# Рекомендации по всем OK-непроверенным строкам: сначала FAIL, потом WARN.
+# Рекомендации по всем непройденным проверкам: сначала FAIL, потом WARN.
 # Одинаковая рекомендация печатается один раз, без ограничения числа строк.
 print_recommendations() {
     local severity note level text hint key marker color
@@ -365,14 +386,190 @@ print_recommendations() {
     done
 }
 
+# Строка сводки. Заголовок группы отделяется разделителем от предыдущей группы.
+sum_head() {
+    if (( ${#sum_text[@]} > 0 )); then
+        sum_color+=(SEP)
+        sum_text+=('')
+    fi
+    sum_color+=("$c_head")
+    sum_text+=("$1")
+}
+
+sum_add() {
+    sum_color+=("$1")
+    sum_text+=("$2")
+}
+
+# Цвет статуса: OK - зелёный, WARN - жёлтый, FAIL - красный.
+status_color() {
+    case "$1" in
+        OK) printf '%s' "$c_ok" ;;
+        WARN) printf '%s' "$c_warn" ;;
+        *) printf '%s' "$c_fail" ;;
+    esac
+}
+
+# Задержка TCP-подключения из строки связи по её названию (пусто, если нет).
+rtt_of() {
+    awk -F'\t' -v wanted="$1" '$3 == wanted { print $6; exit }' "$rows_file"
+}
+
+reach_text() {
+    if [[ -n "$1" ]]; then
+        printf 'отклик %s мс (SSH)' "$1"
+    else
+        printf 'отклик недоступен'
+    fi
+}
+
+# Итог и строки сводки по группам: серверы (цвет по статусу, отклик по SSH),
+# связи и задержки (голубой при OK), DNS (статус каждой проверки), итог.
+build_summary() {
+    local section seg status label value ms line text color
+    local ok warn fail worst reach
+    local total_ok=0 total_warn=0 total_fail=0
+    local dns_total=0 dns_passed=0 dns_worst=OK
+
+    for section in ENTRY EXIT FRONT LINK DNS; do
+        ok="${counts[$section:OK]:-0}"
+        warn="${counts[$section:WARN]:-0}"
+        fail="${counts[$section:FAIL]:-0}"
+        total_ok=$((total_ok + ok))
+        total_warn=$((total_warn + warn))
+        total_fail=$((total_fail + fail))
+    done
+    if (( total_fail > 0 )); then
+        sum_verdict=FAIL
+        sum_title='работа каскада нарушена'
+        plain_line="BAD: ошибок: $total_fail, замечаний: $total_warn"
+        exit_code=1
+    elif (( total_warn > 0 )); then
+        sum_verdict=WARN
+        sum_title='каскад работает, есть замечания'
+        plain_line="WARN: каскад работает, замечаний: $total_warn"
+        exit_code=3
+    else
+        sum_verdict=OK
+        sum_title='все проверки пройдены'
+        plain_line="GOOD: все проверки пройдены ($total_ok)"
+        exit_code=0
+    fi
+
+    sum_head 'СЕРВЕРЫ'
+    for section in ENTRY EXIT FRONT; do
+        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+            continue
+        fi
+        ok="${counts[$section:OK]:-0}"
+        warn="${counts[$section:WARN]:-0}"
+        fail="${counts[$section:FAIL]:-0}"
+        worst=OK
+        if (( warn > 0 )); then
+            worst=WARN
+        fi
+        if (( fail > 0 )); then
+            worst=FAIL
+        fi
+        case "$section" in
+            ENTRY) reach='локальный узел' ;;
+            EXIT) reach="$(reach_text "$(rtt_of 'ENTRY → EXIT: SSH')")" ;;
+            *) reach="$(reach_text "$(rtt_of 'ENTRY → FRONT: SSH')")" ;;
+        esac
+        sum_add "$(status_color "$worst")" "$section: OK $ok · WARN $warn · FAIL $fail · $reach"
+    done
+
+    sum_head 'СВЯЗИ И ЗАДЕРЖКИ'
+    while IFS= read -r line; do
+        split_row "$line"
+        [[ "$seg" == LINK ]] || continue
+        case "$status" in
+            OK) color="$c_info" ;;
+            WARN) color="$c_warn" ;;
+            *) color="$c_fail" ;;
+        esac
+        text="$label"
+        [[ -z "$value" ]] || text+=": $value"
+        sum_add "$color" "$text"
+    done <"$rows_file"
+
+    sum_head 'DNS'
+    while IFS= read -r line; do
+        split_row "$line"
+        [[ "$seg" == DNS ]] || continue
+        dns_total=$((dns_total + 1))
+        case "$status" in
+            OK) dns_passed=$((dns_passed + 1)) ;;
+            WARN)
+                if [[ "$dns_worst" == OK ]]; then
+                    dns_worst=WARN
+                fi
+                ;;
+            *) dns_worst=FAIL ;;
+        esac
+        text="$label"
+        if [[ -n "$ms" ]]; then
+            text+=": $ms мс"
+        else
+            [[ -z "$value" ]] || text+=": $value"
+        fi
+        sum_add "$(status_color "$status")" "$text"
+    done <"$rows_file"
+    if (( dns_total == 0 )); then
+        sum_add "$c_warn" 'статус DNS: проверки не выполнены'
+    else
+        sum_add "$(status_color "$dns_worst")" "статус DNS: $dns_worst ($dns_passed из $dns_total)"
+    fi
+
+    sum_head 'ИТОГ'
+    sum_add "$(status_color "$sum_verdict")" "ИТОГ: OK $total_ok · WARN $total_warn · FAIL $total_fail"
+}
+
+# Печать сводки. В терминале - рамка цветом итога с группами; без терминала -
+# прежние строки и итог GOOD / WARN / BAD.
+print_summary() {
+    local i border width inner rule
+    if [[ "$report_fancy" != true ]]; then
+        for i in "${!sum_text[@]}"; do
+            [[ "${sum_color[$i]}" != SEP ]] || continue
+            printf '%s\n' "${sum_text[$i]}"
+        done
+        printf '%s\n' "$plain_line"
+        return 0
+    fi
+    local LC_ALL=C.UTF-8
+    case "$sum_verdict" in
+        OK) border=$'\033[1;32m' ;;
+        WARN) border=$'\033[1;33m' ;;
+        *) border=$'\033[1;31m' ;;
+    esac
+    width="$(tput cols 2>/dev/null || true)"
+    [[ "$width" =~ ^[0-9]+$ ]] || width=80
+    (( width <= 100 )) || width=100
+    (( width >= 40 )) || width=40
+    inner=$(( width - 4 ))
+    printf -v rule '%*s' "$(( width - 2 ))" ''
+    rule="${rule// /─}"
+    printf '\n%s┌%s┐%s\n' "$border" "$rule" "$report_reset"
+    report_box_row "$border" "$inner" "$sum_verdict  cascade-check: $sum_title" "$border"
+    printf '%s├%s┤%s\n' "$border" "$rule" "$report_reset"
+    for i in "${!sum_text[@]}"; do
+        if [[ "${sum_color[$i]}" == SEP ]]; then
+            printf '%s├%s┤%s\n' "$border" "$rule" "$report_reset"
+        else
+            report_box_row "$border" "$inner" "${sum_text[$i]}" "${sum_color[$i]}"
+        fi
+    done
+    printf '%s└%s┘%s\n' "$border" "$rule" "$report_reset"
+}
+
 render() {
-    local section seg status label value hint text line ok warn fail
-    local total_ok=0 total_warn=0 total_fail=0 verdict title plain
-    local -a summary=()
-    local -a sections=(ENTRY LINK EXIT FRONT)
+    local section seg status label value hint text line
+    local -a sections=(ENTRY DNS LINK EXIT FRONT)
     local -A titles=()
     titles[ENTRY]='ENTRY: локальные проверки'
-    titles[LINK]='СВЯЗИ КАСКАДА'
+    titles[DNS]='DNS: резолверы и маршруты'
+    titles[LINK]='СВЯЗИ КАСКАДА: задержки и выход'
     titles[EXIT]='EXIT: удалённый отчёт'
     titles[FRONT]='FRONT: удалённый отчёт'
 
@@ -394,40 +591,8 @@ render() {
     done
 
     print_recommendations
-
-    for section in ENTRY LINK EXIT FRONT; do
-        [[ "$section" != FRONT || "$front_present" == true ]] || continue
-        ok="${counts[$section:OK]:-0}"
-        warn="${counts[$section:WARN]:-0}"
-        fail="${counts[$section:FAIL]:-0}"
-        summary+=("$section: OK $ok · WARN $warn · FAIL $fail")
-        total_ok=$((total_ok + ok))
-        total_warn=$((total_warn + warn))
-        total_fail=$((total_fail + fail))
-    done
-    summary+=("ИТОГ: OK $total_ok · WARN $total_warn · FAIL $total_fail")
-
-    if (( total_fail > 0 )); then
-        verdict=FAIL
-        title='работа каскада нарушена'
-        plain="BAD: ошибок: $total_fail, замечаний: $total_warn"
-        exit_code=1
-    elif (( total_warn > 0 )); then
-        verdict=WARN
-        title='каскад работает, есть замечания'
-        plain="WARN: каскад работает, замечаний: $total_warn"
-        exit_code=3
-    else
-        verdict=OK
-        title='все проверки пройдены'
-        plain="GOOD: все проверки пройдены ($total_ok)"
-        exit_code=0
-    fi
-    if [[ "$report_fancy" == true ]]; then
-        report_box "$verdict" "cascade-check: $title" "${summary[@]}"
-    else
-        printf '%s\n' "${summary[@]}" "$plain"
-    fi
+    build_summary
+    print_summary
 }
 
 main() {

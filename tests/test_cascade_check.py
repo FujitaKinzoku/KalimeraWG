@@ -61,6 +61,11 @@ def cascade_values(directory: Path, key: Path | None = None) -> dict:
     }
 
 
+def row(segment: str, status: str, label: str, value: str = "", hint: str = "", ms: str = "") -> str:
+    """Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ, МИЛЛИСЕКУНДЫ."""
+    return "\t".join((segment, status, label, value, hint, ms)) + "\n"
+
+
 class ShellcheckTests(unittest.TestCase):
     def test_rendered_scripts_pass_shellcheck(self) -> None:
         shellcheck = shutil.which("shellcheck")
@@ -123,60 +128,76 @@ class CascadeCheckTests(unittest.TestCase):
 
     def test_empty_middle_fields_are_kept(self) -> None:
         raw = self.dir / "raw.tsv"
-        raw.write_text("ENTRY\tFAIL\tпроверка\t\tрекомендация\n", encoding="utf-8")
+        raw.write_text(row("ENTRY", "FAIL", "проверка", "", "рекомендация"), encoding="utf-8")
         result = self.run_body(f"import_rows local {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         # read с табуляцией сдвинул бы рекомендацию в поле значения.
-        self.assertEqual(result.stdout, "ENTRY\tFAIL\tпроверка\t\tрекомендация\n")
+        self.assertEqual(result.stdout, row("ENTRY", "FAIL", "проверка", "", "рекомендация"))
+
+    def test_milliseconds_field_is_kept(self) -> None:
+        raw = self.dir / "raw.tsv"
+        raw.write_text(row("LINK", "OK", "ENTRY → EXIT: SSH", "TCP 58 мс", "", "58"), encoding="utf-8")
+        result = self.run_body(f"import_rows local {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
+        self.assertEqual(result.stdout, row("LINK", "OK", "ENTRY → EXIT: SSH", "TCP 58 мс", "", "58"))
 
     def test_remote_rows_take_the_expected_segment(self) -> None:
         raw = self.dir / "raw.tsv"
         raw.write_text(
-            "ENTRY\tOK\tслужба\t\t\nEXIT\tOK\tавтопроверка\tзначение\t\n",
+            row("ENTRY", "OK", "служба")
+            + row("EXIT", "OK", "автопроверка", "значение"),
             encoding="utf-8",
         )
         result = self.run_body(f"import_rows EXIT {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout,
-            "EXIT\tOK\tслужба\t\t\nEXIT\tOK\tавтопроверка\tзначение\t\n",
+            row("EXIT", "OK", "служба") + row("EXIT", "OK", "автопроверка", "значение"),
         )
+
+    def test_remote_link_rows_keep_the_link_segment(self) -> None:
+        raw = self.dir / "raw.tsv"
+        raw.write_text(row("LINK", "OK", "выход в Интернет с EXIT", "HTTP 200", "", "54"), encoding="utf-8")
+        result = self.run_body(f"import_rows EXIT {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
+        self.assertEqual(result.stdout, row("LINK", "OK", "выход в Интернет с EXIT", "HTTP 200", "", "54"))
 
     def test_local_rows_cannot_claim_another_segment(self) -> None:
         raw = self.dir / "raw.tsv"
-        raw.write_text("FRONT\tOK\tчужая строка\t\t\n", encoding="utf-8")
+        raw.write_text(row("FRONT", "OK", "чужая строка"), encoding="utf-8")
         result = self.run_body(f"import_rows local {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
-        self.assertEqual(result.stdout, "ENTRY\tOK\tчужая строка\t\t\n")
+        self.assertEqual(result.stdout, row("ENTRY", "OK", "чужая строка"))
 
     def test_control_characters_are_removed(self) -> None:
         raw = self.dir / "raw.tsv"
-        raw.write_bytes("EXIT\tOK\t\x1b[31mметка\x07\t\t\n".encode("utf-8"))
+        raw.write_bytes(row("EXIT", "OK", "\x1b[31mметка\x07").encode("utf-8"))
         result = self.run_body(f"import_rows EXIT {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
-        self.assertEqual(result.stdout, "EXIT\tOK\t[31mметка\t\t\n")
+        self.assertEqual(result.stdout, row("EXIT", "OK", "[31mметка"))
 
     def test_lines_with_wrong_shape_are_dropped(self) -> None:
         raw = self.dir / "raw.tsv"
-        raw.write_text("без табуляций\nEXIT\tBAD\tстатус\t\t\nEXIT\tOK\t\t\t\n", encoding="utf-8")
+        raw.write_text(
+            "без табуляций\n" + row("EXIT", "BAD", "статус") + "EXIT\tOK\t\t\t\t\n",
+            encoding="utf-8",
+        )
         result = self.run_body(f"import_rows EXIT {shlex.quote(str(raw))}\ncat \"$rows_file\"\n")
         self.assertEqual(result.stdout, "")
 
     def test_exit_codes_follow_the_worst_status(self) -> None:
         cases = (
-            ("ENTRY\tOK\tвсё\t\t\n", 0, "GOOD:"),
-            ("ENTRY\tWARN\tзамечание\t\tсделать\n", 3, "WARN:"),
-            ("ENTRY\tFAIL\tошибка\t\tсделать\n", 1, "BAD:"),
+            (row("ENTRY", "OK", "всё"), 0, "GOOD:"),
+            (row("ENTRY", "WARN", "замечание", "", "сделать"), 3, "WARN:"),
+            (row("ENTRY", "FAIL", "ошибка", "", "сделать"), 1, "BAD:"),
         )
-        for row, code, word in cases:
+        for text, code, word in cases:
             with self.subTest(word=word):
-                self.rows.write_text(row, encoding="utf-8")
+                self.rows.write_text(text, encoding="utf-8")
                 result = self.run_body('render\nexit "$exit_code"\n')
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 self.assertIn(word, result.stdout)
 
     def test_fancy_box_lists_fail_first_with_its_recommendation(self) -> None:
         self.rows.write_text(
-            "ENTRY\tOK\tслужба\t\t\n"
-            "ENTRY\tFAIL\tсвежий handshake\tнет\tперезапустите туннель\n",
+            row("ENTRY", "OK", "служба")
+            + row("ENTRY", "FAIL", "свежий handshake", "нет", "перезапустите туннель"),
             encoding="utf-8",
         )
         result = self.run_body('render\nexit "$exit_code"\n', style="fancy")
@@ -189,10 +210,57 @@ class CascadeCheckTests(unittest.TestCase):
         # Итоговая рамка - последняя: после неё ничего не печатается.
         self.assertTrue(plain.rstrip().endswith("┘"), plain[-300:])
 
+    def test_summary_groups_appear_in_order(self) -> None:
+        self.rows.write_text(
+            row("ENTRY", "OK", "служба")
+            + row("LINK", "OK", "ENTRY → EXIT: SSH", "TCP 58 мс", "", "58")
+            + row("DNS", "OK", "DNS: yandex.ru (РФ)", "77.88.44.55 за 1 мс", "", "1")
+            + row("EXIT", "OK", "служба EXIT"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n")
+        plain = ANSI.sub("", result.stdout)
+        # Заголовки разделов в деталях похожи на группы сводки ("DNS: ..."),
+        # поэтому поиск идёт от начала сводки.
+        start = plain.index("СЕРВЕРЫ")
+        positions = [plain.index(title, start) for title in ("СЕРВЕРЫ", "СВЯЗИ И ЗАДЕРЖКИ", "DNS", "ИТОГ")]
+        self.assertEqual(positions, sorted(positions), plain)
+
+    def test_server_line_shows_response_time_from_the_ssh_link(self) -> None:
+        self.rows.write_text(
+            row("ENTRY", "OK", "служба")
+            + row("LINK", "OK", "ENTRY → EXIT: SSH", "TCP 58 мс", "", "58")
+            + row("EXIT", "OK", "служба EXIT"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n")
+        self.assertIn("EXIT: OK 1 · WARN 0 · FAIL 0 · отклик 58 мс (SSH)", result.stdout)
+
+    def test_dns_status_is_the_worst_check(self) -> None:
+        self.rows.write_text(
+            row("DNS", "OK", "DNS: example.com", "1.2.3.4 за 1 мс", "", "1")
+            + row("DNS", "WARN", "DNS: yandex.ru", "медленно", "проверьте резолвер", "400"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n")
+        self.assertIn("статус DNS: WARN (1 из 2)", result.stdout)
+
+    def test_fancy_summary_colors_each_group(self) -> None:
+        self.rows.write_text(
+            row("ENTRY", "OK", "служба")
+            + row("LINK", "OK", "туннель ENTRY–EXIT: TCP через туннель", "3 из 3, среднее 49 мс", "", "49")
+            + row("DNS", "OK", "DNS: example.com", "1.2.3.4 за 1 мс", "", "1"),
+            encoding="utf-8",
+        )
+        result = self.run_body("render\n", style="fancy")
+        self.assertIn("\x1b[1;32m┌", result.stdout)  # рамка итога зелёная
+        self.assertIn("\x1b[36m", result.stdout)  # связи и задержки голубые
+        self.assertIn("\x1b[32m", result.stdout)  # серверы и DNS по статусу OK
+
     def test_same_recommendation_is_printed_once(self) -> None:
         self.rows.write_text(
-            "ENTRY\tWARN\tпервое\t\tсделать одно\n"
-            "ENTRY\tWARN\tвторое\t\tсделать одно\n",
+            row("ENTRY", "WARN", "первое", "", "сделать одно")
+            + row("ENTRY", "WARN", "второе", "", "сделать одно"),
             encoding="utf-8",
         )
         result = self.run_body("render\n")
@@ -213,17 +281,18 @@ class CascadeCheckTests(unittest.TestCase):
         result = self.run_body(
             'collect_remote EXIT 192.0.2.20 56777\ncat "$rows_file"\n',
             fake_ssh=(
-                "printf 'ENTRY\\tOK\\tслужба\\t\\t\\n'\n"
-                "printf 'EXIT\\tOK\\tавтопроверка EXIT\\tзначение\\t\\n'\n"
+                "printf 'ENTRY\\tOK\\tслужба\\t\\t\\t\\n'\n"
+                "printf 'EXIT\\tOK\\tавтопроверка EXIT\\tзначение\\t\\t\\n'\n"
                 "printf 'мусор без табуляций\\n'\n"
-                "printf 'EXIT\\tBAD\\tстатус\\t\\t\\n'\n"
+                "printf 'EXIT\\tBAD\\tстатус\\t\\t\\t\\n'\n"
                 "exit 0\n"
             ),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout,
-            "EXIT\tOK\tслужба\t\t\nEXIT\tOK\tавтопроверка EXIT\tзначение\t\n",
+            row("EXIT", "OK", "служба")
+            + row("EXIT", "OK", "автопроверка EXIT", "значение"),
         )
 
     def test_ssh_is_restricted_to_the_report_user_and_known_host(self) -> None:
@@ -314,9 +383,9 @@ class KalimeraReportTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout,
-            "ENTRY\tOK\tслужба\t\t\n"
-            "ENTRY\tFAIL\tправило mark 0x1\t\tsudo systemctl reload awg-entry-routing.service\n"
-            "ENTRY\tWARN\tcoredump не сохраняются\t\t\n",
+            row("ENTRY", "OK", "служба")
+            + row("ENTRY", "FAIL", "правило mark 0x1", "", "sudo systemctl reload awg-entry-routing.service")
+            + row("ENTRY", "WARN", "coredump не сохраняются"),
         )
 
     def test_rendered_script_passes_bash_syntax_check(self) -> None:
@@ -327,6 +396,17 @@ class KalimeraReportTests(unittest.TestCase):
         text = REPORT.read_text(encoding="utf-8")
         self.assertIn("kalimera-report запускается от root", text)
         self.assertIn("--tsv) [[ $# -eq 1 ]]", text)
+
+    def test_dns_rows_belong_to_the_dns_segment(self) -> None:
+        text = REPORT.read_text(encoding="utf-8")
+        self.assertIn("emit DNS OK", text)
+        self.assertIn("emit DNS FAIL", text)
+
+    def test_link_rows_are_measured_in_milliseconds(self) -> None:
+        text = REPORT.read_text(encoding="utf-8")
+        # Задержки уходят в шестое поле: сводка берёт их оттуда.
+        self.assertIn("'' \"$ms\"", text)
+        self.assertIn("'' \"$avg\"", text)
 
 
 class CascadeRolePolicyTests(unittest.TestCase):
@@ -387,6 +467,13 @@ class CascadeRolePolicyTests(unittest.TestCase):
             "hostvars[groups['entry'][0]].ansible_host)",
             defaults,
         )
+
+    def test_menu_shows_a_green_line_when_no_reboot_is_needed(self) -> None:
+        status = (ROOT / "roles" / "terminal" / "templates" / "kalimera-status.py.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"ПЕРЕЗАГРУЗКА"', status)
+        self.assertIn('("Статус", "перезагрузка не требуется", "OK")', status)
 
     def test_admin_gateway_allows_only_the_named_command(self) -> None:
         gateway = (
