@@ -183,15 +183,73 @@
     fail_msg: "Нельзя безопасно обновить неполную установку AmneziaWG"
   when: awg_package_refresh | bool
 
-- name: Предварительная загрузка предыдущих пакетов для гарантированного отката
+# Откат должен работать и тогда, когда PPA уже не отдаёт прежнюю версию. Поэтому
+# предыдущие пакеты берутся из локального хранилища или из кэша apt, а из PPA -
+# только если локальной копии нет. Всё это выполняется до установки новых
+# пакетов: если полного набора нет нигде, обновление останавливается, серверы не
+# меняются.
+- name: Подготовка локального хранилища пакетов AmneziaWG
+  ansible.builtin.file:
+    path: "{{ amneziawg_package_store_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: awg_package_refresh | bool
+
+- name: Поиск локальных копий установленных пакетов AmneziaWG
+  ansible.builtin.find:
+    paths:
+      - "{{ amneziawg_package_store_dir }}"
+      - /var/cache/apt/archives
+    patterns: "{{ item.split('=')[0] }}_{{ item.split('=')[1] | replace(':', '%3a') }}_*.deb"
+    file_type: file
+  loop: "{{ amneziawg_installed_before_update.results | map(attribute='stdout') | map('trim') | list }}"
+  loop_control:
+    label: "{{ item }}"
+  register: amneziawg_local_copies
+  when: awg_package_refresh | bool
+
+- name: Загрузка из PPA предыдущих пакетов AmneziaWG, которых нет локально
   ansible.builtin.command:
     argv: >-
       {{ ['/usr/bin/apt-get', 'download'] +
-         (amneziawg_installed_before_update.results | map(attribute='stdout') | map('trim') | list) }}
+         (amneziawg_local_copies.results | rejectattr('matched', 'gt', 0) | map(attribute='item') | list) }}
     chdir: "{{ amneziawg_component_rollback_dir }}/previous"
   environment:
     DEBIAN_FRONTEND: noninteractive
   changed_when: false
+  when:
+    - awg_package_refresh | bool
+    - amneziawg_local_copies.results | rejectattr('matched', 'gt', 0) | list | length > 0
+
+- name: Копирование локальных копий предыдущих пакетов AmneziaWG для отката
+  ansible.builtin.copy:
+    src: "{{ item.files[0].path }}"
+    dest: "{{ amneziawg_component_rollback_dir }}/previous/{{ item.files[0].path | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ amneziawg_local_copies.results | selectattr('matched', 'gt', 0) | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: awg_package_refresh | bool
+
+- name: Поиск предыдущих пакетов AmneziaWG для отката
+  ansible.builtin.find:
+    paths: "{{ amneziawg_component_rollback_dir }}/previous"
+    patterns: "*.deb"
+    file_type: file
+  register: amneziawg_previous_packages
+  when: awg_package_refresh | bool
+
+- name: Проверка, что предыдущие пакеты AmneziaWG готовы для отката
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - amneziawg_previous_packages.matched == amneziawg_package_names | length
+    fail_msg: "Нет полного набора предыдущих пакетов AmneziaWG для отката; серверы не изменены"
   when: awg_package_refresh | bool
 
 - name: Определение необходимости обращения к PPA AmneziaWG
@@ -295,3 +353,27 @@
   community.general.modprobe:
     name: amneziawg
     state: present
+
+# Хранилище заполняется только после успешной установки и проверки модуля.
+# Поиск идёт по точной версии установленного пакета, поэтому лишняя копия
+# новой версии после отката не будет выбрана вместо прежней.
+- name: Поиск установленных пакетов AmneziaWG для локального хранилища
+  ansible.builtin.find:
+    paths: "{{ amneziawg_component_rollback_dir }}/candidate"
+    patterns: "*.deb"
+    file_type: file
+  register: amneziawg_candidate_packages
+  when: awg_package_refresh | bool
+
+- name: Сохранение установленных пакетов AmneziaWG в локальном хранилище
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ amneziawg_package_store_dir }}/{{ item.path | basename }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ amneziawg_candidate_packages.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: awg_package_refresh | bool

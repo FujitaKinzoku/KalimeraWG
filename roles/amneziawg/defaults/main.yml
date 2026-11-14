@@ -12,6 +12,10 @@ awg_package_rollback: false
 awg_package_transaction_id: manual
 amneziawg_component_rollback_dir: >-
   /var/cache/awg-iac/component-rollback/{{ awg_package_transaction_id }}
+# Постоянное хранилище проверенных пакетов AmneziaWG: откат не зависит ни от PPA,
+# ни от очистки кэша apt (apt-get clean). Не путать с каталогом отката, который
+# очищается при каждом обновлении.
+amneziawg_package_store_dir: /var/lib/awg-iac/amneziawg-packages
 amneziawg_package_names:
   - amneziawg
   - amneziawg-dkms
