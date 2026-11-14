@@ -181,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.1.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.2.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.1.1` release rather than the moving `main`
+The command installs the pinned `v3.2.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.1.1 --depth 1 \
+git clone --branch v3.2.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -349,7 +349,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.1.1
+sudo git -C /root/KalimeraWG switch --detach v3.2.0
 kalimera-deploy --resume
 ```
 
@@ -376,6 +376,10 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.2.0:** `cascade-check` on ENTRY checks the whole cascade in one
+  command: links and latency, CDN, DNS, EXIT and FRONT, with an OK / WARN /
+  FAIL summary. Rolling back an AmneziaWG update no longer depends on the PPA
+  or on apt cache cleanup.
 - **v3.1.1:** VLESS resolves Russian names on ENTRY with the same DNS
   policy as AmneziaWG (Russian DoH via dnsmasq) instead of the foreign
   Unbound.
