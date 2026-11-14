@@ -63,7 +63,7 @@
     state: present
   when: awg_node_role in ['exit', 'front']
 
-- name: Право пользователя отчёта: одна команда через sudo без пароля
+- name: Право пользователя отчёта - одна команда через sudo без пароля
   ansible.builtin.copy:
     dest: /etc/sudoers.d/91-kalimera-report
     owner: root
@@ -82,7 +82,7 @@
   register: cascade_check_entry_public_key_file
   when: awg_node_role in ['exit', 'front']
 
-- name: Ключ ENTRY только для отчёта: адрес ENTRY и одна команда
+- name: Ключ ENTRY только для отчёта - адрес ENTRY и одна команда
   ansible.posix.authorized_key:
     user: "{{ security_cascade_report_user }}"
     key: "{{ cascade_check_entry_public_key_file.content | b64decode | trim }}"
