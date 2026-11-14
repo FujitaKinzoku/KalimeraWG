@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+# Управляется Ansible. Полная проверка каскада с ENTRY: сам ENTRY, связи
+# ENTRY–EXIT и ENTRY–FRONT, отчёты EXIT и FRONT по отдельному ключу, который
+# разрешает только kalimera-report. Оформление как у awg-health; в конце - сводка
+# OK, WARN и FAIL. Код возврата: 0 - всё в порядке, 3 - есть замечания, 1 - ошибки.
+set -Eeuo pipefail
+
+readonly report_bin={{ cascade_check_report_path | quote }}
+readonly key_path={{ cascade_check_key_path | quote }}
+readonly known_hosts_path={{ cascade_check_known_hosts_path | quote }}
+readonly remote_user={{ cascade_check_user | quote }}
+readonly exit_host={{ cascade_check_exit_host | quote }}
+readonly exit_port={{ cascade_check_exit_port | int }}
+readonly front_present={{ 'true' if (cascade_check_front_present | bool) else 'false' }}
+readonly front_host={{ cascade_check_front_host | quote }}
+readonly front_port={{ cascade_check_front_port | int }}
+
+{% raw %}
+usage() { echo 'Использование: cascade-check'; }
+
+work=''
+rows_file=''
+exit_code=0
+declare -A counts=()
+
+# >>> kalimera-report: общий блок оформления отчёта.
+# Блок одинаков в awg-health, server-audit и kalimera-updates, совпадение
+# проверяет tests/test_report_style.py. Цвет, итоговая рамка и рекомендации
+# выводятся только в терминал. В файл, журнал, Ansible и Telegram-монитор
+# уходит прежний текст: без управляющих символов, с префиксами
+# OK/FAIL/WARN/UPD/INFO, по которым эти строки разбирают.
+# KALIMERA_REPORT_STYLE=fancy|plain нужен тестам; sudo эту переменную не
+# пропускает.
+case "${KALIMERA_REPORT_STYLE:-auto}" in
+    fancy) report_fancy=true ;;
+    plain) report_fancy=false ;;
+    *)
+        report_fancy=false
+        if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-dumb}" != dumb ]]; then
+            report_fancy=true
+        fi
+        ;;
+esac
+report_reset=$'\033[0m'
+# KALIMERA_REPORT_RESULTS - файл для cascade-check: report_line записывает OK,
+# report_note - FAIL и WARN с рекомендацией. Переменная сбрасывается сразу, чтобы
+# вложенные awg-health или server-audit не дописывали свои строки в тот же файл.
+report_results_file="${KALIMERA_REPORT_RESULTS:-}"
+unset KALIMERA_REPORT_RESULTS
+# Замечания для итоговой рамки: "FAIL|WARN<TAB>что не так<TAB>что сделать".
+# FAIL - работа каскада нарушена критически, WARN - каскад работает.
+report_notes=()
+report_box_lines=()
+
+# Строка результата: OK зелёная, FAIL и WARN жёлтые, UPD голубая.
+report_line() {
+    local level="$1" text="$2" color=''
+    if [[ "$report_fancy" == true ]]; then
+        case "$level" in
+            OK) color=$'\033[32m' ;;
+            FAIL|WARN) color=$'\033[33m' ;;
+            UPD) color=$'\033[36m' ;;
+        esac
+    fi
+    printf '%s%-4s %s%s\n' "$color" "$level" "$text" "${color:+$report_reset}"
+    [[ "$level" != OK ]] || report_export OK "$text"
+}
+
+# Строка в файл результатов: "СТАТУС<TAB>проверка<TAB>рекомендация".
+report_export() {
+    [[ -n "$report_results_file" ]] || return 0
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"$report_results_file"
+}
+
+report_note() {
+    report_notes+=("$1"$'\t'"$2"$'\t'"${3:-}")
+    report_export "$1" "$2" "${3:-}"
+}
+
+# $1 - цвет рамки, $2 - ширина текста, $3 - строка, $4 - цвет строки.
+report_box_emit() {
+    local pad=$(( $2 - ${#3} ))
+    (( pad > 0 )) || pad=0
+    printf '%s│%s %s%s%s%*s %s│%s\n' "$1" "$report_reset" "${4:-}" "$3" \
+        "${4:+$report_reset}" "$pad" '' "$1" "$report_reset"
+}
+
+# Перенос по словам. Продолжение строки с маркером (→, ✗, !) выравнивается
+# по тексту после маркера.
+report_box_row() {
+    local lead rest hang line word has_word=false
+    local -a words=()
+    lead="${3%%[![:space:]]*}"
+    rest="${3#"$lead"}"
+    hang="$lead"
+    case "$rest" in
+        '→ '*|'✗ '*|'! '*) hang+='  ' ;;
+    esac
+    read -r -a words <<<"$rest" || true
+    line="$lead"
+    for word in "${words[@]}"; do
+        if [[ "$has_word" == true ]] && (( ${#line} + 1 + ${#word} > $2 )); then
+            report_box_emit "$1" "$2" "$line" "${4:-}"
+            line="$hang$word"
+        elif [[ "$has_word" == true ]]; then
+            line+=" $word"
+        else
+            line+="$word"
+        fi
+        has_word=true
+    done
+    report_box_emit "$1" "$2" "$line" "${4:-}"
+}
+
+# Итоговая рамка: $1 - OK (зелёная), WARN (жёлтая) или FAIL (красная),
+# $2 - заголовок, дальше строки содержимого.
+report_box() {
+    [[ "$report_fancy" == true ]] || return 0
+    local LC_ALL=C.UTF-8
+    local status="$1" title="$2" color width inner rule line
+    shift 2
+    case "$status" in
+        OK) color=$'\033[1;32m' ;;
+        WARN) color=$'\033[1;33m' ;;
+        *) color=$'\033[1;31m' ;;
+    esac
+    width="$(tput cols 2>/dev/null || true)"
+    [[ "$width" =~ ^[0-9]+$ ]] || width=80
+    (( width <= 100 )) || width=100
+    (( width >= 40 )) || width=40
+    inner=$(( width - 4 ))
+    printf -v rule '%*s' "$(( width - 2 ))" ''
+    rule="${rule// /─}"
+    printf '\n%s┌%s┐%s\n' "$color" "$rule" "$report_reset"
+    report_box_row "$color" "$inner" "$status  $title" "$color"
+    if (( $# > 0 )); then
+        printf '%s├%s┤%s\n' "$color" "$rule" "$report_reset"
+        for line in "$@"; do
+            report_box_row "$color" "$inner" "$line"
+        done
+    fi
+    printf '%s└%s┘%s\n' "$color" "$rule" "$report_reset"
+}
+
+# Замечания -> строки рамки в report_box_lines: сначала критичные (✗), потом
+# остальные (!). Одинаковая рекомендация печатается один раз после всех
+# замечаний, к которым она относится. Не больше 12 замечаний: остальные
+# видны в строках выше.
+report_note_lines() {
+    local severity marker note level text hint key shown=0 hidden=0 group_shown
+    local -a order=()
+    local -A texts=()
+    report_box_lines=()
+    for severity in FAIL WARN; do
+        marker='!'
+        [[ "$severity" != FAIL ]] || marker='✗'
+        order=()
+        texts=()
+        for note in "${report_notes[@]}"; do
+            IFS=$'\t' read -r level text hint <<<"$note" || true
+            [[ "$level" == "$severity" ]] || continue
+            key="k:$hint"
+            if [[ -z "${texts[$key]+set}" ]]; then
+                order+=("$key")
+                texts[$key]=''
+            fi
+            texts[$key]+="$text"$'\n'
+        done
+        for key in "${order[@]}"; do
+            group_shown=false
+            while IFS= read -r text; do
+                [[ -n "$text" ]] || continue
+                if (( shown < 12 )); then
+                    report_box_lines+=("$marker $text")
+                    shown=$((shown + 1))
+                    group_shown=true
+                else
+                    hidden=$((hidden + 1))
+                fi
+            done <<<"${texts[$key]}"
+            hint="${key#k:}"
+            if [[ "$group_shown" == true && -n "$hint" ]]; then
+                report_box_lines+=("  → $hint")
+            fi
+        done
+    done
+    if (( hidden > 0 )); then
+        report_box_lines+=("… и ещё замечаний: $hidden, они отмечены в строках выше")
+    fi
+}
+# <<< kalimera-report
+
+# Текст с удалённых серверов очищается от управляющих символов: чужой вывод не
+# должен менять экран или подменять строки отчёта.
+clean_text() {
+    LC_ALL=C tr -d '\000-\010\013-\037\177' <<<"$1"
+}
+
+# Строка отчёта: СЕГМЕНТ, СТАТУС, ПРОВЕРКА, ЗНАЧЕНИЕ, РЕКОМЕНДАЦИЯ.
+emit_row() {
+    printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" "${5:-}" >>"$rows_file"
+}
+
+# Разбор строки на пять полей. read с IFS-табуляцией сдвинул бы пустое поле,
+# поэтому делим по табуляциям вручную: пустые значения сохраняются.
+split_row() {
+    local rest="$1"
+    seg="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    status="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    label="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    value="${rest%%$'\t'*}"
+    hint="${rest#*$'\t'}"
+}
+
+# Строки из kalimera-report: local - локальный отчёт, где сегмент ENTRY или LINK;
+# имя сегмента для удалённого отчёта задаётся здесь, а не берётся из ответа.
+import_rows() {
+    local expected="$1" raw="$2" line tabs seg status label value hint
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="$(clean_text "$line")"
+        tabs="${line//[^$'\t']/}"
+        [[ ${#tabs} -eq 4 ]] || continue
+        split_row "$line"
+        case "$status" in
+            OK|WARN|FAIL) ;;
+            *) continue ;;
+        esac
+        [[ -n "$label" ]] || continue
+        if [[ "$expected" == local ]]; then
+            case "$seg" in
+                ENTRY|LINK) ;;
+                *) seg=ENTRY ;;
+            esac
+        else
+            seg="$expected"
+        fi
+        emit_row "$seg" "$status" "$label" "$value" "$hint"
+    done <"$raw"
+}
+
+# Время TCP-подключения в миллисекундах; ошибка, если порт молчит 5 с.
+tcp_ms() {
+    local host="$1" port="$2" started finished
+    [[ -n "$host" ]] && (( port > 0 )) || return 1
+    started="$(date +%s%N)"
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null || return 1
+    finished="$(date +%s%N)"
+    printf '%s\n' $(( (finished - started) / 1000000 ))
+}
+
+# Связь ENTRY с соседним сервером по SSH: задержка TCP-подключения к SSH-порту.
+tcp_row() {
+    local label="$1" host="$2" port="$3" ms
+    if ms="$(tcp_ms "$host" "$port")"; then
+        if (( ms > 300 )); then
+            emit_row LINK WARN "$label" "TCP $ms мс: высокая задержка" 'проверьте загрузку сервера и хостинг; awg-health --strict на нём'
+        else
+            emit_row LINK OK "$label" "TCP $ms мс"
+        fi
+    else
+        emit_row LINK FAIL "$label" 'порт не отвечает за 5 с' 'проверьте UFW и доступность сервера; SSH-порт должен совпадать с inventory'
+    fi
+}
+
+link_rows() {
+    tcp_row 'ENTRY → EXIT: SSH' "$exit_host" "$exit_port"
+    if [[ "$front_present" == true ]]; then
+        tcp_row 'ENTRY → FRONT: SSH' "$front_host" "$front_port"
+    fi
+}
+
+collect_local() {
+    local raw="$work/entry.raw" rc=0
+    if [[ ! -x "$report_bin" ]]; then
+        emit_row ENTRY FAIL 'kalimera-report не установлен' '' 'на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    "$report_bin" --tsv >"$raw" 2>/dev/null || rc=$?
+    import_rows local "$raw"
+    if (( rc != 0 )); then
+        emit_row ENTRY FAIL 'локальный отчёт ENTRY' "код возврата $rc" 'на ENTRY: kalimera-deploy --resume; сообщите вывод cascade-check'
+    fi
+}
+
+# Удалённый отчёт: один SSH-вызов по ключу, который разрешает только kalimera-report.
+# -F /dev/null отключает пользовательскую конфигурацию ssh, известный хост
+# проверяется по файлу, записанному при установке.
+collect_remote() {
+    local segment_name="$1" host="$2" port="$3" raw="$work/$1.raw" err="$work/$1.err"
+    local rc=0 count reason
+    if [[ ! -r "$key_path" ]]; then
+        emit_row "$segment_name" FAIL 'ключ cascade-check' 'файл ключа отсутствует' 'на ENTRY: kalimera-deploy --resume создаст ключ'
+        return 0
+    fi
+    timeout 150 ssh -F /dev/null -n \
+        -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+        -o IdentitiesOnly=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no \
+        -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_path" -o LogLevel=ERROR \
+        -i "$key_path" -p "$port" "$remote_user@$host" >"$raw" 2>"$err" || rc=$?
+    import_rows "$segment_name" "$raw"
+    count="$(awk -F'\t' -v s="$segment_name" '$1 == s { n++ } END { print n + 0 }' "$rows_file")"
+    if (( rc != 0 || count == 0 )); then
+        reason="$(clean_text "$(head -n 1 "$err" 2>/dev/null || true)")"
+        [[ -n "$reason" ]] || reason="код возврата $rc, строк отчёта: $count"
+        emit_row "$segment_name" FAIL 'удалённый отчёт по SSH' "$reason" 'на ENTRY: kalimera-deploy --resume восстановит ключ и доступ kalimera-report; при Permission denied проверьте authorized_keys пользователя kalimera-report'
+    fi
+}
+
+section_title() {
+    if [[ "$report_fancy" == true ]]; then
+        printf '\n\033[1;36m%s\033[0m\n' "$1"
+    else
+        printf '\n%s\n' "$1"
+    fi
+}
+
+# Рекомендации по всем OK-непроверенным строкам: сначала FAIL, потом WARN.
+# Одинаковая рекомендация печатается один раз, без ограничения числа строк.
+print_recommendations() {
+    local severity note level text hint key marker color
+    local printed=false
+    local -a order=()
+    local -A texts=()
+    for severity in FAIL WARN; do
+        order=()
+        texts=()
+        for note in "${report_notes[@]}"; do
+            IFS=$'\t' read -r level text hint <<<"$note" || true
+            [[ "$level" == "$severity" ]] || continue
+            key="k:$hint"
+            if [[ -z "${texts[$key]+set}" ]]; then
+                order+=("$key")
+                texts[$key]=''
+            fi
+            texts[$key]+="$text"$'\n'
+        done
+        if [[ "$severity" == FAIL ]]; then
+            marker='✗'
+        else
+            marker='!'
+        fi
+        color=$'\033[33m'
+        for key in "${order[@]}"; do
+            if [[ "$printed" == false ]]; then
+                printf '\nРекомендации:\n'
+                printed=true
+            fi
+            while IFS= read -r text; do
+                [[ -n "$text" ]] || continue
+                if [[ "$report_fancy" == true ]]; then
+                    printf '%s%s %s%s\n' "$color" "$marker" "$text" "$report_reset"
+                else
+                    printf '%s %s\n' "$marker" "$text"
+                fi
+            done <<<"${texts[$key]}"
+            hint="${key#k:}"
+            [[ -z "$hint" ]] || printf '  → %s\n' "$hint"
+        done
+    done
+}
+
+render() {
+    local section seg status label value hint text line ok warn fail
+    local total_ok=0 total_warn=0 total_fail=0 verdict title plain
+    local -a summary=()
+    local -a sections=(ENTRY LINK EXIT FRONT)
+    local -A titles=()
+    titles[ENTRY]='ENTRY: локальные проверки'
+    titles[LINK]='СВЯЗИ КАСКАДА'
+    titles[EXIT]='EXIT: удалённый отчёт'
+    titles[FRONT]='FRONT: удалённый отчёт'
+
+    for section in "${sections[@]}"; do
+        section_title "${titles[$section]}"
+        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+            printf 'в каскаде не используется\n'
+            continue
+        fi
+        while IFS= read -r line; do
+            split_row "$line"
+            [[ "$seg" == "$section" ]] || continue
+            text="$label"
+            [[ -z "$value" ]] || text+=": $value"
+            report_line "$status" "$text"
+            counts["$section:$status"]=$(( ${counts["$section:$status"]:-0} + 1 ))
+            [[ "$status" == OK ]] || report_note "$status" "$text" "$hint"
+        done <"$rows_file"
+    done
+
+    print_recommendations
+
+    for section in ENTRY LINK EXIT FRONT; do
+        [[ "$section" != FRONT || "$front_present" == true ]] || continue
+        ok="${counts[$section:OK]:-0}"
+        warn="${counts[$section:WARN]:-0}"
+        fail="${counts[$section:FAIL]:-0}"
+        summary+=("$section: OK $ok · WARN $warn · FAIL $fail")
+        total_ok=$((total_ok + ok))
+        total_warn=$((total_warn + warn))
+        total_fail=$((total_fail + fail))
+    done
+    summary+=("ИТОГ: OK $total_ok · WARN $total_warn · FAIL $total_fail")
+
+    if (( total_fail > 0 )); then
+        verdict=FAIL
+        title='работа каскада нарушена'
+        plain="BAD: ошибок: $total_fail, замечаний: $total_warn"
+        exit_code=1
+    elif (( total_warn > 0 )); then
+        verdict=WARN
+        title='каскад работает, есть замечания'
+        plain="WARN: каскад работает, замечаний: $total_warn"
+        exit_code=3
+    else
+        verdict=OK
+        title='все проверки пройдены'
+        plain="GOOD: все проверки пройдены ($total_ok)"
+        exit_code=0
+    fi
+    if [[ "$report_fancy" == true ]]; then
+        report_box "$verdict" "cascade-check: $title" "${summary[@]}"
+    else
+        printf '%s\n' "${summary[@]}" "$plain"
+    fi
+}
+
+main() {
+    case "${1:-}" in
+        '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+        --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+    [[ $EUID -eq 0 ]] || { echo 'cascade-check запускается через управление KalimeraWG (root).' >&2; exit 1; }
+    work="$(mktemp -d /run/cascade-check.XXXXXX)"
+    trap 'rm -rf "$work"' EXIT
+    rows_file="$work/rows.tsv"
+    : >"$rows_file"
+
+    collect_local
+    link_rows
+    collect_remote EXIT "$exit_host" "$exit_port"
+    if [[ "$front_present" == true ]]; then
+        collect_remote FRONT "$front_host" "$front_port"
+    fi
+    render
+    exit "$exit_code"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
+{% endraw %}

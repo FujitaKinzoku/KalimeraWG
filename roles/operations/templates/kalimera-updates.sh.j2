@@ -38,6 +38,11 @@ case "${KALIMERA_REPORT_STYLE:-auto}" in
         ;;
 esac
 report_reset=$'\033[0m'
+# KALIMERA_REPORT_RESULTS - файл для cascade-check: report_line записывает OK,
+# report_note - FAIL и WARN с рекомендацией. Переменная сбрасывается сразу, чтобы
+# вложенные awg-health или server-audit не дописывали свои строки в тот же файл.
+report_results_file="${KALIMERA_REPORT_RESULTS:-}"
+unset KALIMERA_REPORT_RESULTS
 # Замечания для итоговой рамки: "FAIL|WARN<TAB>что не так<TAB>что сделать".
 # FAIL - работа каскада нарушена критически, WARN - каскад работает.
 report_notes=()
@@ -54,10 +59,18 @@ report_line() {
         esac
     fi
     printf '%s%-4s %s%s\n' "$color" "$level" "$text" "${color:+$report_reset}"
+    [[ "$level" != OK ]] || report_export OK "$text"
+}
+
+# Строка в файл результатов: "СТАТУС<TAB>проверка<TAB>рекомендация".
+report_export() {
+    [[ -n "$report_results_file" ]] || return 0
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"$report_results_file"
 }
 
 report_note() {
     report_notes+=("$1"$'\t'"$2"$'\t'"${3:-}")
+    report_export "$1" "$2" "${3:-}"
 }
 
 # $1 - цвет рамки, $2 - ширина текста, $3 - строка, $4 - цвет строки.

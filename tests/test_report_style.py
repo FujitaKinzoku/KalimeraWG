@@ -193,5 +193,39 @@ class HealthTests(unittest.TestCase):
         )
 
 
+class ResultsExportTests(unittest.TestCase):
+    """KALIMERA_REPORT_RESULTS: файл для cascade-check, без влияния на вывод."""
+
+    def test_results_file_collects_ok_and_notes_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            results = Path(temporary) / "results"
+            script = (
+                "set -Eeuo pipefail\n"
+                f"KALIMERA_REPORT_RESULTS={shlex.quote(str(results))}\n"
+                + block_text()
+                + "report_line OK 'служба'\n"
+                "report_line UPD 'обновление'\n"
+                "report_note FAIL 'правило' 'перезагрузите'\n"
+            )
+            result = bash(script, style="plain")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "OK   служба\nUPD  обновление\n")
+            self.assertEqual(
+                results.read_text(encoding="utf-8"),
+                "OK\tслужба\t\nFAIL\tправило\tперезагрузите\n",
+            )
+
+    def test_variable_is_not_inherited_by_child_commands(self) -> None:
+        script = (
+            "set -Eeuo pipefail\n"
+            "export KALIMERA_REPORT_RESULTS=/nonexistent/results\n"
+            + block_text()
+            + "printenv KALIMERA_REPORT_RESULTS || echo не-унаследовано\n"
+        )
+        result = bash(script, style="plain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("не-унаследовано", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

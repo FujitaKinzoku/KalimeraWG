@@ -515,6 +515,13 @@ def command_panels() -> None:
     )
     if CONFIG["role"] == "entry":
         panel(
+            "ПОЛНАЯ ПРОВЕРКА КАСКАДА",
+            [
+                ("cascade-check", "ENTRY, EXIT, FRONT, связи и DNS; итог OK / WARN / FAIL", "INFO"),
+            ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
+        panel(
             "VPN-КЛИЕНТЫ",
             [
                 ("vpn-user list", "пользователи и последний handshake", "INFO"),

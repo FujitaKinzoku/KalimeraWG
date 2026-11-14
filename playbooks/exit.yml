@@ -27,6 +27,8 @@
       when: awg_adoption_mode == 'apply'
     - role: security
       when: awg_adoption_mode == 'apply'
+    - role: cascade_check
+      when: awg_adoption_mode == 'apply'
     - role: exit
       when: awg_adoption_mode == 'apply'
     - role: awg3_transit

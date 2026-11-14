@@ -24,6 +24,12 @@ security_finalize_admin_access: false
 security_controller_repo_path: /root/KalimeraWG
 security_root_authorized_keys_path: /root/.ssh/authorized_keys
 security_admin_command_path: /usr/local/libexec/kalimera-admin-command
+# Удалённый отчёт cascade-check: ENTRY заходит на EXIT и FRONT только отдельным
+# пользователем, только с адреса ENTRY и только с командой отчёта. Основной
+# административный вход этими правилами не ограничивается.
+security_cascade_report_enabled: "{{ awg_node_role | default('') in ['exit', 'front'] }}"
+security_cascade_report_user: kalimera-report
+security_cascade_report_source_ipv4: "{{ hostvars[groups['entry'][0]].ansible_host }}"
 security_runtime_secrets_export_path: >-
   {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}
 security_admin_authorized_keys: []

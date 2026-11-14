@@ -25,6 +25,7 @@ managed_files() {
 /etc/profile.d/kalimera-shell-tools.sh
 /usr/local/sbin/awg-health
 /usr/local/sbin/kalimera-test
+/usr/local/sbin/kalimera-report
 /usr/local/sbin/server-audit
 /usr/local/sbin/awg-managed-integrity
 /usr/local/sbin/awg-kernel-guard
@@ -59,6 +60,7 @@ managed_files() {
 /usr/local/sbin/awg-entry-routing-reconcile
 /usr/local/sbin/awg-dns-policy
 /usr/local/sbin/awg-local-peer-apply
+/usr/local/sbin/cascade-check
 /etc/systemd/system/awg-entry-routing.service
 /etc/systemd/system/awg-local-peer-apply.service
 {% if front_backend_enabled | default(false) | bool %}
