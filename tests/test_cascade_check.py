@@ -47,6 +47,39 @@ def bash_path() -> str:
     return executable
 
 
+def cascade_values(directory: Path, key: Path | None = None) -> dict:
+    return {
+        "cascade_check_report_path": str(directory / "missing-report"),
+        "cascade_check_key_path": str(key or directory / "id_ed25519"),
+        "cascade_check_known_hosts_path": str(directory / "known_hosts"),
+        "cascade_check_user": "kalimera-report",
+        "cascade_check_exit_host": "192.0.2.20",
+        "cascade_check_exit_port": 56777,
+        "cascade_check_front_present": True,
+        "cascade_check_front_host": "192.0.2.30",
+        "cascade_check_front_port": 56777,
+    }
+
+
+class ShellcheckTests(unittest.TestCase):
+    def test_rendered_scripts_pass_shellcheck(self) -> None:
+        shellcheck = shutil.which("shellcheck")
+        if shellcheck is None or os.name == "nt":
+            self.skipTest("нужен shellcheck")
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            report = directory / "kalimera-report"
+            report.write_text(render(REPORT, awg_node_role="entry"), encoding="utf-8")
+            cascade = directory / "cascade-check"
+            cascade.write_text(render(CASCADE, **cascade_values(directory)), encoding="utf-8")
+            result = subprocess.run(
+                [shellcheck, "--exclude=SC2317", str(report), str(cascade)],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class CascadeCheckTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -60,21 +93,7 @@ class CascadeCheckTests(unittest.TestCase):
         self.rows = self.dir / "rows.tsv"
         self.rows.write_text("", encoding="utf-8")
         self.script = self.dir / "cascade-check"
-        self.script.write_text(
-            render(
-                CASCADE,
-                cascade_check_report_path=str(self.dir / "missing-report"),
-                cascade_check_key_path=str(self.key),
-                cascade_check_known_hosts_path=str(self.known_hosts),
-                cascade_check_user="kalimera-report",
-                cascade_check_exit_host="192.0.2.20",
-                cascade_check_exit_port=56777,
-                cascade_check_front_present=True,
-                cascade_check_front_host="192.0.2.30",
-                cascade_check_front_port=56777,
-            ),
-            encoding="utf-8",
-        )
+        self.script.write_text(render(CASCADE, **cascade_values(self.dir, self.key)), encoding="utf-8")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

@@ -244,8 +244,11 @@ import_rows() {
 # Время TCP-подключения в миллисекундах; ошибка, если порт молчит 5 с.
 tcp_ms() {
     local host="$1" port="$2" started finished
-    [[ -n "$host" ]] && (( port > 0 )) || return 1
+    if [[ -z "$host" ]] || (( port <= 0 )); then
+        return 1
+    fi
     started="$(date +%s%N)"
+    # shellcheck disable=SC2016
     timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$host" "$port" 2>/dev/null || return 1
     finished="$(date +%s%N)"
     printf '%s\n' $(( (finished - started) / 1000000 ))
