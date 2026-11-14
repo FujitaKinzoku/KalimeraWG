@@ -4,6 +4,10 @@
   gather_facts: false
   any_errors_fatal: true
   pre_tasks:
+    - name: Адрес ENTRY для отчёта cascade-check
+      ansible.builtin.include_role:
+        name: cascade_check
+        tasks_from: report_source
     - name: Сбор сведений об EXIT сервере
       ansible.builtin.setup:
 

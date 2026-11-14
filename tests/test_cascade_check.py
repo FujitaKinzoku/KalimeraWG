@@ -473,29 +473,44 @@ class CascadeRolePolicyTests(unittest.TestCase):
                 text = (ROOT / "playbooks" / name).read_text(encoding="utf-8")
                 self.assertEqual(len(pattern.findall(text)), count)
 
-    def test_entry_source_address_is_checked_before_any_entry_role(self) -> None:
-        # ENTRY часто управляется локально (ansible_host 127.0.0.1): без явного
-        # внешнего адреса from= записался бы как 127.0.0.1. Проверка - в pre_tasks
-        # ENTRY, то есть до ролей, которые что-то меняют на сервере.
+    def test_entry_playbooks_do_not_require_a_manual_source_address(self) -> None:
+        # Адрес ENTRY сервер-получатель видит сам (SSH_CONNECTION), поэтому
+        # плейбуки ENTRY ни требуют его задавать, ни сверяют ansible_host.
         for name in ("site.yml", "entry.yml"):
             with self.subTest(playbook=name):
                 text = (ROOT / "playbooks" / name).read_text(encoding="utf-8")
-                start = text.index("Настройка ENTRY сервера")
-                check = text.index("Проверка внешнего адреса ENTRY для отчёта cascade-check", start)
-                roles = text.index("roles:", start)
-                self.assertLess(start, check)
-                self.assertLess(check, roles)
-                self.assertIn("cascade_check_entry_source_ipv4", text)
+                self.assertNotIn("cascade_check_entry_source_ipv4", text)
+                self.assertNotIn("Проверка внешнего адреса ENTRY", text)
 
-    def test_report_source_uses_the_explicit_entry_address(self) -> None:
+    def test_report_source_is_the_address_exit_and_front_see(self) -> None:
+        source = (ROOT / "roles" / "cascade_check" / "tasks" / "report_source.yml").read_text(
+            encoding="utf-8"
+        )
+        # Адрес берётся из SSH_CONNECTION сессии деплоя; без become sudo его бы сбросил.
+        self.assertIn("$SSH_CONNECTION", source)
+        self.assertIn("become: false", source)
+        self.assertIn("security_cascade_report_source_ipv4", source)
+        # ENTRY может стоять за NAT: адрес берётся из TCP-соединения сессии на сервере.
+        self.assertIn("ss -Htnp state established", source)
+        self.assertIn("/proc/", source)
+        self.assertNotIn("delegate_to", source)
+        # Адрес выбирается в pre_tasks EXIT и FRONT, то есть до их ролей.
+        plays = {
+            "site.yml": ("Настройка EXIT сервера", "Настройка FRONT сервера"),
+            "exit.yml": ("hosts: exit",),
+            "front.yml": ("hosts: front",),
+        }
+        for name, markers in plays.items():
+            text = (ROOT / "playbooks" / name).read_text(encoding="utf-8")
+            for marker in markers:
+                with self.subTest(playbook=name, play=marker):
+                    start = text.index(marker)
+                    include = text.index("tasks_from: report_source", start)
+                    self.assertLess(include, text.index("roles:", start))
         defaults = (ROOT / "roles" / "security" / "defaults" / "main.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "hostvars[groups['entry'][0]].cascade_check_entry_source_ipv4 | default("
-            "hostvars[groups['entry'][0]].ansible_host)",
-            defaults,
-        )
+        self.assertNotIn("hostvars[groups['entry'][0]].ansible_host", defaults)
 
     def test_menu_shows_a_green_line_when_no_reboot_is_needed(self) -> None:
         status = (ROOT / "roles" / "terminal" / "templates" / "kalimera-status.py.j2").read_text(
