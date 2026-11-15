@@ -108,6 +108,13 @@ class BootIdTests(unittest.TestCase):
                 MODULE.read_boot_id(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front")
             )
 
+    def test_permission_denied_stops_at_once_instead_of_retrying(self) -> None:
+        # Повторные попытки с отклонённым ключом приводят к бану Fail2Ban.
+        denied = completed(2, "front | UNREACHABLE! => Permission denied (publickey).\n")
+        with mock.patch.object(MODULE, "ansible_adhoc", return_value=denied):
+            with self.assertRaises(SystemExit):
+                MODULE.read_boot_id(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front")
+
     def test_adhoc_calls_are_bounded_by_a_timeout(self) -> None:
         with mock.patch.object(
             MODULE, "require_command", return_value="ansible"
@@ -180,18 +187,43 @@ class CascadeRebootRunTests(unittest.TestCase):
         (root / "vault.pass").write_text("pass\n", encoding="utf-8")
         return production
 
-    def test_refuses_to_start_when_the_cascade_already_fails(self) -> None:
+    def test_refuses_when_a_server_does_not_answer_before_any_reboot(self) -> None:
+        # Недоступный EXIT обнаруживается до первой перезагрузки: FRONT не трогаем.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             production = self.make_production(root)
             with mock.patch.object(
-                MODULE, "run_cascade_check", return_value=completed(1, "FAIL")
+                MODULE, "read_boot_id", side_effect=[BOOT_A, None]
             ), mock.patch.object(MODULE, "schedule_host_reboot") as schedule, mock.patch(
                 "builtins.print"
             ):
                 with self.assertRaises(SystemExit):
                     MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
         schedule.assert_not_called()
+
+    def test_cascade_errors_do_not_block_the_reboot(self) -> None:
+        # Ошибка каскада может требовать перезагрузки, поэтому FAIL не блокирует запуск.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            scheduled: list[str] = []
+            with mock.patch.object(
+                MODULE, "run_cascade_check", return_value=completed(1, "FAIL")
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, BOOT_A]
+            ), mock.patch.object(
+                MODULE,
+                "schedule_host_reboot",
+                side_effect=lambda *args: scheduled.append(args[-1]) or True,
+            ), mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=True
+            ), mock.patch.object(
+                MODULE, "wait_for_cascade", return_value=True
+            ), mock.patch.object(MODULE, "schedule_entry_reboot"), mock.patch(
+                "builtins.print"
+            ):
+                MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
+        self.assertEqual(scheduled, ["front", "exit"])
 
     def test_without_confirmation_nothing_is_rebooted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -201,7 +233,9 @@ class CascadeRebootRunTests(unittest.TestCase):
                 MODULE, "run_cascade_check", return_value=completed(0)
             ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
                 MODULE, "schedule_host_reboot"
-            ) as schedule, mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
+            ) as schedule, mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch.object(
+                MODULE, "read_boot_id", return_value=BOOT_A
+            ), mock.patch(
                 "builtins.print"
             ):
                 MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=False)

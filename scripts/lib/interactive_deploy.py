@@ -3567,7 +3567,17 @@ def read_boot_id(repo: Path, hosts_path: Path, vault_password: Path, group: str)
     result = ansible_adhoc(
         repo, hosts_path, vault_password, group, "command", "cat /proc/sys/kernel/random/boot_id"
     )
-    if result is None or result.returncode != 0:
+    if result is None:
+        return None
+    output = result.stdout + result.stderr
+    if "Permission denied" in output:
+        # Повторять неверный ключ нельзя: каждая неудачная попытка идёт в Fail2Ban,
+        # и сервер блокирует ENTRY сам.
+        fail(
+            f"{group} отклонил ключ ENTRY (Permission denied). Остановлено, чтобы не получить "
+            "бан Fail2Ban. Проверьте адрес ENTRY в правилах доступа этого сервера."
+        )
+    if result.returncode != 0:
         return None
     match = BOOT_ID_RE.search(result.stdout)
     return match.group(0) if match else None
@@ -3616,10 +3626,21 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
         fail("Не найден production inventory или внешний пароль Ansible Vault")
     plan = cascade_reboot_plan(load_yaml(hosts_path))
     print("Порядок перезагрузки: " + " → ".join(plan))
-    before = run_cascade_check()
-    if not cascade_check_ok(before):
-        print(before.stdout[-4000:])
-        fail("Каскад сейчас не в порядке (FAIL). Перезагрузка не начата: исправьте ошибки cascade-check")
+    # Полная проверка каскада здесь не нужна: ошибка может быть как раз той
+    # причиной, по которой перезагрузка нужна. До первого шага проверяется только,
+    # что каждый перезагружаемый сервер отвечает по SSH: иначе его не перезагрузить
+    # и не дождаться возврата.
+    boot_ids: dict[str, str] = {}
+    for group in plan[:-1]:
+        boot_id = read_boot_id(repo, hosts_path, vault_password, group)
+        if boot_id is None:
+            fail(
+                f"{group} не отвечает по SSH с ENTRY. Ничего не перезагружено. Возможные причины: "
+                "Fail2Ban или ограничение частоты UFW на этом сервере блокируют ENTRY либо устарел "
+                "адрес ENTRY в правилах доступа. На этом сервере проверьте: "
+                "sudo fail2ban-client status sshd; sudo ufw status numbered"
+            )
+        boot_ids[group] = boot_id
     maintenance = subprocess.run(
         ["systemctl", "is-active", "--quiet", "awg-maintenance.service"], check=False
     )
@@ -3630,9 +3651,7 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
         return
     for group in plan[:-1]:
         print(f"Перезагрузка: {group}")
-        boot_before = read_boot_id(repo, hosts_path, vault_password, group)
-        if boot_before is None:
-            fail(f"Не удалось связаться с {group} перед перезагрузкой. Ничего не перезагружено.")
+        boot_before = boot_ids[group]
         if not schedule_host_reboot(repo, hosts_path, vault_password, group):
             fail(
                 f"Не удалось запланировать перезагрузку {group}. Остальные серверы не перезагружались."
