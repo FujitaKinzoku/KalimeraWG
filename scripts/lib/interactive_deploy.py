@@ -3619,6 +3619,15 @@ def wait_for_host_reboot(
     return False
 
 
+def status_line(level: str, text: str) -> None:
+    """Строка проверки: OK зелёным, FAIL красным (цвет только в терминале)."""
+    colours = {"OK": "\033[1;32m", "FAIL": "\033[1;31m"}
+    prefix = f"{level:<4} "
+    if sys.stdout.isatty() and level in colours:
+        prefix = f"{colours[level]}{level:<4}\033[0m "
+    print(prefix + text)
+
+
 def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, confirmed: bool) -> None:
     hosts_path = production / "hosts.yml"
     vault_path = production / "group_vars" / "all" / "vault.yml"
@@ -3631,22 +3640,32 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
     # что каждый перезагружаемый сервер отвечает по SSH: иначе его не перезагрузить
     # и не дождаться возврата.
     boot_ids: dict[str, str] = {}
+    unreachable: list[str] = []
     for group in plan[:-1]:
         boot_id = read_boot_id(repo, hosts_path, vault_password, group)
         if boot_id is None:
-            fail(
-                f"{group} не отвечает по SSH с ENTRY. Ничего не перезагружено. Возможные причины: "
-                "Fail2Ban или ограничение частоты UFW на этом сервере блокируют ENTRY либо устарел "
-                "адрес ENTRY в правилах доступа. На этом сервере проверьте: "
-                "sudo fail2ban-client status sshd; sudo ufw status numbered"
-            )
-        boot_ids[group] = boot_id
+            status_line("FAIL", f"{group}: SSH не отвечает")
+            unreachable.append(group)
+        else:
+            status_line("OK", f"{group}: SSH отвечает, загрузка {boot_id[:8]}")
+            boot_ids[group] = boot_id
+    status_line("OK", "entry: локальный узел, перезагрузится последним")
     maintenance = subprocess.run(
         ["systemctl", "is-active", "--quiet", "awg-maintenance.service"], check=False
     )
     if maintenance.returncode == 0:
-        fail("Сейчас выполняется ночное обслуживание. Повторите позже.")
+        status_line("FAIL", "ночное обслуживание выполняется сейчас")
+        fail("Повторите позже, когда обслуживание завершится.")
+    status_line("OK", "ночное обслуживание не выполняется")
+    if unreachable:
+        fail(
+            f"Перезагрузка не начата: не отвечают {', '.join(unreachable)}. Ничего не перезагружено. "
+            "Возможные причины: Fail2Ban или ограничение частоты UFW блокируют ENTRY, либо устарел "
+            "адрес ENTRY в правилах доступа. На этом сервере проверьте: "
+            "sudo fail2ban-client status sshd; sudo ufw status numbered"
+        )
     if not confirmed:
+        status_line("OK", "перезагрузка возможна: все серверы отвечают")
         print("Перезагрузка не выполнена. Для запуска выполните: cascade-reboot --yes")
         return
     for group in plan[:-1]:

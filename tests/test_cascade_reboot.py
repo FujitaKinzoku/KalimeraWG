@@ -266,6 +266,37 @@ class CascadeRebootRunTests(unittest.TestCase):
         self.assertEqual(scheduled, ["front", "exit"])
         entry.assert_called_once()
 
+    def test_dry_run_reports_each_server_with_ok_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            with mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, BOOT_B]
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE, "schedule_host_reboot"
+            ) as schedule, mock.patch("builtins.print") as printed:
+                MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=False)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertIn("OK   front: SSH отвечает, загрузка 0f1e2d3c", lines)
+        self.assertIn("OK   exit: SSH отвечает, загрузка 9a8b7c6d", lines)
+        self.assertIn("OK   перезагрузка возможна: все серверы отвечают", lines)
+        schedule.assert_not_called()
+
+    def test_dry_run_marks_unreachable_server_as_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            with mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, None]
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE, "schedule_host_reboot"
+            ) as schedule, mock.patch("builtins.print") as printed:
+                with self.assertRaises(SystemExit):
+                    MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=False)
+        lines = [call.args[0] for call in printed.call_args_list if call.args]
+        self.assertIn("FAIL exit: SSH не отвечает", lines)
+        schedule.assert_not_called()
+
     def test_stops_when_boot_state_cannot_be_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
