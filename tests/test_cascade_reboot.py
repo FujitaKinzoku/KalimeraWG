@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Команды обслуживания каскада: время ночного обслуживания и cascade-reboot.
 
-cascade-reboot перезагружает FRONT, затем EXIT, проверяя каскад после каждого
-сервера; ENTRY перезагружается последним и проверяется после загрузки отдельным
-юнитом systemd. Проверяется порядок, остановка при ошибке и защита от запуска
-без подтверждения.
+cascade-reboot перезагружает FRONT, затем EXIT: для каждого сервера запоминает
+boot_id, планирует перезагрузку, ждёт новый boot_id и проверяет каскад. ENTRY
+перезагружается последним и проверяется после загрузки отдельным юнитом systemd.
+Все вызовы Ansible ограничены по времени, поэтому команда не зависает молча.
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ SPEC = importlib.util.spec_from_file_location("interactive_deploy", MODULE_PATH)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+BOOT_A = "0f1e2d3c-1111-2222-3333-444455556666"
+BOOT_B = "9a8b7c6d-aaaa-bbbb-cccc-ddddeeeeffff"
 
 
 def completed(returncode: int, stdout: str = "") -> subprocess.CompletedProcess[str]:
@@ -86,7 +89,64 @@ class CascadeRebootPlanTests(unittest.TestCase):
 
     def test_entry_is_never_rebooted_through_ansible(self) -> None:
         with self.assertRaises(SystemExit):
-            MODULE.reboot_cascade_group(ROOT, ROOT / "hosts.yml", ROOT / "vault", "entry")
+            MODULE.schedule_host_reboot(ROOT, ROOT / "hosts.yml", ROOT / "vault", "entry")
+
+
+class BootIdTests(unittest.TestCase):
+    def test_boot_id_is_taken_from_the_adhoc_output(self) -> None:
+        output = f"front.example.invalid | CHANGED | rc=0 | (stdout) {BOOT_A}\n"
+        with mock.patch.object(
+            MODULE, "ansible_adhoc", return_value=completed(0, output)
+        ):
+            self.assertEqual(
+                MODULE.read_boot_id(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front"), BOOT_A
+            )
+
+    def test_unreachable_host_gives_no_boot_id(self) -> None:
+        with mock.patch.object(MODULE, "ansible_adhoc", return_value=None):
+            self.assertIsNone(
+                MODULE.read_boot_id(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front")
+            )
+
+    def test_adhoc_calls_are_bounded_by_a_timeout(self) -> None:
+        with mock.patch.object(
+            MODULE, "require_command", return_value="ansible"
+        ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(0, BOOT_A)) as run:
+            MODULE.ansible_adhoc(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front", "command", "true")
+        self.assertEqual(run.call_args.kwargs["timeout"], MODULE.ADHOC_TIMEOUT_SECONDS)
+
+    def test_timed_out_adhoc_returns_none(self) -> None:
+        with mock.patch.object(MODULE, "require_command", return_value="ansible"), mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="ansible", timeout=60),
+        ):
+            self.assertIsNone(
+                MODULE.ansible_adhoc(ROOT, ROOT / "hosts.yml", ROOT / "vault", "front", "command", "true")
+            )
+
+
+class WaitForHostRebootTests(unittest.TestCase):
+    def test_waits_until_the_boot_id_changes(self) -> None:
+        results = [None, BOOT_A, BOOT_B]
+        with mock.patch.object(MODULE, "read_boot_id", side_effect=results), mock.patch.object(
+            MODULE.time, "sleep"
+        ), mock.patch("builtins.print"):
+            self.assertTrue(
+                MODULE.wait_for_host_reboot(
+                    ROOT, ROOT / "hosts.yml", ROOT / "vault", "front", BOOT_A, attempts=5, delay_seconds=1
+                )
+            )
+
+    def test_same_boot_id_means_the_reboot_did_not_happen(self) -> None:
+        with mock.patch.object(MODULE, "read_boot_id", return_value=BOOT_A), mock.patch.object(
+            MODULE.time, "sleep"
+        ), mock.patch("builtins.print"):
+            self.assertFalse(
+                MODULE.wait_for_host_reboot(
+                    ROOT, ROOT / "hosts.yml", ROOT / "vault", "front", BOOT_A, attempts=3, delay_seconds=1
+                )
+            )
 
 
 class WaitForCascadeTests(unittest.TestCase):
@@ -126,12 +186,12 @@ class CascadeRebootRunTests(unittest.TestCase):
             production = self.make_production(root)
             with mock.patch.object(
                 MODULE, "run_cascade_check", return_value=completed(1, "FAIL")
-            ), mock.patch.object(MODULE, "reboot_cascade_group") as reboot, mock.patch(
+            ), mock.patch.object(MODULE, "schedule_host_reboot") as schedule, mock.patch(
                 "builtins.print"
             ):
                 with self.assertRaises(SystemExit):
                     MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
-        reboot.assert_not_called()
+        schedule.assert_not_called()
 
     def test_without_confirmation_nothing_is_rebooted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -140,54 +200,75 @@ class CascadeRebootRunTests(unittest.TestCase):
             with mock.patch.object(
                 MODULE, "run_cascade_check", return_value=completed(0)
             ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
-                MODULE, "reboot_cascade_group"
-            ) as reboot, mock.patch.object(MODULE, "schedule_entry_reboot") as schedule, mock.patch(
+                MODULE, "schedule_host_reboot"
+            ) as schedule, mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
                 "builtins.print"
             ):
                 MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=False)
-        reboot.assert_not_called()
         schedule.assert_not_called()
+        entry.assert_not_called()
 
     def test_reboots_front_then_exit_then_schedules_entry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             production = self.make_production(root)
-            rebooted: list[str] = []
+            scheduled: list[str] = []
             with mock.patch.object(
                 MODULE, "run_cascade_check", return_value=completed(0)
             ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, BOOT_A]
+            ), mock.patch.object(
                 MODULE,
-                "reboot_cascade_group",
-                side_effect=lambda *args: rebooted.append(args[-1]),
+                "schedule_host_reboot",
+                side_effect=lambda *args: scheduled.append(args[-1]) or True,
+            ), mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=True
             ), mock.patch.object(
                 MODULE, "wait_for_cascade", return_value=True
-            ), mock.patch.object(MODULE, "schedule_entry_reboot") as schedule, mock.patch(
+            ), mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
                 "builtins.print"
             ):
                 MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
-        self.assertEqual(rebooted, ["front", "exit"])
-        schedule.assert_called_once()
+        self.assertEqual(scheduled, ["front", "exit"])
+        entry.assert_called_once()
 
-    def test_stops_when_a_server_does_not_recover(self) -> None:
+    def test_stops_when_boot_state_cannot_be_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             production = self.make_production(root)
-            rebooted: list[str] = []
             with mock.patch.object(
                 MODULE, "run_cascade_check", return_value=completed(0)
             ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
-                MODULE,
-                "reboot_cascade_group",
-                side_effect=lambda *args: rebooted.append(args[-1]),
-            ), mock.patch.object(
-                MODULE, "wait_for_cascade", return_value=False
-            ), mock.patch.object(MODULE, "schedule_entry_reboot") as schedule, mock.patch(
+                MODULE, "read_boot_id", return_value=None
+            ), mock.patch.object(MODULE, "schedule_host_reboot") as schedule, mock.patch(
                 "builtins.print"
             ):
                 with self.assertRaises(SystemExit):
                     MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
-        self.assertEqual(rebooted, ["front"])
         schedule.assert_not_called()
+
+    def test_stops_when_a_server_does_not_come_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            scheduled: list[str] = []
+            with mock.patch.object(
+                MODULE, "run_cascade_check", return_value=completed(0)
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE, "read_boot_id", return_value=BOOT_A
+            ), mock.patch.object(
+                MODULE,
+                "schedule_host_reboot",
+                side_effect=lambda *args: scheduled.append(args[-1]) or True,
+            ), mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=False
+            ), mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
+                "builtins.print"
+            ):
+                with self.assertRaises(SystemExit):
+                    MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
+        self.assertEqual(scheduled, ["front"])
+        entry.assert_not_called()
 
 
 class EntryVerifyTests(unittest.TestCase):
@@ -206,12 +287,6 @@ class EntryVerifyTests(unittest.TestCase):
 
 
 class CommandWiringTests(unittest.TestCase):
-    def test_reboot_playbook_targets_only_the_selected_group(self) -> None:
-        text = (ROOT / "playbooks" / "reboot.yml").read_text(encoding="utf-8")
-        self.assertIn('hosts: "{{ cascade_reboot_group }}"', text)
-        self.assertIn("ansible.builtin.reboot:", text)
-        self.assertNotIn("hosts: entry", text)
-
     def test_gateway_accepts_only_fixed_forms_and_only_on_entry(self) -> None:
         text = (ROOT / "roles" / "security" / "templates" / "kalimera-admin-command.sh.j2").read_text(
             encoding="utf-8"
@@ -234,6 +309,23 @@ class CommandWiringTests(unittest.TestCase):
         block = text[start:end]
         self.assertIn("function cascade-reboot { _kalimera_admin cascade-reboot", block)
         self.assertIn("function maintenance-time { _kalimera_admin maintenance-time", block)
+
+    def test_menu_groups_all_cascade_commands_in_one_section(self) -> None:
+        text = (ROOT / "roles" / "terminal" / "templates" / "kalimera-status.py.j2").read_text(
+            encoding="utf-8"
+        )
+        start = text.index('"КАСКАД: ПРОВЕРКА И ОБСЛУЖИВАНИЕ"')
+        section = text[start : text.index("preferred_label_width", start)]
+        for command in (
+            "cascade-check",
+            "cascade-reboot",
+            "cascade-reboot --yes",
+            "cascade-reboot status",
+            "maintenance-time ЧЧ:ММ ЗОНА",
+            "maintenance-time show",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(f'"{command}"', section)
 
 
 if __name__ == "__main__":

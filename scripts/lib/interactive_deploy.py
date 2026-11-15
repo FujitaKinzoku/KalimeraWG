@@ -3515,16 +3515,98 @@ def schedule_entry_reboot() -> None:
     )
 
 
-def reboot_cascade_group(repo: Path, hosts_path: Path, vault_password: Path, group: str) -> None:
+BOOT_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ADHOC_TIMEOUT_SECONDS = 60
+
+
+def ansible_adhoc(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    group: str,
+    module: str,
+    module_args: str,
+    *,
+    become: bool = False,
+) -> subprocess.CompletedProcess[str] | None:
+    """Короткая команда Ansible на группе с ограничением по времени.
+
+    Модуль reboot ждёт сервер внутри Ansible и мог зависнуть без сообщения. Здесь
+    каждый вызов ограничен по времени: при отсутствии ответа возвращается None.
+    """
+    argv = [
+        require_command("ansible"),
+        "-i",
+        str(hosts_path),
+        group,
+        "-o",
+        "-m",
+        module,
+        "-a",
+        module_args,
+        "--vault-password-file",
+        str(vault_password),
+    ]
+    if become:
+        argv.append("-b")
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=ADHOC_TIMEOUT_SECONDS,
+            cwd=str(repo),
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def read_boot_id(repo: Path, hosts_path: Path, vault_password: Path, group: str) -> str | None:
+    """Идентификатор текущей загрузки сервера; он меняется после каждой перезагрузки."""
+    result = ansible_adhoc(
+        repo, hosts_path, vault_password, group, "command", "cat /proc/sys/kernel/random/boot_id"
+    )
+    if result is None or result.returncode != 0:
+        return None
+    match = BOOT_ID_RE.search(result.stdout)
+    return match.group(0) if match else None
+
+
+def schedule_host_reboot(repo: Path, hosts_path: Path, vault_password: Path, group: str) -> bool:
     if group == "entry":
-        fail("ENTRY перезагружается отдельным шагом; плейбук reboot.yml его не трогает")
-    ansible(
+        fail("ENTRY перезагружается отдельным шагом, а не через Ansible")
+    result = ansible_adhoc(
         repo,
         hosts_path,
         vault_password,
-        "playbooks/reboot.yml",
-        {"cascade_reboot_group": group},
+        group,
+        "command",
+        "systemd-run --on-active=3 /bin/systemctl reboot",
+        become=True,
     )
+    return result is not None and result.returncode == 0
+
+
+def wait_for_host_reboot(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    group: str,
+    previous_boot_id: str,
+    *,
+    attempts: int = 20,
+    delay_seconds: int = 20,
+) -> bool:
+    """Дождаться новой загрузки: сервер должен сменить boot_id, а не просто ответить."""
+    time.sleep(30)
+    for attempt in range(1, attempts + 1):
+        current = read_boot_id(repo, hosts_path, vault_password, group)
+        if current is not None and current != previous_boot_id:
+            print(f"{group}: сервер загрузился заново (попытка {attempt})")
+            return True
+        time.sleep(delay_seconds)
+    return False
 
 
 def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, confirmed: bool) -> None:
@@ -3548,7 +3630,19 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
         return
     for group in plan[:-1]:
         print(f"Перезагрузка: {group}")
-        reboot_cascade_group(repo, hosts_path, vault_password, group)
+        boot_before = read_boot_id(repo, hosts_path, vault_password, group)
+        if boot_before is None:
+            fail(f"Не удалось связаться с {group} перед перезагрузкой. Ничего не перезагружено.")
+        if not schedule_host_reboot(repo, hosts_path, vault_password, group):
+            fail(
+                f"Не удалось запланировать перезагрузку {group}. Остальные серверы не перезагружались."
+            )
+        if not wait_for_host_reboot(repo, hosts_path, vault_password, group, boot_before):
+            fail(
+                f"{group} не вернулся после перезагрузки за отведённое время. Остальные "
+                "серверы не перезагружались. Проверьте сервер"
+            )
+        print(f"{group}: проверяю каскад после перезагрузки...")
         if not wait_for_cascade():
             fail(
                 f"После перезагрузки {group} каскад не прошёл проверку. Остальные серверы "
