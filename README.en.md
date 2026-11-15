@@ -181,10 +181,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.2.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.3.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.2.1` release rather than the moving `main`
+The command installs the pinned `v3.3.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +196,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.2.1 --depth 1 \
+git clone --branch v3.3.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -253,6 +253,8 @@ table at login. Full reference: `kalimera-help`.
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Maintenance time | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (ENTRY only) |
+| Planned reboot | `cascade-reboot`, `cascade-reboot --yes`, `cascade-reboot status` (ENTRY only) |
 | Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
@@ -349,7 +351,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.2.1
+sudo git -C /root/KalimeraWG switch --detach v3.3.0
 kalimera-deploy --resume
 ```
 
@@ -376,6 +378,10 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.3.0:** `cascade-reboot` and `maintenance-time` (ENTRY only): planned
+  reboot of the cascade one server at a time, FRONT, EXIT, ENTRY, with a check
+  after each step (`--force` continues despite errors), and the nightly
+  maintenance time in your own timezone.
 - **v3.2.1:** the ENTRY address for the cascade-check report is determined by
   the deploy itself: EXIT and FRONT see it in the deploy session or in the TCP
   connection (this also works behind NAT), so the manual

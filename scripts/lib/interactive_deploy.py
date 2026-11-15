@@ -22,7 +22,9 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.request
+import zoneinfo
 from pathlib import Path
 
 import yaml
@@ -3377,6 +3379,347 @@ def complete_ssh_transition(
     return True
 
 
+CASCADE_CHECK_PATH = Path("/usr/local/sbin/cascade-check")
+CASCADE_VERIFY_UNIT = "kalimera-cascade-verify"
+CASCADE_VERIFY_SCRIPT = Path("/usr/local/libexec/kalimera-cascade-verify")
+CASCADE_VERIFY_DIR = Path("/var/lib/kalimera/cascade-reboot")
+DEFAULT_MAINTENANCE_CALENDAR = "*-*-* 05:20:00"
+MAINTENANCE_TIME_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
+
+
+def maintenance_calendar(time_value: str, zone: str) -> str:
+    """Календарное выражение systemd для ночного обслуживания в часовом поясе zone."""
+    if not MAINTENANCE_TIME_RE.fullmatch(time_value):
+        fail(f"Время указывается как ЧЧ:ММ, например 02:20; получено: {time_value!r}")
+    try:
+        zoneinfo.ZoneInfo(zone)
+    except (KeyError, ValueError):
+        fail(f"Неизвестный часовой пояс: {zone!r}; например Asia/Manila или Europe/Moscow")
+    return f"*-*-* {time_value}:00 {zone}"
+
+
+def maintenance_show(production: Path) -> str:
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if not all_vars_path.is_file():
+        fail("Не найдены групповые переменные production inventory")
+    value = load_yaml(all_vars_path).get("awg_maintenance_calendar", DEFAULT_MAINTENANCE_CALENDAR)
+    return str(value)
+
+
+def set_maintenance_calendar(production: Path, calendar: str) -> str:
+    """Записать время обслуживания в групповые переменные и вернуть прежнее значение."""
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if not all_vars_path.is_file():
+        fail("Не найдены групповые переменные production inventory")
+    all_vars = load_yaml(all_vars_path)
+    previous = str(all_vars.get("awg_maintenance_calendar", DEFAULT_MAINTENANCE_CALENDAR))
+    all_vars["awg_maintenance_calendar"] = calendar
+    yaml_write(all_vars_path, all_vars)
+    return previous
+
+
+def cascade_reboot_plan(hosts_document: dict) -> list[str]:
+    """Порядок перезагрузки: FRONT, затем EXIT, затем ENTRY.
+
+    ENTRY идёт последним: его перезагрузка обрывает этот процесс, поэтому после
+    неё проверку выполняет отдельный юнит systemd.
+    """
+    children = hosts_document["all"]["children"]
+    order = [group for group in ("front", "exit") if (children.get(group) or {}).get("hosts")]
+    return [*order, "entry"]
+
+
+def run_cascade_check() -> subprocess.CompletedProcess[str]:
+    if not CASCADE_CHECK_PATH.is_file():
+        fail("cascade-check не установлен на ENTRY; сначала выполните kalimera-deploy --resume")
+    return subprocess.run(
+        [str(CASCADE_CHECK_PATH)], capture_output=True, text=True, check=False
+    )
+
+
+def cascade_check_ok(result: subprocess.CompletedProcess[str]) -> bool:
+    """Код 0 - OK, 3 - WARN (каскад работает). Код 1 - FAIL."""
+    return result.returncode in (0, 3)
+
+
+def cascade_problems(output: str) -> list[str]:
+    """Строки FAIL и WARN из отчёта cascade-check."""
+    return [line.strip() for line in output.splitlines() if re.match(r"\s*(FAIL|WARN)\s", line)]
+
+
+def wait_for_cascade(attempts: int = 12, delay_seconds: int = 30) -> bool:
+    """Дождаться, пока каскад полностью отвечает: туннели после загрузки поднимаются не сразу.
+
+    При неудаче выводит строки FAIL и WARN, чтобы ошибки были видны в терминале.
+    """
+    result = None
+    for attempt in range(1, attempts + 1):
+        result = run_cascade_check()
+        if cascade_check_ok(result):
+            print(f"cascade-check после перезагрузки: код {result.returncode} (попытка {attempt})")
+            return True
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+    problems = cascade_problems(result.stdout) if result is not None else []
+    print("cascade-check после перезагрузки нашёл ошибки:")
+    for line in problems or ["FAIL отчёт cascade-check не прочитан"]:
+        print(f"  {line}")
+    return False
+
+
+def cascade_verify_script() -> str:
+    return textwrap.dedent(
+        f"""\
+        #!/bin/sh
+        # Создано cascade-reboot: проверка каскада после перезагрузки ENTRY.
+        set -u
+        sleep 120
+        mkdir -p {CASCADE_VERIFY_DIR}
+        {{
+            {CASCADE_CHECK_PATH}
+            echo "rc=$?"
+        }} > {CASCADE_VERIFY_DIR}/last-verify.txt 2>&1
+        systemctl disable {CASCADE_VERIFY_UNIT}.service >/dev/null 2>&1 || true
+        exit 0
+        """
+    )
+
+
+def cascade_verify_unit() -> str:
+    return textwrap.dedent(
+        f"""\
+        [Unit]
+        Description=Проверка каскада KalimeraWG после перезагрузки ENTRY
+        Wants=network-online.target
+        After=network-online.target
+
+        [Service]
+        Type=oneshot
+        # По умолчанию systemd снимает oneshot через 90 с, а проверка после загрузки
+        # ждёт 120 с и идёт дольше: без этого она всегда обрывалась до записи результата.
+        TimeoutStartSec=900
+        ExecStart={CASCADE_VERIFY_SCRIPT}
+
+        [Install]
+        WantedBy=multi-user.target
+        """
+    )
+
+
+def schedule_entry_reboot() -> None:
+    """Запланировать перезагрузку ENTRY; при загрузке он сам проверит каскад."""
+    CASCADE_VERIFY_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+    CASCADE_VERIFY_SCRIPT.write_text(cascade_verify_script(), encoding="utf-8")
+    CASCADE_VERIFY_SCRIPT.chmod(0o755)
+    unit_path = Path("/etc/systemd/system") / f"{CASCADE_VERIFY_UNIT}.service"
+    unit_path.write_text(cascade_verify_unit(), encoding="utf-8")
+    unit_path.chmod(0o644)
+    (CASCADE_VERIFY_DIR / "last-verify.txt").unlink(missing_ok=True)
+    run(["systemctl", "daemon-reload"])
+    run(["systemctl", "enable", f"{CASCADE_VERIFY_UNIT}.service"])
+    run(
+        [
+            "systemd-run",
+            "--on-active=15",
+            f"--unit=kalimera-cascade-reboot-{int(time.time())}",
+            "/bin/systemctl",
+            "reboot",
+        ]
+    )
+
+
+BOOT_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ADHOC_TIMEOUT_SECONDS = 60
+
+
+def ansible_adhoc(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    group: str,
+    module: str,
+    module_args: str,
+    *,
+    become: bool = False,
+) -> subprocess.CompletedProcess[str] | None:
+    """Короткая команда Ansible на группе с ограничением по времени.
+
+    Модуль reboot ждёт сервер внутри Ansible и мог зависнуть без сообщения. Здесь
+    каждый вызов ограничен по времени: при отсутствии ответа возвращается None.
+    """
+    argv = [
+        require_command("ansible"),
+        "-i",
+        str(hosts_path),
+        group,
+        "-o",
+        "-m",
+        module,
+        "-a",
+        module_args,
+        "--vault-password-file",
+        str(vault_password),
+    ]
+    if become:
+        argv.append("-b")
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=ADHOC_TIMEOUT_SECONDS,
+            cwd=str(repo),
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def read_boot_id(repo: Path, hosts_path: Path, vault_password: Path, group: str) -> str | None:
+    """Идентификатор текущей загрузки сервера; он меняется после каждой перезагрузки."""
+    result = ansible_adhoc(
+        repo, hosts_path, vault_password, group, "command", "cat /proc/sys/kernel/random/boot_id"
+    )
+    if result is None:
+        return None
+    output = result.stdout + result.stderr
+    if "Permission denied" in output:
+        # Повторять неверный ключ нельзя: каждая неудачная попытка идёт в Fail2Ban,
+        # и сервер блокирует ENTRY сам.
+        fail(
+            f"{group} отклонил ключ ENTRY (Permission denied). Остановлено, чтобы не получить "
+            "бан Fail2Ban. Проверьте адрес ENTRY в правилах доступа этого сервера."
+        )
+    if result.returncode != 0:
+        return None
+    match = BOOT_ID_RE.search(result.stdout)
+    return match.group(0) if match else None
+
+
+def schedule_host_reboot(repo: Path, hosts_path: Path, vault_password: Path, group: str) -> bool:
+    if group == "entry":
+        fail("ENTRY перезагружается отдельным шагом, а не через Ansible")
+    result = ansible_adhoc(
+        repo,
+        hosts_path,
+        vault_password,
+        group,
+        "command",
+        "systemd-run --on-active=3 /bin/systemctl reboot",
+        become=True,
+    )
+    return result is not None and result.returncode == 0
+
+
+def wait_for_host_reboot(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    group: str,
+    previous_boot_id: str,
+    *,
+    attempts: int = 20,
+    delay_seconds: int = 20,
+) -> bool:
+    """Дождаться новой загрузки: сервер должен сменить boot_id, а не просто ответить."""
+    time.sleep(30)
+    for attempt in range(1, attempts + 1):
+        current = read_boot_id(repo, hosts_path, vault_password, group)
+        if current is not None and current != previous_boot_id:
+            print(f"{group}: сервер загрузился заново (попытка {attempt})")
+            return True
+        time.sleep(delay_seconds)
+    return False
+
+
+def status_line(level: str, text: str) -> None:
+    """Строка проверки: OK зелёным, FAIL красным (цвет только в терминале)."""
+    colours = {"OK": "\033[1;32m", "FAIL": "\033[1;31m"}
+    prefix = f"{level:<4} "
+    if sys.stdout.isatty() and level in colours:
+        prefix = f"{colours[level]}{level:<4}\033[0m "
+    print(prefix + text)
+
+
+def run_cascade_reboot(
+    repo: Path, production: Path, vault_password: Path, *, confirmed: bool, force: bool = False
+) -> None:
+    hosts_path = production / "hosts.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not hosts_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
+        fail("Не найден production inventory или внешний пароль Ansible Vault")
+    plan = cascade_reboot_plan(load_yaml(hosts_path))
+    print("Порядок перезагрузки: " + " → ".join(plan))
+    # Полная проверка каскада здесь не нужна: ошибка может быть как раз той
+    # причиной, по которой перезагрузка нужна. До первого шага проверяется только,
+    # что каждый перезагружаемый сервер отвечает по SSH: иначе его не перезагрузить
+    # и не дождаться возврата.
+    boot_ids: dict[str, str] = {}
+    unreachable: list[str] = []
+    for group in plan[:-1]:
+        boot_id = read_boot_id(repo, hosts_path, vault_password, group)
+        if boot_id is None:
+            status_line("FAIL", f"{group}: SSH не отвечает")
+            unreachable.append(group)
+        else:
+            status_line("OK", f"{group}: SSH отвечает, загрузка {boot_id[:8]}")
+            boot_ids[group] = boot_id
+    status_line("OK", "entry: локальный узел, перезагрузится последним")
+    maintenance = subprocess.run(
+        ["systemctl", "is-active", "--quiet", "awg-maintenance.service"], check=False
+    )
+    if maintenance.returncode == 0:
+        status_line("FAIL", "ночное обслуживание выполняется сейчас")
+        fail("Повторите позже, когда обслуживание завершится.")
+    status_line("OK", "ночное обслуживание не выполняется")
+    if unreachable:
+        fail(
+            f"Перезагрузка не начата: не отвечают {', '.join(unreachable)}. Ничего не перезагружено. "
+            "Возможные причины: Fail2Ban или ограничение частоты UFW блокируют ENTRY, либо устарел "
+            "адрес ENTRY в правилах доступа. На этом сервере проверьте: "
+            "sudo fail2ban-client status sshd; sudo ufw status numbered"
+        )
+    if not confirmed:
+        status_line("OK", "перезагрузка возможна: все серверы отвечают")
+        print("Перезагрузка не выполнена. Для запуска выполните: cascade-reboot --yes")
+        return
+    for group in plan[:-1]:
+        print(f"Перезагрузка: {group}")
+        boot_before = boot_ids[group]
+        if not schedule_host_reboot(repo, hosts_path, vault_password, group):
+            fail(
+                f"Не удалось запланировать перезагрузку {group}. Остальные серверы не перезагружались."
+            )
+        if not wait_for_host_reboot(repo, hosts_path, vault_password, group, boot_before):
+            fail(
+                f"{group} не вернулся после перезагрузки за отведённое время. Остальные "
+                "серверы не перезагружались. Проверьте сервер"
+            )
+        print(f"{group}: проверяю каскад после перезагрузки...")
+        if wait_for_cascade():
+            continue
+        if not force:
+            fail(
+                f"После перезагрузки {group} каскад не прошёл проверку (ошибки выше). Остальные "
+                "серверы не перезагружались. Чтобы продолжить несмотря на ошибки: cascade-reboot --yes --force"
+            )
+        print(f"ВНИМАНИЕ: после {group} остались ошибки (выше). Продолжаю, потому что указан --force")
+    print("ENTRY перезагрузится через 15 секунд. Результат проверки после загрузки: cascade-reboot status")
+    schedule_entry_reboot()
+
+
+def cascade_reboot_status() -> None:
+    report = CASCADE_VERIFY_DIR / "last-verify.txt"
+    if not report.is_file():
+        print("Результата проверки после перезагрузки ENTRY пока нет. Журнал проверки:")
+        subprocess.run(
+            ["journalctl", "-u", f"{CASCADE_VERIFY_UNIT}.service", "--no-pager", "-n", "40"],
+            check=False,
+        )
+        return
+    print(report.read_text(encoding="utf-8"))
+
+
 def main() -> None:
     configure_line_editing()
     parser = argparse.ArgumentParser()
@@ -3452,6 +3795,35 @@ def main() -> None:
             "случайным набором; все VLESS-профили нужно выпустить заново"
         ),
     )
+    parser.add_argument(
+        "--maintenance-time",
+        metavar="ЧЧ:ММ",
+        help="время ночного обслуживания в часовом поясе --maintenance-zone; применяется обычным --resume",
+    )
+    parser.add_argument(
+        "--maintenance-zone", metavar="ЗОНА", help="часовой пояс, например Asia/Manila"
+    )
+    parser.add_argument(
+        "--maintenance-show", action="store_true", help="показать время ночного обслуживания"
+    )
+    parser.add_argument(
+        "--cascade-reboot",
+        action="store_true",
+        help="перезагрузить FRONT, EXIT и ENTRY по очереди с проверкой каскада",
+    )
+    parser.add_argument(
+        "--cascade-reboot-status",
+        action="store_true",
+        help="показать результат проверки после перезагрузки ENTRY",
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="подтвердить перезагрузку для --cascade-reboot"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="продолжать перезагрузку, даже если проверка после шага нашла ошибки (ошибки выводятся)",
+    )
     args = parser.parse_args()
     update_flags = [
         name
@@ -3520,6 +3892,53 @@ def main() -> None:
     mtu_result = state_root / "mtu.yml"
     awg_package_lock = state_root / "amneziawg-package-lock.txt"
     vault_password = Path.home() / ".config" / "awg-iac" / "production-vault.pass"
+    maintenance_requested = bool(args.maintenance_time or args.maintenance_zone)
+    reboot_requested = bool(args.cascade_reboot or args.cascade_reboot_status)
+    service_commands = [
+        maintenance_requested,
+        args.maintenance_show,
+        args.cascade_reboot,
+        args.cascade_reboot_status,
+    ]
+    if args.yes and not args.cascade_reboot:
+        parser.error("--yes используется только вместе с --cascade-reboot")
+    if args.force and not (args.cascade_reboot and args.yes):
+        parser.error("--force используется только вместе с --cascade-reboot --yes")
+    if maintenance_requested and not (args.maintenance_time and args.maintenance_zone):
+        parser.error("--maintenance-time и --maintenance-zone указываются вместе")
+    if sum(bool(value) for value in service_commands) > 1:
+        parser.error("выберите одну команду обслуживания за запуск")
+    if any(service_commands) and (
+        args.resume
+        or args.summary
+        or args.terminal_only
+        or update_flags
+        or args.enable_mobile
+        or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
+    ):
+        parser.error("команды обслуживания нельзя объединять с другими режимами deploy")
+    if any(service_commands) and not (production / "hosts.yml").is_file():
+        fail("Не найден production inventory; сначала выполните установку")
+    if args.maintenance_show:
+        print(f"Время ночного обслуживания: {maintenance_show(production)}")
+        return
+    if maintenance_requested:
+        calendar = maintenance_calendar(args.maintenance_time, args.maintenance_zone)
+        previous = set_maintenance_calendar(production, calendar)
+        print(f"Время ночного обслуживания: {previous} → {calendar}")
+        print("Применяю обычный деплой, чтобы таймер получил новое время...")
+        args.resume = True
+    if args.cascade_reboot:
+        run_cascade_reboot(
+            repo, production, vault_password, confirmed=args.yes, force=args.force
+        )
+        return
+    if args.cascade_reboot_status:
+        cascade_reboot_status()
+        return
     if args.summary:
         if not (production / "hosts.yml").is_file() or not (
             production / "group_vars" / "entry.yml"
