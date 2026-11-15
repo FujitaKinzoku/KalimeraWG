@@ -3442,8 +3442,16 @@ def cascade_check_ok(result: subprocess.CompletedProcess[str]) -> bool:
     return result.returncode in (0, 3)
 
 
+def cascade_problems(output: str) -> list[str]:
+    """Строки FAIL и WARN из отчёта cascade-check."""
+    return [line.strip() for line in output.splitlines() if re.match(r"\s*(FAIL|WARN)\s", line)]
+
+
 def wait_for_cascade(attempts: int = 12, delay_seconds: int = 30) -> bool:
-    """Дождаться, пока каскад полностью отвечает: туннели после загрузки поднимаются не сразу."""
+    """Дождаться, пока каскад полностью отвечает: туннели после загрузки поднимаются не сразу.
+
+    При неудаче выводит строки FAIL и WARN, чтобы ошибки были видны в терминале.
+    """
     result = None
     for attempt in range(1, attempts + 1):
         result = run_cascade_check()
@@ -3452,8 +3460,10 @@ def wait_for_cascade(attempts: int = 12, delay_seconds: int = 30) -> bool:
             return True
         if attempt < attempts:
             time.sleep(delay_seconds)
-    if result is not None:
-        print(result.stdout[-4000:])
+    problems = cascade_problems(result.stdout) if result is not None else []
+    print("cascade-check после перезагрузки нашёл ошибки:")
+    for line in problems or ["FAIL отчёт cascade-check не прочитан"]:
+        print(f"  {line}")
     return False
 
 
@@ -3485,6 +3495,9 @@ def cascade_verify_unit() -> str:
 
         [Service]
         Type=oneshot
+        # По умолчанию systemd снимает oneshot через 90 с, а проверка после загрузки
+        # ждёт 120 с и идёт дольше: без этого она всегда обрывалась до записи результата.
+        TimeoutStartSec=900
         ExecStart={CASCADE_VERIFY_SCRIPT}
 
         [Install]
@@ -3628,7 +3641,9 @@ def status_line(level: str, text: str) -> None:
     print(prefix + text)
 
 
-def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, confirmed: bool) -> None:
+def run_cascade_reboot(
+    repo: Path, production: Path, vault_password: Path, *, confirmed: bool, force: bool = False
+) -> None:
     hosts_path = production / "hosts.yml"
     vault_path = production / "group_vars" / "all" / "vault.yml"
     if not hosts_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
@@ -3681,11 +3696,14 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
                 "серверы не перезагружались. Проверьте сервер"
             )
         print(f"{group}: проверяю каскад после перезагрузки...")
-        if not wait_for_cascade():
+        if wait_for_cascade():
+            continue
+        if not force:
             fail(
-                f"После перезагрузки {group} каскад не прошёл проверку. Остальные серверы "
-                "не перезагружались. Проверьте: cascade-check"
+                f"После перезагрузки {group} каскад не прошёл проверку (ошибки выше). Остальные "
+                "серверы не перезагружались. Чтобы продолжить несмотря на ошибки: cascade-reboot --yes --force"
             )
+        print(f"ВНИМАНИЕ: после {group} остались ошибки (выше). Продолжаю, потому что указан --force")
     print("ENTRY перезагрузится через 15 секунд. Результат проверки после загрузки: cascade-reboot status")
     schedule_entry_reboot()
 
@@ -3693,7 +3711,11 @@ def run_cascade_reboot(repo: Path, production: Path, vault_password: Path, *, co
 def cascade_reboot_status() -> None:
     report = CASCADE_VERIFY_DIR / "last-verify.txt"
     if not report.is_file():
-        print("Результата проверки после перезагрузки ENTRY пока нет.")
+        print("Результата проверки после перезагрузки ENTRY пока нет. Журнал проверки:")
+        subprocess.run(
+            ["journalctl", "-u", f"{CASCADE_VERIFY_UNIT}.service", "--no-pager", "-n", "40"],
+            check=False,
+        )
         return
     print(report.read_text(encoding="utf-8"))
 
@@ -3797,6 +3819,11 @@ def main() -> None:
     parser.add_argument(
         "--yes", action="store_true", help="подтвердить перезагрузку для --cascade-reboot"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="продолжать перезагрузку, даже если проверка после шага нашла ошибки (ошибки выводятся)",
+    )
     args = parser.parse_args()
     update_flags = [
         name
@@ -3875,6 +3902,8 @@ def main() -> None:
     ]
     if args.yes and not args.cascade_reboot:
         parser.error("--yes используется только вместе с --cascade-reboot")
+    if args.force and not (args.cascade_reboot and args.yes):
+        parser.error("--force используется только вместе с --cascade-reboot --yes")
     if maintenance_requested and not (args.maintenance_time and args.maintenance_zone):
         parser.error("--maintenance-time и --maintenance-zone указываются вместе")
     if sum(bool(value) for value in service_commands) > 1:
@@ -3903,7 +3932,9 @@ def main() -> None:
         print("Применяю обычный деплой, чтобы таймер получил новое время...")
         args.resume = True
     if args.cascade_reboot:
-        run_cascade_reboot(repo, production, vault_password, confirmed=args.yes)
+        run_cascade_reboot(
+            repo, production, vault_password, confirmed=args.yes, force=args.force
+        )
         return
     if args.cascade_reboot_status:
         cascade_reboot_status()

@@ -521,6 +521,7 @@ def command_panels() -> None:
                 ("cascade-check", "полная проверка всего каскада; итог OK / WARN / FAIL", "INFO"),
                 ("cascade-reboot", "порядок перезагрузки и проверка без перезагрузки", "INFO"),
                 ("cascade-reboot --yes", "перезагрузить FRONT, EXIT и ENTRY по очереди", "INFO"),
+                ("cascade-reboot --yes --force", "то же, но продолжать несмотря на ошибки проверки", "INFO"),
                 ("cascade-reboot status", "результат проверки после перезагрузки ENTRY", "INFO"),
                 ("maintenance-time ЧЧ:ММ ЗОНА", "время ночного обслуживания, например 02:20 Asia/Manila", "INFO"),
                 ("maintenance-time show", "текущее время ночного обслуживания", "INFO"),

@@ -266,6 +266,55 @@ class CascadeRebootRunTests(unittest.TestCase):
         self.assertEqual(scheduled, ["front", "exit"])
         entry.assert_called_once()
 
+    def test_check_errors_stop_the_next_reboot_unless_forced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            scheduled: list[str] = []
+            with mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, BOOT_A]
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE,
+                "schedule_host_reboot",
+                side_effect=lambda *args: scheduled.append(args[-1]) or True,
+            ), mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=True
+            ), mock.patch.object(
+                MODULE, "wait_for_cascade", return_value=False
+            ), mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
+                "builtins.print"
+            ):
+                with self.assertRaises(SystemExit):
+                    MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
+        self.assertEqual(scheduled, ["front"])
+        entry.assert_not_called()
+
+    def test_force_continues_past_check_errors_and_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            scheduled: list[str] = []
+            with mock.patch.object(
+                MODULE, "read_boot_id", side_effect=[BOOT_A, BOOT_A]
+            ), mock.patch.object(MODULE.subprocess, "run", return_value=completed(3)), mock.patch.object(
+                MODULE,
+                "schedule_host_reboot",
+                side_effect=lambda *args: scheduled.append(args[-1]) or True,
+            ), mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=True
+            ), mock.patch.object(
+                MODULE, "wait_for_cascade", return_value=False
+            ), mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
+                "builtins.print"
+            ) as printed:
+                MODULE.run_cascade_reboot(
+                    root, production, root / "vault.pass", confirmed=True, force=True
+                )
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertEqual(scheduled, ["front", "exit"])
+        entry.assert_called_once()
+        self.assertTrue(any("ВНИМАНИЕ: после front остались ошибки" in line for line in lines))
+
     def test_dry_run_reports_each_server_with_ok_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -336,7 +385,25 @@ class CascadeRebootRunTests(unittest.TestCase):
         entry.assert_not_called()
 
 
+class CascadeProblemsTests(unittest.TestCase):
+    def test_lists_fail_and_warn_detail_lines_only(self) -> None:
+        report = (
+            "OK   ok line\n"
+            "FAIL ENTRY → EXIT: SSH: порт не отвечает за 5 с\n"
+            "│ FAIL cascade-check: работа каскада нарушена\n"
+            "WARN требуется перезагрузка\n"
+        )
+        self.assertEqual(
+            MODULE.cascade_problems(report),
+            ["FAIL ENTRY → EXIT: SSH: порт не отвечает за 5 с", "WARN требуется перезагрузка"],
+        )
+
+
 class EntryVerifyTests(unittest.TestCase):
+    def test_unit_waits_longer_than_the_verification_script(self) -> None:
+        # По умолчанию systemd снимает oneshot через 90 с, а скрипт спит 120 с.
+        self.assertIn("TimeoutStartSec=900", MODULE.cascade_verify_unit())
+
     def test_script_saves_report_and_disables_its_unit(self) -> None:
         script = MODULE.cascade_verify_script()
         self.assertIn("/usr/local/sbin/cascade-check", script)
