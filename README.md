@@ -253,6 +253,8 @@ systemctl --failed --no-pager
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Время обслуживания | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (только ENTRY) |
+| Плановая перезагрузка | `cascade-reboot`, `cascade-reboot --yes`, `cascade-reboot status` (только ENTRY) |
 | Обновления | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Замена FRONT | `kalimera-deploy --resume --replace-front`, затем `--commit-front-replacement` |
 

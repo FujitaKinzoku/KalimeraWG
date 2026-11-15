@@ -47,6 +47,8 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function awg-health { _kalimera_admin awg-health "$@"; }
 {% if awg_node_role | default('') == 'entry' %}
     function cascade-check { _kalimera_admin cascade-check "$@"; }
+    function cascade-reboot { _kalimera_admin cascade-reboot "$@"; }
+    function maintenance-time { _kalimera_admin maintenance-time "$@"; }
 {% endif %}
     function server-audit { _kalimera_admin server-audit "$@"; }
     function maintenance { _kalimera_admin maintenance "$@"; }

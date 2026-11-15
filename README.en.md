@@ -253,6 +253,8 @@ table at login. Full reference: `kalimera-help`.
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
+| Maintenance time | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (ENTRY only) |
+| Planned reboot | `cascade-reboot`, `cascade-reboot --yes`, `cascade-reboot status` (ENTRY only) |
 | Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
