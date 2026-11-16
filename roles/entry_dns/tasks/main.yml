@@ -42,7 +42,17 @@
     entry_dns_effective_dot_upstreams: >-
       {{ entry_dns_runtime_dot_override.upstreams
          if entry_dns_runtime_dot_override | length > 0
-         else entry_dot_upstreams }}
+         else entry_dns_dot_upstreams_resolved }}
+
+- name: Пара DoT по умолчанию вместо устаревшего Mullvad
+  ansible.builtin.debug:
+    msg: >-
+      В inventory указан Mullvad DoT, его публичный DNS прекращён. Используется пара
+      по умолчанию: {{ entry_dns_default_dot_upstreams | map(attribute='address') | join(', ') }}.
+      Свой список задаётся в entry_dot_upstreams.
+  when:
+    - entry_dns_inventory_dot_legacy | bool
+    - entry_dns_runtime_dot_override | length == 0
 
 - name: "Загрузка: DNS ENTRY сервера - этап 1"
   ansible.builtin.set_fact:

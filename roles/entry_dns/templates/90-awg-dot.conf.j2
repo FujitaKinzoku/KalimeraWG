@@ -36,7 +36,7 @@ forward-zone:
     forward-addr: {{ awg3_peer_tunnel_address }}@53
 {% else %}
     forward-tls-upstream: yes
-{% for upstream in entry_dns_effective_dot_upstreams | default(entry_dot_upstreams) %}
+{% for upstream in entry_dns_effective_dot_upstreams | default(entry_dns_dot_upstreams_resolved) %}
     forward-addr: {{ upstream.address }}@853#{{ upstream.tls_name }}
 {% endfor %}
 {% endif %}

@@ -50,7 +50,7 @@ CONFIG = {
     "transit_engine": {{ terminal_summary_transit_engine | trim | to_json }},
     "proxy_disabled_flag": {{ entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled') | to_json }},
     "proxy_manual_flag": {{ entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off') | to_json }},
-    "default_dot": {{ (entry_dot_upstreams | default([]) | map(attribute='address') | join(', ')) | to_json }},
+    "default_dot": {{ (entry_dns_dot_upstreams_resolved | default([]) | map(attribute='address') | join(', ')) | to_json }},
     "default_doh_server": {{ entry_dns_doh_server | default('77.88.8.8') | to_json }},
     "default_doh_tls": {{ entry_dns_doh_tls_name | default('common.dot.dns.yandex.net') | to_json }},
     "default_doh_path": {{ entry_dns_doh_path | default('/dns-query') | to_json }},

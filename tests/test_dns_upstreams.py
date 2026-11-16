@@ -11,10 +11,12 @@ import unittest
 from pathlib import Path
 
 import jinja2
+import yaml
 
 ROOT = Path(__file__).parents[1]
 UNBOUND = ROOT / "roles" / "entry_dns" / "templates" / "90-awg-dot.conf.j2"
 DOT_SWITCH = ROOT / "roles" / "operations" / "templates" / "dot-switch.sh.j2"
+ENTRY_DEFAULTS = ROOT / "roles" / "entry_dns" / "defaults" / "main.yml"
 
 
 def render(template: Path, **variables) -> str:
@@ -28,7 +30,7 @@ def render(template: Path, **variables) -> str:
 class UnboundPrefetchTests(unittest.TestCase):
     base = {
         "entry_dns_default_port": 5353,
-        "entry_dot_upstreams": [
+        "entry_dns_dot_upstreams_resolved": [
             {"address": "185.95.218.43", "tls_name": "dns.digitale-gesellschaft.ch"},
             {"address": "9.9.9.9", "tls_name": "dns.quad9.net"},
         ],
@@ -67,6 +69,58 @@ class DotSwitchPairsTests(unittest.TestCase):
     def test_pair_is_split_into_address_and_tls_name(self) -> None:
         self.assertIn('values+=("${pair%%:*}")', self.text)
         self.assertIn('tls_values+=("${pair#*:}")', self.text)
+
+
+def compile_expression(text: str):
+    environment = jinja2.Environment(undefined=jinja2.StrictUndefined)
+    environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
+    body = text.strip()
+    assert body.startswith("{{") and body.endswith("}}"), text
+    return environment.compile_expression(body[2:-2].strip())
+
+
+class DefaultDotResolutionTests(unittest.TestCase):
+    """Какой список DoT действует, если в inventory Mullvad, пусто или свой список."""
+
+    def setUp(self) -> None:
+        self.defaults = yaml.safe_load(ENTRY_DEFAULTS.read_text(encoding="utf-8"))
+        self.default_pair = self.defaults["entry_dns_default_dot_upstreams"]
+
+    def resolve(self, **inventory) -> list:
+        legacy = compile_expression(self.defaults["entry_dns_inventory_dot_legacy"])(**inventory)
+        return compile_expression(self.defaults["entry_dns_dot_upstreams_resolved"])(
+            **inventory,
+            entry_dns_default_dot_upstreams=self.default_pair,
+            entry_dns_inventory_dot_legacy=legacy,
+        )
+
+    def test_default_pair_is_the_dnscry_and_digitale_pair(self) -> None:
+        self.assertEqual(
+            self.default_pair,
+            [
+                {"address": "162.254.86.13", "tls_name": "vno01.dnscry.pt"},
+                {"address": "185.95.218.43", "tls_name": "dns.digitale-gesellschaft.ch"},
+            ],
+        )
+
+    def test_mullvad_inventory_gets_the_default_pair(self) -> None:
+        mullvad = [{"address": "194.242.2.2", "tls_name": "dns.mullvad.net"}]
+        self.assertEqual(self.resolve(entry_dot_upstreams=mullvad), self.default_pair)
+
+    def test_missing_or_empty_list_gets_the_default_pair(self) -> None:
+        self.assertEqual(self.resolve(), self.default_pair)
+        self.assertEqual(self.resolve(entry_dot_upstreams=[]), self.default_pair)
+
+    def test_custom_list_is_kept(self) -> None:
+        custom = [{"address": "9.9.9.9", "tls_name": "dns.quad9.net"}]
+        self.assertEqual(self.resolve(entry_dot_upstreams=custom), custom)
+
+    def test_list_mixing_mullvad_and_others_is_kept(self) -> None:
+        mixed = [
+            {"address": "194.242.2.2", "tls_name": "dns.mullvad.net"},
+            {"address": "9.9.9.9", "tls_name": "dns.quad9.net"},
+        ]
+        self.assertEqual(self.resolve(entry_dot_upstreams=mixed), mixed)
 
 
 if __name__ == "__main__":

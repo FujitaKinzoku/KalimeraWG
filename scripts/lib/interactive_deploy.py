@@ -4605,16 +4605,21 @@ def main() -> None:
         {"address": "185.95.218.43", "tls_name": "dns.digitale-gesellschaft.ch"},
     ]
     if not prompt_bool("Использовать два DNS-over-TLS по умолчанию (Литва и Швейцария)", True):
-        dot_addresses = [item.strip() for item in prompt("IPv4-адреса DoT через запятую").split(",") if item.strip()]
-        dot_tls_name = prompt("TLS-имя сервера DoT")
-        if not dot_addresses or not dot_tls_name:
-            fail("Для собственного DoT нужны адреса серверов и TLS-имя")
-        try:
-            for address in dot_addresses:
+        dot_pairs = [item.strip() for item in prompt("Серверы DoT в виде IP:TLS-имя через запятую").split(",") if item.strip()]
+        if not dot_pairs:
+            fail("Укажите хотя бы один DoT-сервер в виде IP:TLS-имя")
+        dot_upstreams = []
+        for pair in dot_pairs:
+            address, separator, tls_name = pair.partition(":")
+            if not separator or not tls_name:
+                fail(f"DoT-сервер должен быть в виде IP:TLS-имя: {pair}")
+            try:
                 ipaddress.IPv4Address(address)
-        except ValueError:
-            fail("Каждый адрес собственного DoT должен быть IPv4-адресом")
-        dot_upstreams = [{"address": address, "tls_name": dot_tls_name} for address in dot_addresses]
+            except ValueError:
+                fail(f"Адрес DoT должен быть IPv4: {address}")
+            if not re.fullmatch(r"[A-Za-z0-9.-]+", tls_name):
+                fail(f"Некорректное TLS-имя DoT: {tls_name}")
+            dot_upstreams.append({"address": address, "tls_name": tls_name})
 
     doh_server = "77.88.8.8"
     doh_tls_name = "common.dot.dns.yandex.net"

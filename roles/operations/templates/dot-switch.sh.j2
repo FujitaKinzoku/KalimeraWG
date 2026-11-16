@@ -59,7 +59,7 @@ case "$action" in
         ;;
     reset)
         [[ $# -eq 1 ]] || { usage >&2; exit 2; }
-        addresses={{ entry_dot_upstreams | map(attribute='address') | join(',') | quote }}
+        addresses={{ entry_dns_dot_upstreams_resolved | map(attribute='address') | join(',') | quote }}
         tls_name=''
         ;;
     *) usage >&2; exit 2 ;;
@@ -73,7 +73,7 @@ validate_tls_name "${tls_name:-dns.invalid}" || {
 declare -a values=()
 declare -a tls_values=()
 if [[ "$action" == reset ]]; then
-{% for upstream in entry_dot_upstreams %}
+{% for upstream in entry_dns_dot_upstreams_resolved %}
     values+=({{ upstream.address | quote }})
     tls_values+=({{ upstream.tls_name | quote }})
 {% endfor %}

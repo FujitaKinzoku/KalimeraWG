@@ -12,6 +12,16 @@ entry_unbound_config_dir: /etc/unbound/unbound.conf.d
 entry_dns_cache_min_ttl: 300
 # Prefetch Unbound: обновлять популярные записи до истечения TTL.
 entry_dns_prefetch: true
+# DoT-серверы по умолчанию: быстрый сервер в Литве и запасной сервер в Швейцарии
+# от другого оператора. Применяются, если в inventory списка нет, он пустой или
+# содержит только устаревший Mullvad (его публичный DNS прекращён).
+entry_dns_default_dot_upstreams:
+  - address: 162.254.86.13
+    tls_name: vno01.dnscry.pt
+  - address: 185.95.218.43
+    tls_name: dns.digitale-gesellschaft.ch
+entry_dns_inventory_dot_legacy: "{{ (entry_dot_upstreams | default([]) | length > 0) and (entry_dot_upstreams | default([]) | selectattr('tls_name', 'equalto', 'dns.mullvad.net') | list | length == entry_dot_upstreams | default([]) | length) }}"
+entry_dns_dot_upstreams_resolved: "{{ entry_dns_default_dot_upstreams if ((entry_dot_upstreams | default([]) | length == 0) or (entry_dns_inventory_dot_legacy | bool)) else entry_dot_upstreams }}"
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf
