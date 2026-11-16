@@ -185,6 +185,13 @@ if [[ "$active" == true ]]; then
     install -m 0644 "$candidate" "$output"
 else
     [[ "$output_existed" == true ]] || exit 0
+    # Watchdog RU-прокси работает с файловой системой только для чтения и вызывает
+    # эту программу через ru-domain sync. Удалить файл он не может, а сбой здесь
+    # сорвал бы переключение DNS-политики при отказе прокси. Файл удалит deploy.
+    if [[ ! -w "$(dirname "$output")" ]]; then
+        echo "Файл $output не удалён: каталог доступен только для чтения. Его удалит kalimera-deploy --resume." >&2
+        exit 0
+    fi
     committed=true
     rm -f "$output"
 fi

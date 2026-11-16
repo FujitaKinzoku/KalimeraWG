@@ -323,6 +323,26 @@ class RuDotSyncTests(SyncCase):
         self.assertFalse(self.output.exists())
         self.assertEqual(self.calls.read_text(encoding="utf-8"), "")
 
+    def test_proxy_mode_in_a_read_only_sandbox_does_not_fail(self) -> None:
+        # Так программу вызывает watchdog RU-прокси: ProtectSystem=strict, запись
+        # только в /run. Сбой здесь сорвал бы переключение DNS-политики.
+        if os.geteuid() == 0:
+            self.skipTest("root пишет и в каталог без права записи")
+        self.assertEqual(self.sync().returncode, 0)
+        before = self.output.read_text(encoding="utf-8")
+        self.calls.write_text("", encoding="utf-8")
+        self.render_sync(entry_dns_ru_dot_active=False)
+        self.conf.chmod(0o555)
+        try:
+            result = self.sync()
+        finally:
+            self.conf.chmod(0o755)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("каталог доступен только для чтения", result.stderr)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.calls.read_text(encoding="utf-8"), "")
+
     def test_failed_probe_restores_the_previous_zone_file(self) -> None:
         self.write_list("ru-domain", "vk.com")
         self.assertEqual(self.sync().returncode, 0)
