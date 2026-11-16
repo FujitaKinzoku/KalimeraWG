@@ -112,13 +112,17 @@ entry_ru_proxy_max_probe_time: 15
 
 entry_dns_default_port: 5353
 entry_dns_ru_port: 5354
-entry_dns_dot_hostname: dns.mullvad.net
 entry_dns_doh_tls_name: common.dot.dns.yandex.net
 entry_dns_doh_path: /dns-query
 entry_dns_doh_server: 77.88.8.8
+# Два оператора из разных стран: быстрый сервер (Литва) и сервер с заявленной
+# политикой приватности (Швейцария). Unbound выбирает меньшую задержку, второй
+# сервер - запасной. Сервер dnscry принадлежит одному оператору для всех узлов.
 entry_dot_upstreams:
-  - address: 194.242.2.2
-    tls_name: dns.mullvad.net
+  - address: 162.254.86.13
+    tls_name: vno01.dnscry.pt
+  - address: 185.95.218.43
+    tls_name: dns.digitale-gesellschaft.ch
 
 entry_domain_files_enabled: true
 entry_ru_domain_file: "{{ inventory_dir }}/domains/ru-domain"
