@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import shlex
 import unittest
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def render(template: Path, **variables) -> str:
         trim_blocks=True, undefined=jinja2.StrictUndefined, keep_trailing_newline=True
     )
     environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
+    environment.filters["quote"] = lambda value: shlex.quote(str(value))
     return environment.from_string(template.read_text(encoding="utf-8")).render(**variables)
 
 
@@ -121,6 +123,61 @@ class DefaultDotResolutionTests(unittest.TestCase):
             {"address": "9.9.9.9", "tls_name": "dns.quad9.net"},
         ]
         self.assertEqual(self.resolve(entry_dot_upstreams=mixed), mixed)
+
+
+WARM_SCRIPT = ROOT / "roles" / "entry_dns" / "templates" / "kalimera-dns-warm.sh.j2"
+WARM_SERVICE = ROOT / "roles" / "entry_dns" / "templates" / "kalimera-dns-warm.service.j2"
+WARM_TIMER = ROOT / "roles" / "entry_dns" / "templates" / "kalimera-dns-warm.timer.j2"
+
+
+class WarmTimerTests(unittest.TestCase):
+    """Прогрев кэша Unbound: скрипт, юниты systemd и срок жизни данных о задержке."""
+
+    def script(self, **variables) -> str:
+        base = {
+            "entry_dns_default_port": 5353,
+            "entry_dns_warm_names": ["youtube.com", "t.me"],
+            "groups": {"front": []},
+            "hostvars": {},
+        }
+        return render(WARM_SCRIPT, **{**base, **variables})
+
+    def test_script_queries_local_unbound_with_the_popular_names(self) -> None:
+        text = self.script()
+        self.assertIn("readonly port=5353", text)
+        self.assertIn("youtube.com", text)
+        self.assertIn("t.me", text)
+        self.assertIn('-p "$port" @127.0.0.1', text)
+
+    def test_script_also_warms_the_front_cdn_domain(self) -> None:
+        text = self.script(
+            groups={"front": ["front-1"]},
+            hostvars={"front-1": {"front_cdn_domain": "cdn.example.invalid"}},
+        )
+        self.assertIn("cdn.example.invalid", text)
+
+    def test_script_ignores_errors_and_writes_nothing(self) -> None:
+        text = self.script()
+        self.assertIn("|| true", text)
+        self.assertIn("exit 0", text)
+        self.assertIn("/dev/null", text)
+        self.assertNotIn("logger", text)
+        self.assertNotIn("tee", text)
+
+    def test_service_is_oneshot_and_discards_output(self) -> None:
+        text = render(WARM_SERVICE)
+        self.assertIn("Type=oneshot", text)
+        self.assertIn("StandardOutput=null", text)
+        self.assertIn("ExecStart=/usr/local/sbin/kalimera-dns-warm", text)
+
+    def test_timer_runs_at_the_configured_interval(self) -> None:
+        text = render(WARM_TIMER, entry_dns_warm_interval_seconds=60)
+        self.assertIn("OnUnitActiveSec=60s", text)
+        self.assertIn("Unit=kalimera-dns-warm.service", text)
+
+    def test_unbound_keeps_upstream_latency_data_longer(self) -> None:
+        text = render(UNBOUND, **UnboundPrefetchTests.base)
+        self.assertIn("    infra-host-ttl: 3600\n", text)
 
 
 if __name__ == "__main__":

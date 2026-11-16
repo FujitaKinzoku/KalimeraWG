@@ -1,0 +1,11 @@
+[Unit]
+Description=Прогрев кэша Unbound каждые {{ entry_dns_warm_interval_seconds }} секунд
+
+[Timer]
+OnBootSec=60s
+OnUnitActiveSec={{ entry_dns_warm_interval_seconds }}s
+AccuracySec=5s
+Unit=kalimera-dns-warm.service
+
+[Install]
+WantedBy=timers.target

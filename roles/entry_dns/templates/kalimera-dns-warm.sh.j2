@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Прогрев кэша Unbound. Короткие запросы к популярным именам и домену CDN каскада
+# не дают записям истечь, поэтому промах достаётся прогреву, а не пользователю.
+# Ответы никуда не пишутся: кэш Unbound только в RAM, журналы не ведутся.
+# Ошибки намеренно игнорируются: прогрев не должен влиять на работу DNS.
+{% set front_cdn = (hostvars[groups['front'][0]].front_cdn_domain | default('')) if (groups['front'] | default([]) | length > 0) else '' %}
+{% set warm_names = entry_dns_warm_names + ([front_cdn] if front_cdn else []) %}
+set -u
+
+readonly port={{ entry_dns_default_port }}
+readonly names=(
+{% for name in warm_names %}
+    {{ name | quote }}
+{% endfor %}
+)
+
+for name in "${names[@]}"; do
+    dig +short +time=2 +tries=1 -p "$port" @127.0.0.1 "$name" A >/dev/null 2>&1 || true
+done
+exit 0

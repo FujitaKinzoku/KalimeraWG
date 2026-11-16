@@ -12,6 +12,27 @@ entry_unbound_config_dir: /etc/unbound/unbound.conf.d
 entry_dns_cache_min_ttl: 300
 # Prefetch Unbound: обновлять популярные записи до истечения TTL.
 entry_dns_prefetch: true
+# Прогрев кэша Unbound: короткие запросы к популярным именам каждые 60 секунд.
+# Записи не истекают, DoT-соединения и данные о задержках остаются тёплыми, а
+# промах достаётся прогреву, а не пользователю. Ответы нигде не сохраняются.
+entry_dns_warm_enabled: true
+entry_dns_warm_interval_seconds: 60
+entry_dns_warm_names:
+  - youtube.com
+  - googlevideo.com
+  - ytimg.com
+  - instagram.com
+  - cdninstagram.com
+  - telegram.org
+  - t.me
+  - web.telegram.org
+  - whatsapp.com
+  - facebook.com
+  - x.com
+  - tiktok.com
+  - discord.com
+# Срок жизни данных о задержке до серверов DoT в Unbound, секунды (по умолчанию 900).
+entry_dns_infra_host_ttl: 3600
 # DoT-серверы по умолчанию: быстрый сервер в Литве и запасной сервер в Швейцарии
 # от другого оператора. Применяются, если в inventory списка нет, он пустой или
 # содержит только устаревший Mullvad (его публичный DNS прекращён).
