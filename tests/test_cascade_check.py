@@ -357,6 +357,30 @@ class CascadeCheckTests(unittest.TestCase):
         self.assertIn("CDN не используется в каскаде", result.stdout)
         self.assertIn("в каскаде не используется", result.stdout)
 
+    def fake_curl(self, output: str, exit_code: int = 0) -> None:
+        curl = self.fakebin / "curl"
+        curl.write_text(f"#!/bin/sh\nprintf '%s' '{output}'\nexit {exit_code}\n", encoding="utf-8")
+        curl.chmod(0o755)
+
+    def test_cdn_rows_split_dns_network_and_http(self) -> None:
+        # curl отдаёт накопленные времена от начала запроса: имя разрешено за
+        # 0.320596 с, TCP готов на 0.322997 с, TLS на 0.354 с, ответ на 0.458131 с.
+        self.fake_curl("200 0.320596 0.322997 0.354000 0.458131")
+        result = self.run_body("cdn_rows\ncat \"$rows_file\"\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            row("CDN", "OK", "CDN: DNS имени", "разрешение за 320 мс через резолвер ENTRY", "", "320")
+            + row("CDN", "OK", "CDN: TLS и HTTPS", "TCP 2 мс, TLS 31 мс, ответ 104 мс, HTTP 200", "", "458"),
+        )
+
+    def test_cdn_rows_report_failure_without_dns_row(self) -> None:
+        self.fake_curl("", exit_code=28)
+        result = self.run_body("cdn_rows\ncat \"$rows_file\"\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CDN\tFAIL\tCDN: TLS и HTTPS", result.stdout)
+        self.assertNotIn("CDN: DNS имени", result.stdout)
+
     def test_block_is_identical_to_awg_health(self) -> None:
         self.assertEqual(
             shared_block(self.script.read_text(encoding="utf-8")),
