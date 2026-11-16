@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 usage() {
-    echo 'Использование: dot-switch {status|mullvad|custom IP[,IP...] TLS_NAME|reset}'
+    echo 'Использование: dot-switch {status|custom IP[,IP...] TLS_NAME|custom IP:TLS_NAME[,IP:TLS_NAME...]|reset}'
 }
 
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
@@ -46,15 +46,16 @@ case "$action" in
         [[ -e "$override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
         exit 0
         ;;
-    mullvad)
-        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
-        addresses='194.242.2.2,194.242.2.3'
-        tls_name=dns.mullvad.net
-        ;;
     custom)
-        [[ $# -eq 3 ]] || { usage >&2; exit 2; }
-        addresses="$2"
-        tls_name="$3"
+        if [[ $# -eq 2 ]]; then
+            # Пары IP:TLS-имя: у каждого оператора своё TLS-имя.
+            pairs="$2"
+        elif [[ $# -eq 3 ]]; then
+            addresses="$2"
+            tls_name="$3"
+        else
+            usage >&2; exit 2
+        fi
         ;;
     reset)
         [[ $# -eq 1 ]] || { usage >&2; exit 2; }
@@ -76,6 +77,13 @@ if [[ "$action" == reset ]]; then
     values+=({{ upstream.address | quote }})
     tls_values+=({{ upstream.tls_name | quote }})
 {% endfor %}
+elif [[ -n "${pairs:-}" ]]; then
+    IFS=, read -ra pair_list <<<"$pairs"
+    for pair in "${pair_list[@]}"; do
+        [[ "$pair" == *:* ]] || { echo "Пара должна быть в виде IP:TLS-имя: $pair" >&2; exit 2; }
+        values+=("${pair%%:*}")
+        tls_values+=("${pair#*:}")
+    done
 else
     IFS=, read -ra values <<<"$addresses"
     for _ in "${values[@]}"; do tls_values+=("$tls_name"); done

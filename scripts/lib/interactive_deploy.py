@@ -4529,7 +4529,7 @@ def main() -> None:
     ui_section(
         5,
         "DNS И МОНИТОРИНГ",
-        "По умолчанию: Mullvad DoT и Yandex DoH для RU-доменов через прокси.",
+        "По умолчанию: два DoT-сервера (162.254.86.13 и 185.95.218.43) и Yandex DoH для RU-доменов через прокси.",
     )
     telegram_enabled = prompt_bool("Включить мониторинг через Telegram", False)
     telegram_token = ""
@@ -4601,9 +4601,10 @@ def main() -> None:
             fail("Telegram chat ID должен быть отдельным положительным или отрицательным числом")
 
     dot_upstreams = [
-        {"address": "194.242.2.2", "tls_name": "dns.mullvad.net"},
+        {"address": "162.254.86.13", "tls_name": "vno01.dnscry.pt"},
+        {"address": "185.95.218.43", "tls_name": "dns.digitale-gesellschaft.ch"},
     ]
-    if not prompt_bool("Использовать Mullvad DNS-over-TLS по умолчанию", True):
+    if not prompt_bool("Использовать два DNS-over-TLS по умолчанию (Литва и Швейцария)", True):
         dot_addresses = [item.strip() for item in prompt("IPv4-адреса DoT через запятую").split(",") if item.strip()]
         dot_tls_name = prompt("TLS-имя сервера DoT")
         if not dot_addresses or not dot_tls_name:

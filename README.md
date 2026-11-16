@@ -181,10 +181,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.3.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.3.1/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.3.0`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.3.1`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +196,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.3.0 --depth 1 \
+git clone --branch v3.3.1 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -351,7 +351,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.3.0
+sudo git -C /root/KalimeraWG switch --detach v3.3.1
 kalimera-deploy --resume
 ```
 
@@ -378,6 +378,7 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.3.1:** DNS по умолчанию - два DoT-сервера вместо Mullvad (dnscry, Литва, и Digitale Gesellschaft, Швейцария); prefetch и cache-min-ttl в Unbound; пары `IP:TLS` в `dot-switch`; строка CDN разбита на DNS и сеть.
 - **v3.3.0:** `cascade-reboot` и `maintenance-time` (только ENTRY): плановая
   перезагрузка каскада по очереди FRONT, EXIT, ENTRY с проверкой после каждого
   шага (`--force` продолжает несмотря на ошибки) и время ночного обслуживания
