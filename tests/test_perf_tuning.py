@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import unittest
 from pathlib import Path
@@ -22,7 +23,24 @@ SYSCTL = ROOT / "roles" / "security" / "templates" / "sysctl.conf.j2"
 UNBOUND = ROOT / "roles" / "entry_dns" / "templates" / "90-awg-dot.conf.j2"
 ENTRY_DNS_DEFAULTS = ROOT / "roles" / "entry_dns" / "defaults" / "main.yml"
 EXAMPLE_EXIT = ROOT / "inventory" / "example" / "group_vars" / "exit.yml"
+FRONT_BACKEND = ROOT / "roles" / "front_backend" / "templates" / "front-backend.json.j2"
 SET_MSS = "--set-mss {{ exit_tcp_mss_effective }}"
+
+FRONT_BACKEND_VARS = {
+    "reality_fallback_port": 8444,
+    "reality_fallback_front_client_uuid": "00000000-0000-4000-8000-000000000000",
+    "reality_fallback_dest": "example.com",
+    "reality_fallback_dest_port": 443,
+    "reality_fallback_private_key": "TEST-KEY",
+    "reality_fallback_short_id": "0123456789abcdef",
+    "reality_fallback_ru_rule_set_path": "/tmp/ru-domains.json",
+    "reality_fallback_ru_zone_rule_set_path": "/tmp/ru-zone.json",
+    "reality_fallback_se_rule_set_path": "/tmp/se-domains.json",
+    "entry_exit_mark": "0x1",
+    "entry_ru_mark": "0x2",
+    "entry_dns_default_port": 5353,
+    "entry_client_listen_address": "10.66.0.1",
+}
 
 UNBOUND_BASE = {
     "entry_dns_default_port": 5353,
@@ -139,12 +157,19 @@ class ServerTcpTests(unittest.TestCase):
 
 
 class UnboundCacheTests(unittest.TestCase):
-    def test_defaults_enable_larger_cache_prefetch_key_and_short_serve_expired(self) -> None:
+    def test_defaults_enable_larger_cache_prefetch_key_and_hour_long_serve_expired(self) -> None:
         defaults = load_yaml(ENTRY_DNS_DEFAULTS)
         self.assertEqual(defaults["entry_dns_msg_cache_size"], "32m")
         self.assertEqual(defaults["entry_dns_rrset_cache_size"], "64m")
         self.assertIs(defaults["entry_dns_prefetch_key"], True)
-        self.assertEqual(defaults["entry_dns_serve_expired_ttl"], 120)
+        self.assertEqual(defaults["entry_dns_serve_expired_ttl"], 3600)
+
+    def test_template_fallback_matches_the_role_default(self) -> None:
+        # Шаблон рендерится и без переменной (тесты, старые inventory): запасное
+        # значение в нём обязано совпадать со значением роли.
+        default = load_yaml(ENTRY_DNS_DEFAULTS)["entry_dns_serve_expired_ttl"]
+        text = render(UNBOUND, **UNBOUND_BASE)
+        self.assertIn(f"    serve-expired-ttl: {default}\n", text)
 
     def test_rendered_config_carries_the_defaults(self) -> None:
         defaults = load_yaml(ENTRY_DNS_DEFAULTS)
@@ -160,7 +185,10 @@ class UnboundCacheTests(unittest.TestCase):
         self.assertIn("    rrset-cache-size: 64m\n", text)
         self.assertIn("    prefetch-key: yes\n", text)
         self.assertIn("    serve-expired: yes\n", text)
-        self.assertIn("    serve-expired-ttl: 120\n", text)
+        self.assertIn("    serve-expired-ttl: 3600\n", text)
+        # Без явного нуля Unbound может сначала ждать DoT-сервер и только потом
+        # отдать устаревший ответ: тогда кэш не ускоряет повторный запрос.
+        self.assertIn("    serve-expired-client-timeout: 0\n", text)
 
     def test_serve_expired_can_be_turned_off(self) -> None:
         text = render(
@@ -172,6 +200,42 @@ class UnboundCacheTests(unittest.TestCase):
             entry_dns_serve_expired_ttl=0,
         )
         self.assertNotIn("serve-expired", text)
+
+
+class FrontBackendDnsTests(unittest.TestCase):
+    """DNS клиентов VLESS отвечает резолвер ENTRY, а не резолвер из настроек клиента."""
+
+    def config(self) -> dict:
+        return json.loads(render(FRONT_BACKEND, **FRONT_BACKEND_VARS))
+
+    def test_dns_is_hijacked_right_after_sniff(self) -> None:
+        rules = self.config()["route"]["rules"]
+        self.assertEqual(rules[0], {"inbound": ["front-reality-in"], "action": "sniff"})
+        self.assertEqual(
+            rules[1],
+            {"inbound": ["front-reality-in"], "protocol": "dns", "action": "hijack-dns"},
+        )
+
+    def test_hijacked_queries_go_to_the_entry_resolver(self) -> None:
+        dns = self.config()["dns"]
+        self.assertEqual(
+            dns["rules"],
+            [{"inbound": ["front-reality-in"], "action": "route", "server": "entry-split-dns"}],
+        )
+        servers = {server["tag"]: server for server in dns["servers"]}
+        self.assertEqual(servers["entry-split-dns"]["server"], "10.66.0.1")
+        self.assertEqual(servers["entry-split-dns"]["server_port"], 53)
+        self.assertEqual(dns["final"], "bootstrap-unbound")
+        self.assertIs(dns["disable_cache"], True)
+
+    def test_routing_rules_keep_their_order_after_the_hijack(self) -> None:
+        rules = self.config()["route"]["rules"]
+        self.assertEqual(len(rules), 5)
+        self.assertEqual(rules[2]["rule_set"], ["front-se-domains"])
+        self.assertEqual(rules[2]["outbound"], "direct-exit")
+        self.assertEqual(rules[3]["domain_suffix"], [".ru", ".xn--p1ai"])
+        self.assertEqual(rules[4]["rule_set"], ["front-ru-domains", "front-ru-zone"])
+        self.assertEqual(rules[4]["outbound"], "direct-ru")
 
 
 class WarmNamesTests(unittest.TestCase):

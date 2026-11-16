@@ -11,12 +11,19 @@
   правило.
 - Прогрев DNS ENTRY: из `entry_dns_warm_names` убраны имена без A-записи
   (`cdninstagram.com`, `ytimg.com`) и апекс `googlevideo.com`: видео идёт с узлов
-  `rrN---…googlevideo.com`, и по списку их не прогреть. Добавлены `www.youtube.com`,
-  `i.ytimg.com`, `instagram.com`, `www.instagram.com` и `graph.instagram.com`.
+  `rrN---…googlevideo.com`, и по списку их не прогреть. В списке теперь 38 имён,
+  которые приложения запрашивают при запуске и загрузке: YouTube (API, редиректор
+  узлов видео, миниатюры, аватарки), Instagram, Telegram, WhatsApp, Facebook, X,
+  TikTok и Discord.
 - Unbound: `msg-cache-size` 32m и `rrset-cache-size` 64m (переменные
-  `entry_dns_msg_cache_size` и `entry_dns_rrset_cache_size`), `prefetch-key: yes`,
-  `serve-expired` на 120 секунд (`entry_dns_serve_expired_ttl`, 0 отключает). Кэш
+  `entry_dns_msg_cache_size` и `entry_dns_rrset_cache_size`), `prefetch-key: yes`.
+  Устаревший ответ отдаётся из кэша сразу и до часа после истечения TTL
+  (`entry_dns_serve_expired_ttl: 3600`, 0 отключает), пока Unbound обновляет запись
+  в фоне: имя, которое запрашивали за последний час, не ждёт DoT-сервер. Кэш
   остаётся в RAM и на диск не пишется.
+- VLESS через FRONT: DNS-запросы клиентов отвечает резолвер ENTRY (dnsmasq и кэш
+  Unbound), как у клиентов AmneziaWG. Раньше запрос уходил к резолверу из настроек
+  клиента: мимо кэша и прогрева ENTRY и открытым текстом с адреса ENTRY или EXIT.
 - Сервер: sysctl `tcp_congestion_control = bbr`, `tcp_slow_start_after_idle = 0`,
   `tcp_mtu_probing = 1`. Параметры касаются TCP самого сервера: FRONT↔ENTRY,
   соединения FRONT с CDN и исходящие соединения sing-box. TCP клиентов завершается

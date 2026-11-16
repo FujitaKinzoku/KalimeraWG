@@ -22,11 +22,14 @@ server:
     rrset-cache-size: {{ entry_dns_rrset_cache_size | default('64m') }}
     # Prefetch DNSKEY: ключи популярных зон не запрашиваются заново при каждой проверке.
     prefetch-key: {{ 'yes' if (entry_dns_prefetch_key | default(true) | bool) else 'no' }}
-{% if (entry_dns_serve_expired_ttl | default(120) | int) > 0 %}
+{% if (entry_dns_serve_expired_ttl | default(3600) | int) > 0 %}
     # Устаревший ответ отдаётся сразу, пока Unbound обновляет запись в фоне. Окно не
     # дольше entry_dns_serve_expired_ttl секунд после истечения TTL.
     serve-expired: yes
-    serve-expired-ttl: {{ entry_dns_serve_expired_ttl | default(120) | int }}
+    serve-expired-ttl: {{ entry_dns_serve_expired_ttl | default(3600) | int }}
+    # 0 = отвечать из кэша сразу, не дожидаясь DoT-сервера. Задано явно, чтобы
+    # поведение не зависело от значения по умолчанию в версии Unbound.
+    serve-expired-client-timeout: 0
 {% endif %}
     qname-minimisation: yes
     aggressive-nsec: yes
