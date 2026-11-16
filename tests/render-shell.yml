@@ -442,6 +442,10 @@
           ansible.builtin.include_vars:
             file: "{{ playbook_dir }}/../inventory/example/group_vars/exit.yml"
 
+        - name: Вычисление MSS EXIT для проверки шаблона (как в roles/exit/defaults)
+          ansible.builtin.set_fact:
+            exit_tcp_mss_effective: "{{ ((awg3_shared_effective_mtu | default(exit_awg_mtu, true)) | int) - 40 }}"
+
         - name: Выбор ветви health-шаблона EXIT
           ansible.builtin.set_fact:
             awg_node_role: exit

@@ -1,5 +1,27 @@
 # Журнал изменений
 
+## [Unreleased]
+
+- Выход через EXIT: MSS TCP вычисляется из MTU межсерверного интерфейса
+  (`exit_tcp_mss_effective` = MTU − 40). Раньше было зафиксировано 1336: при MTU
+  1368 сегменты получались по 1376 байт, не проходили в канал, а `--set-mss`
+  перекрывал значение 1328, которое выставлял ENTRY. Правило исправлено и для
+  kernel-пути, и для userspace-пути. Значение `exit_tcp_mss` из inventory больше
+  не используется, deploy выводит предупреждение. Health-проверка ожидает то же
+  правило.
+- Прогрев DNS ENTRY: из `entry_dns_warm_names` убраны имена без A-записи
+  (`cdninstagram.com`, `ytimg.com`) и апекс `googlevideo.com`: видео идёт с узлов
+  `rrN---…googlevideo.com`, и по списку их не прогреть. Добавлены `www.youtube.com`,
+  `i.ytimg.com`, `instagram.com`, `www.instagram.com` и `graph.instagram.com`.
+- Unbound: `msg-cache-size` 32m и `rrset-cache-size` 64m (переменные
+  `entry_dns_msg_cache_size` и `entry_dns_rrset_cache_size`), `prefetch-key: yes`,
+  `serve-expired` на 120 секунд (`entry_dns_serve_expired_ttl`, 0 отключает). Кэш
+  остаётся в RAM и на диск не пишется.
+- Сервер: sysctl `tcp_congestion_control = bbr`, `tcp_slow_start_after_idle = 0`,
+  `tcp_mtu_probing = 1`. Параметры касаются TCP самого сервера: FRONT↔ENTRY,
+  соединения FRONT с CDN и исходящие соединения sing-box. TCP клиентов завершается
+  на их устройствах, поэтому транзит этим не меняется.
+
 ## [3.3.2] - 2026-11-16
 
 - Прогрев кэша Unbound: каждые 60 секунд ENTRY запрашивает популярные сайты

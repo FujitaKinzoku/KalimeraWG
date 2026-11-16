@@ -17,12 +17,16 @@ entry_dns_prefetch: true
 # промах достаётся прогреву, а не пользователю. Ответы нигде не сохраняются.
 entry_dns_warm_enabled: true
 entry_dns_warm_interval_seconds: 60
+# Имена, которые приложения резолвят на самом деле. Апексы без A-записи
+# (cdninstagram.com, ytimg.com) и апекс googlevideo.com не греем: видео идёт с узлов
+# вида rrN---…googlevideo.com, и по списку их не прогреть.
 entry_dns_warm_names:
   - youtube.com
-  - googlevideo.com
-  - ytimg.com
+  - www.youtube.com
+  - i.ytimg.com
   - instagram.com
-  - cdninstagram.com
+  - www.instagram.com
+  - graph.instagram.com
   - telegram.org
   - t.me
   - web.telegram.org
@@ -33,6 +37,14 @@ entry_dns_warm_names:
   - discord.com
 # Срок жизни данных о задержке до серверов DoT в Unbound, секунды (по умолчанию 900).
 entry_dns_infra_host_ttl: 3600
+# Размер кэша Unbound. Больше записей остаётся в RAM без вытеснения; на диск не пишется.
+entry_dns_msg_cache_size: 32m
+entry_dns_rrset_cache_size: 64m
+# Prefetch DNSKEY: ключи популярных зон не запрашиваются заново при каждой проверке.
+entry_dns_prefetch_key: true
+# Секунды, в течение которых устаревший ответ отдаётся сразу, пока Unbound обновляет
+# запись в фоне. 0 отключает. Окно короткое, чтобы устаревший IP CDN не держался долго.
+entry_dns_serve_expired_ttl: 120
 # DoT-серверы по умолчанию: быстрый сервер в Литве и запасной сервер в Швейцарии
 # от другого оператора. Применяются, если в inventory списка нет, он пустой или
 # содержит только устаревший Mullvad (его публичный DNS прекращён).

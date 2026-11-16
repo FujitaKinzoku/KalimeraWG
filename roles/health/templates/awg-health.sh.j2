@@ -974,11 +974,11 @@ check 'полный профиль AWG 3+ EXIT сервера применён' 
 check 'ограниченный NAT EXIT сервера' iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
 check 'изоляция клиентов EXIT сервера' iptables -w 10 -C FORWARD -i {{ exit_awg_interface | quote }} -o {{ exit_awg_interface | quote }} -j DROP
 {% if awg3_transit_enabled | default(false) | bool %}
-check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
+check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
 {% else %}
-check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
-check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss }}
+check 'исходящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -o {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
+check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C FORWARD -i {{ exit_awg_interface | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
 {% endif %}
 {% if entry_dns_default_via_exit | default(false) | bool %}
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service

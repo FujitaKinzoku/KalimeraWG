@@ -15,7 +15,6 @@ exit_awg_listen_port: 443
 security_interserver_peer_ipv4: 192.0.2.10
 security_interserver_listen_port: 443
 exit_awg_mtu: 1420
-exit_tcp_mss: 1336
 awg3_transit_enabled: false
 awg3_transit_listen_port: 443
 awg3_peer_endpoint_port: 39745
