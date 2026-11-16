@@ -14,6 +14,9 @@ server:
     # Prefetch обновляет популярные записи до истечения TTL, поэтому клиент реже
     # ждёт промах. Запросы идут только к именам, которые уже запрашивались.
     prefetch: {{ 'yes' if (entry_dns_prefetch | default(true) | bool) else 'no' }}
+    # Данные о задержке до серверов DoT живут дольше, чем по умолчанию: реже
+    # проверяется второй сервер, а его проверки не попадают на запросы клиентов.
+    infra-host-ttl: {{ entry_dns_infra_host_ttl | default(3600) | int }}
     qname-minimisation: yes
     aggressive-nsec: yes
     tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"
@@ -36,7 +39,7 @@ forward-zone:
     forward-addr: {{ awg3_peer_tunnel_address }}@53
 {% else %}
     forward-tls-upstream: yes
-{% for upstream in entry_dns_effective_dot_upstreams | default(entry_dot_upstreams) %}
+{% for upstream in entry_dns_effective_dot_upstreams | default(entry_dns_dot_upstreams_resolved) %}
     forward-addr: {{ upstream.address }}@853#{{ upstream.tls_name }}
 {% endfor %}
 {% endif %}

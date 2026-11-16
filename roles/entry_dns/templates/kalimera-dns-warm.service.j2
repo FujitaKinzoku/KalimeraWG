@@ -1,0 +1,12 @@
+[Unit]
+Description=Прогрев кэша Unbound популярными именами
+After=unbound.service
+Wants=unbound.service
+
+[Service]
+Type=oneshot
+User=nobody
+ExecStart=/usr/local/sbin/kalimera-dns-warm
+NoNewPrivileges=yes
+StandardOutput=null
+StandardError=null

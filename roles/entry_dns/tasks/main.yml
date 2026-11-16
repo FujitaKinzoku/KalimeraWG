@@ -42,7 +42,17 @@
     entry_dns_effective_dot_upstreams: >-
       {{ entry_dns_runtime_dot_override.upstreams
          if entry_dns_runtime_dot_override | length > 0
-         else entry_dot_upstreams }}
+         else entry_dns_dot_upstreams_resolved }}
+
+- name: Пара DoT по умолчанию вместо устаревшего Mullvad
+  ansible.builtin.debug:
+    msg: >-
+      В inventory указан Mullvad DoT, его публичный DNS прекращён. Используется пара
+      по умолчанию: {{ entry_dns_default_dot_upstreams | map(attribute='address') | join(', ') }}.
+      Свой список задаётся в entry_dot_upstreams.
+  when:
+    - entry_dns_inventory_dot_legacy | bool
+    - entry_dns_runtime_dot_override | length == 0
 
 - name: "Загрузка: DNS ENTRY сервера - этап 1"
   ansible.builtin.set_fact:
@@ -296,3 +306,41 @@
   # не готов. Сквозная проверка перенесена в отдельный play после play EXIT
   # (playbooks/site.yml, "Проверка DNS зарубежной ветки через EXIT").
   when: not (entry_dns_default_via_exit | default(false) | bool)
+
+- name: "Прогрев: DNS ENTRY сервера - этап 29"
+  ansible.builtin.template:
+    src: kalimera-dns-warm.sh.j2
+    dest: /usr/local/sbin/kalimera-dns-warm
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_dns_warm_enabled | bool
+
+- name: "Прогрев: DNS ENTRY сервера - этап 30"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kalimera-dns-warm.service
+    - kalimera-dns-warm.timer
+  when: entry_dns_warm_enabled | bool
+
+- name: "Прогрев: DNS ENTRY сервера - этап 31"
+  ansible.builtin.systemd_service:
+    name: kalimera-dns-warm.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: entry_dns_warm_enabled | bool
+
+- name: "Прогрев: DNS ENTRY сервера - выключен"
+  ansible.builtin.systemd_service:
+    name: kalimera-dns-warm.timer
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (entry_dns_warm_enabled | bool)
+  failed_when: false
