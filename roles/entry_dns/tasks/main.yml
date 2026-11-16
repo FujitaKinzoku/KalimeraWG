@@ -344,3 +344,52 @@
     daemon_reload: true
   when: not (entry_dns_warm_enabled | bool)
   failed_when: false
+
+# Без цикла: при пустом списке задача с циклом не выполнилась бы ни разу и ничего бы
+# не проверила.
+- name: "Российские имена: списки зон и серверов DoT не пусты"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_dns_ru_dot_upstreams | length >= 1
+      - entry_dns_ru_dot_zones | length >= 1
+    fail_msg: "entry_dns_ru_dot_upstreams и entry_dns_ru_dot_zones должны содержать хотя бы одно значение"
+  when: entry_dns_ru_dot_active | bool
+
+- name: "Российские имена: проверка серверов DoT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - item is mapping
+      - item.address | default('') | ansible.utils.ipv4
+      - item.tls_name | default('') is match('^[A-Za-z0-9.-]+$')
+    fail_msg: "entry_dns_ru_dot_upstreams должен содержать IPv4-адрес и TLS-имя каждого сервера"
+  loop: "{{ entry_dns_ru_dot_upstreams }}"
+  when: entry_dns_ru_dot_active | bool
+
+- name: "Российские имена: проверка имён зон"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - item is string
+      - item is match('^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+    fail_msg: "entry_dns_ru_dot_zones: имя зоны записывается строчными буквами ASCII или в Punycode, без точки в конце"
+  loop: "{{ entry_dns_ru_dot_zones }}"
+  when: entry_dns_ru_dot_active | bool
+
+- name: "Российские имена: программа сборки зон Unbound"
+  ansible.builtin.template:
+    src: awg-ru-dns-sync.sh.j2
+    dest: /usr/local/sbin/awg-ru-dns-sync
+    owner: root
+    group: root
+    mode: "0750"
+
+# Программа сама сравнивает файл зон с нужным состоянием: при RU-прокси удаляет
+# его, без прокси создаёт, проверяет unbound-checkconf, перезапускает Unbound и
+# убеждается, что российское имя разрешается. При сбое возвращает прежний файл.
+- name: "Российские имена: зоны Unbound для режима без RU-прокси"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/awg-ru-dns-sync]
+  register: entry_dns_ru_dot_sync
+  changed_when: entry_dns_ru_dot_sync.stdout | trim | length > 0

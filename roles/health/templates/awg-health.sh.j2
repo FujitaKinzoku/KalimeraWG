@@ -254,6 +254,8 @@ health_hint() {
             hint='проверьте, что второй сервер каскада включён и хостинг не блокирует его UDP-порт; затем на ENTRY: kalimera-deploy --resume' ;;
         *MTU*|*'полный профиль'*)
             hint='на ENTRY: kalimera-deploy --resume (профиль AWG и MTU задаются при установке)' ;;
+        *'российский DoT'*)
+            hint='ru-domain sync пересоберёт зоны, sudo systemctl restart unbound.service загрузит их; серверы и тест: dns-status; отключить режим: entry_dns_ru_dot_enabled: false в group_vars/entry.yml, затем kalimera-deploy --resume' ;;
         *'DNS EXIT'*)
             hint='sudo systemctl restart unbound.service; если не помогло - на ENTRY: kalimera-deploy --resume' ;;
         *DNS*|*Unbound*|*dnsmasq*|*резолвер*|*AAAA*|*'разрешение имён'*)
@@ -517,6 +519,22 @@ dns_no_logs_policy_is_active() {
         grep -Eq '^[[:space:]]*log-replies:[[:space:]]*no[[:space:]]*$' \
             /etc/unbound/unbound.conf.d/90-awg-dot.conf
 }
+
+{% if entry_dns_ru_dot_active | default(false) | bool %}
+# Режим без RU-прокси: в работающем Unbound каждая российская зона направлена на
+# российский DoT (зоны собирает awg-ru-dns-sync), и российское имя через него
+# разрешается. Вывод unbound-control сначала читается целиком: grep -q в конвейере
+# закрыл бы канал раньше времени, и при pipefail проверка падала бы через раз.
+ru_dot_dns_is_active() {
+    local forwards zone answer
+    forwards="$(unbound-control list_forwards 2>/dev/null)" || return 1
+    for zone in{% for zone in entry_dns_ru_dot_zones %} {{ zone | quote }}{% endfor %}; do
+        grep -Eq "^${zone//./\\.}\. IN forward (.* )?{{ (entry_dns_ru_dot_upstreams | map(attribute='address') | first) | replace('.', '\\.') }}( |\$)" <<<"$forwards" || return 1
+    done
+    answer="$(dig +short +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} {{ entry_dns_ru_dot_probe_name | default('yandex.ru') | quote }} A 2>/dev/null)" || return 1
+    grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"
+}
+{% endif %}
 
 sing_box_no_logs_policy_is_active() {
     [[ ! -e /etc/sing-box/config.json ]] ||
@@ -795,6 +813,9 @@ check_minor 'sing-box не журналирует активность и не �
 check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} example.com A
 check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
+{% if entry_dns_ru_dot_active | default(false) | bool %}
+check 'российские имена разрешает российский DoT с ENTRY' ru_dot_dns_is_active
+{% endif %}
 {% if entry_legacy_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
     check 'DNS совместимых клиентов по UDP' dig +time=3 +tries=1 @{{ entry_legacy_client_listen_address }} example.com A

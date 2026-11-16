@@ -90,6 +90,25 @@ entry_dns_default_dot_upstreams:
     tls_name: dns.digitale-gesellschaft.ch
 entry_dns_inventory_dot_legacy: "{{ (entry_dot_upstreams | default([]) | length > 0) and (entry_dot_upstreams | default([]) | selectattr('tls_name', 'equalto', 'dns.mullvad.net') | list | length == entry_dot_upstreams | default([]) | length) }}"
 entry_dns_dot_upstreams_resolved: "{{ entry_dns_default_dot_upstreams if ((entry_dot_upstreams | default([]) | length == 0) or (entry_dns_inventory_dot_legacy | bool)) else entry_dot_upstreams }}"
+# Российские имена в режиме без RU-прокси разрешает Yandex DNS по DoT прямо с ENTRY:
+# их трафик выходит с ENTRY, поэтому и резолвер российский. Это зоны .ru и .рф и списки
+# ru-domain и entry-domain; имена se-domain внутри этих зон остаются на серверах DoT по
+# умолчанию. Остальные имена идут к серверам DoT по умолчанию, как и раньше. С
+# RU-прокси этот путь не используется: там российский DoH идёт через прокси.
+# Зоны собирает awg-ru-dns-sync в файл 91-awg-ru-dot.conf. Значение false возвращает
+# прежнее поведение: все имена через серверы DoT по умолчанию.
+entry_dns_ru_dot_enabled: true
+entry_dns_ru_dot_zones:
+  - ru
+  - xn--p1ai
+entry_dns_ru_dot_upstreams:
+  - address: 77.88.8.8
+    tls_name: common.dot.dns.yandex.net
+  - address: 77.88.8.1
+    tls_name: common.dot.dns.yandex.net
+# Российское имя для проверки после сборки зон и в awg-health.
+entry_dns_ru_dot_probe_name: yandex.ru
+entry_dns_ru_dot_active: "{{ (entry_dns_ru_dot_enabled | bool) and not (entry_ru_proxy_enabled | default(false) | bool) }}"
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf

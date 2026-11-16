@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Зоны Unbound для российских имён.
+#
+# В режиме без RU-прокси российские назначения выходят напрямую с ENTRY, поэтому
+# и разрешает их российский резолвер: Yandex DNS по DoT прямо с ENTRY. Остальные
+# имена идут к серверам DoT по умолчанию. Зоны собираются из тех же источников,
+# что и доменная политика dnsmasq: зоны .ru и .рф, списки ru-domain и
+# entry-domain. Имена se-domain внутри российских зон остаются на серверах по
+# умолчанию: явное правило EXIT важнее российской зоны.
+#
+# Файл зон отдельный от 90-awg-dot.conf: dot-switch удаляет в том файле все строки
+# forward-addr и дописывает новые в конец, то есть в последнюю зону.
+set -Eeuo pipefail
+
+usage() {
+    echo 'Использование: awg-ru-dns-sync [--no-restart]'
+}
+
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+restart=true
+case "${1:-}" in
+    '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+    --no-restart) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; restart=false ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+readonly active={{ 'true' if (entry_dns_ru_dot_active | bool) else 'false' }}
+readonly output={{ (entry_unbound_config_dir ~ '/91-awg-ru-dot.conf') | quote }}
+readonly base_config={{ (entry_unbound_config_dir ~ '/90-awg-dot.conf') | quote }}
+readonly policy_dir={{ (awg_domain_policy_dir | default('/etc/awg/domain-policy')) | quote }}
+readonly runtime_dir={{ (entry_dns_ru_dot_runtime_dir | default('/run')) | quote }}
+readonly dns_port={{ entry_dns_default_port | int }}
+readonly probe_name={{ (entry_dns_ru_dot_probe_name | default('yandex.ru')) | quote }}
+readonly -a static_zones=({% for zone in entry_dns_ru_dot_zones %}{{ zone | quote }}{{ '' if loop.last else ' ' }}{% endfor %})
+readonly -a ru_upstreams=({% for upstream in entry_dns_ru_dot_upstreams %}{{ (upstream.address ~ '@853#' ~ upstream.tls_name) | quote }}{{ '' if loop.last else ' ' }}{% endfor %})
+
+{# Дальше обычный bash без подстановок. Блок raw нужен из-за выражений вида
+   ${#массив[@]}: сочетание фигурной скобки и решётки Jinja принял бы за начало
+   комментария. #}
+{% raw %}
+# Имена из списка доменной политики: без комментариев и пустых строк.
+list_names() {
+    local file="$policy_dir/$1" line
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        line="${line//[[:space:]]/}"
+        line="${line,,}"
+        line="${line%.}"
+        [[ "$line" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || continue
+        printf '%s\n' "$line"
+    done <"$file"
+}
+
+declare -A russian=()
+declare -A exceptions=()
+
+# Имя совпадает с российской зоной или лежит внутри неё.
+inside_russian() {
+    local name="$1" zone
+    for zone in "${!russian[@]}"; do
+        if [[ "$name" == "$zone" || "$name" == *".$zone" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+emit_zone() {
+    local name="$1" tls="$2" address
+    shift 2
+    printf 'forward-zone:\n    name: "%s."\n' "$name"
+    if [[ "$tls" == yes ]]; then
+        printf '    forward-tls-upstream: yes\n'
+    fi
+    for address in "$@"; do
+        printf '    forward-addr: %s\n' "$address"
+    done
+}
+
+default_tls=no
+declare -a default_upstreams=()
+declare -a se_names=()
+declare -a sorted=()
+
+collect() {
+    local name
+    for name in "${static_zones[@]}"; do
+        russian["$name"]=1
+    done
+    while IFS= read -r name; do
+        russian["$name"]=1
+    done < <(list_names ru-domain; list_names entry-domain)
+
+    mapfile -t se_names < <(list_names se-domain | sort -u)
+    # Одно и то же имя в российском списке и в se-domain считается se-domain.
+    for name in "${se_names[@]}"; do
+        unset "russian[$name]"
+    done
+    for name in "${se_names[@]}"; do
+        if inside_russian "$name"; then
+            exceptions["$name"]=1
+        fi
+    done
+
+    if [[ -f "$base_config" ]]; then
+        mapfile -t default_upstreams < <(
+            sed -n -E 's/^[[:space:]]*forward-addr:[[:space:]]*([^[:space:]]+)[[:space:]]*$/\1/p' "$base_config"
+        )
+        if grep -Eq '^[[:space:]]*forward-tls-upstream:[[:space:]]*yes[[:space:]]*$' "$base_config"; then
+            default_tls=yes
+        fi
+    fi
+}
+
+build_candidate() {
+    local name
+    echo '# Сформировано awg-ru-dns-sync. Не редактируйте вручную: файл пересобирается'
+    echo '# при изменении ru-domain, se-domain, entry-domain и серверов DoT по умолчанию.'
+    echo '# Российские имена разрешает российский резолвер по DoT напрямую с ENTRY.'
+    # Без проверки пустой набор дал бы одну пустую строку и зону с именем ".".
+    if (( ${#russian[@]} > 0 )); then
+        mapfile -t sorted < <(printf '%s\n' "${!russian[@]}" | sort)
+        for name in "${sorted[@]}"; do
+            emit_zone "$name" yes "${ru_upstreams[@]}"
+        done
+    fi
+    if (( ${#exceptions[@]} > 0 )); then
+        echo '# Имена se-domain внутри российских зон: серверы DoT по умолчанию.'
+        mapfile -t sorted < <(printf '%s\n' "${!exceptions[@]}" | sort)
+        for name in "${sorted[@]}"; do
+            emit_zone "$name" "$default_tls" "${default_upstreams[@]}"
+        done
+    fi
+}
+
+exec 9>"$runtime_dir/awg-ru-dns-sync.lock"
+flock 9
+
+candidate="$(mktemp "$runtime_dir/awg-ru-dns-sync.XXXXXX")"
+previous="$(mktemp "$runtime_dir/awg-ru-dns-sync.previous.XXXXXX")"
+output_existed=false
+if [[ -e "$output" ]]; then
+    cp -a "$output" "$previous"
+    output_existed=true
+fi
+committed=false
+
+cleanup() {
+    local rc=$?
+    if (( rc != 0 )) && [[ "$committed" == true ]]; then
+        if [[ "$output_existed" == true ]]; then
+            install -m 0644 "$previous" "$output" || true
+        else
+            rm -f "$output"
+        fi
+        if [[ "$restart" == true ]]; then
+            systemctl restart unbound.service >/dev/null 2>&1 9>&- || true
+        fi
+        echo 'Зоны российских имён не применены; предыдущая конфигурация Unbound восстановлена.' >&2
+    fi
+    rm -f "$candidate" "$previous"
+    return "$rc"
+}
+trap cleanup EXIT
+
+if [[ "$active" == true ]]; then
+    (( ${#ru_upstreams[@]} > 0 )) || {
+        echo 'Не заданы российские серверы DoT (entry_dns_ru_dot_upstreams).' >&2
+        exit 1
+    }
+    collect
+    if (( ${#exceptions[@]} > 0 && ${#default_upstreams[@]} == 0 )); then
+        echo "В $base_config нет серверов по умолчанию: исключения se-domain построить нельзя." >&2
+        exit 1
+    fi
+    build_candidate >"$candidate"
+    if [[ "$output_existed" == true ]] && cmp --silent "$candidate" "$output"; then
+        exit 0
+    fi
+    unbound-checkconf "$candidate" >/dev/null
+    committed=true
+    install -m 0644 "$candidate" "$output"
+else
+    [[ "$output_existed" == true ]] || exit 0
+    committed=true
+    rm -f "$output"
+fi
+
+# Полная проверка: файл зон читается вместе с остальной конфигурацией Unbound.
+unbound-checkconf >/dev/null
+
+# Дескриптор блокировки закрывается для перезапуска: служба не должна его унаследовать.
+if [[ "$restart" == true ]] && systemctl is-active --quiet unbound.service; then
+    systemctl restart unbound.service 9>&-
+    verified=false
+    for _ in 1 2 3 4 5; do
+        if dig +short +time=3 +tries=1 @127.0.0.1 -p "$dns_port" "$probe_name" A 2>/dev/null |
+                grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            verified=true
+            break
+        fi
+        sleep "${AWG_RU_DNS_SYNC_RETRY_SECONDS:-2}"
+    done
+    [[ "$verified" == true ]] || {
+        if [[ "$active" == true ]]; then
+            echo "После изменения зон имя $probe_name не разрешается: российские серверы DoT недоступны с этого сервера." >&2
+            echo 'Отключить режим: entry_dns_ru_dot_enabled: false в group_vars/entry.yml, затем kalimera-deploy --resume.' >&2
+        else
+            echo "После удаления зон имя $probe_name не разрешается." >&2
+        fi
+        exit 1
+    }
+fi
+committed=false
+
+if [[ "$active" == true ]]; then
+    echo "Зоны российских имён применены: ${#russian[@]} через российский DoT, исключений se-domain: ${#exceptions[@]}."
+else
+    echo 'Зоны российских имён удалены: работает RU-прокси или режим выключен.'
+fi
+{% endraw %}

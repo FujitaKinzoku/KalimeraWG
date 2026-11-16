@@ -160,6 +160,18 @@
         mode: "{{ entry_rollback.secret | ternary('0600', '0644') }}"
       no_log: "{{ entry_rollback.secret }}"
 
+    # Имена se-domain внутри российских зон повторяют серверы DoT по умолчанию из
+    # восстановленного файла, поэтому зоны пересобираются до перезапуска Unbound. На
+    # сервере, где программы ещё нет, задача пропускается.
+    - name: Пересборка зон российских имён под восстановленные серверы DoT
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/awg-ru-dns-sync, --no-restart]
+      args:
+        removes: /usr/local/sbin/awg-ru-dns-sync
+      register: entry_rollback_ru_dot_sync
+      changed_when: entry_rollback_ru_dot_sync.stdout | default('') | trim | length > 0
+      when: rollback_component == 'unbound'
+
     - name: Перезапуск восстановленного компонента ENTRY
       ansible.builtin.systemd_service:
         name: "{{ entry_rollback.service }}"
