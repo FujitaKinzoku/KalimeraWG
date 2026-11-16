@@ -8,6 +8,9 @@ server:
     do-tcp: yes
     hide-identity: yes
     hide-version: yes
+    # Минимальный TTL ответов в кэше Unbound: короткие записи CDN не запрашиваются
+    # заново при каждом подключении. Значение задаёт entry_dns_cache_min_ttl.
+    cache-min-ttl: {{ entry_dns_cache_min_ttl | default(300) | int }}
     qname-minimisation: yes
     aggressive-nsec: yes
     tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"

@@ -6,6 +6,10 @@ entry_dns_resolved_dropin_dir: /etc/systemd/resolved.conf.d
 entry_dns_resolved_dropin_path: /etc/systemd/resolved.conf.d/60-kalimerawg.conf
 entry_dnsmasq_config_dir: /etc/dnsmasq.d
 entry_unbound_config_dir: /etc/unbound/unbound.conf.d
+# Минимальный TTL в кэше Unbound, секунды. 0 отключает. Пять минут - компромисс:
+# короткие записи CDN не перезапрашиваются при каждом подключении, а устаревший
+# узел CDN может держаться в кэше до пяти минут после смены.
+entry_dns_cache_min_ttl: 300
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf
