@@ -11,6 +11,9 @@ server:
     # Минимальный TTL ответов в кэше Unbound: короткие записи CDN не запрашиваются
     # заново при каждом подключении. Значение задаёт entry_dns_cache_min_ttl.
     cache-min-ttl: {{ entry_dns_cache_min_ttl | default(300) | int }}
+    # Prefetch обновляет популярные записи до истечения TTL, поэтому клиент реже
+    # ждёт промах. Запросы идут только к именам, которые уже запрашивались.
+    prefetch: {{ 'yes' if (entry_dns_prefetch | default(true) | bool) else 'no' }}
     qname-minimisation: yes
     aggressive-nsec: yes
     tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"

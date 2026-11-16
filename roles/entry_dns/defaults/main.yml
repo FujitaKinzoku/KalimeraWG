@@ -10,6 +10,8 @@ entry_unbound_config_dir: /etc/unbound/unbound.conf.d
 # короткие записи CDN не перезапрашиваются при каждом подключении, а устаревший
 # узел CDN может держаться в кэше до пяти минут после смены.
 entry_dns_cache_min_ttl: 300
+# Prefetch Unbound: обновлять популярные записи до истечения TTL.
+entry_dns_prefetch: true
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf
