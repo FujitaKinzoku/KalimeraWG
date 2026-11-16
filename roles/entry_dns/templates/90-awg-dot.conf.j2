@@ -26,7 +26,7 @@ server:
     # Устаревший ответ отдаётся сразу, пока Unbound обновляет запись в фоне. Окно не
     # дольше entry_dns_serve_expired_ttl секунд после истечения TTL.
     serve-expired: yes
-    serve-expired-ttl: {{ entry_dns_serve_expired_ttl | int }}
+    serve-expired-ttl: {{ entry_dns_serve_expired_ttl | default(120) | int }}
 {% endif %}
     qname-minimisation: yes
     aggressive-nsec: yes

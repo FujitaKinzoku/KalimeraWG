@@ -102,9 +102,11 @@ class ExitMssRulesTests(unittest.TestCase):
         self.assertNotIn("clamp-mss-to-pmtu", text)
 
     def test_userspace_transit_uses_the_same_rule_in_both_directions(self) -> None:
+        # Вверх: по одной строке для -o и -i, в каждой правило проверяется (-C) и
+        # добавляется (-A), это 4 вхождения. Вниз: удаление (-D) для -o и -i, 2 вхождения.
         text = TRANSIT_SETUP.read_text(encoding="utf-8")
         self.assertNotIn("clamp-mss-to-pmtu", text)
-        self.assertEqual(text.count(SET_MSS), 4)
+        self.assertEqual(text.count(SET_MSS), 6)
 
     def test_health_expects_the_same_rule_for_both_engines(self) -> None:
         text = HEALTH.read_text(encoding="utf-8")
