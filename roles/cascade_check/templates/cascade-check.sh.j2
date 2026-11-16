@@ -363,7 +363,7 @@ cdn_rows() {
         # curl отдаёт накопленные времена от начала запроса; здесь они переводятся
         # в интервалы каждой фазы.
         read -r dns_ms tcp_ms tls_ms http_ms total_ms < <(awk -v d="$t_dns" -v c="$t_conn" -v s="$t_tls" -v a="$t_total" \
-            'BEGIN { printf "%d %d %d %d %d", d * 1000, (c - d) * 1000, (s - c) * 1000, (a - s) * 1000, a * 1000 }')
+            'BEGIN { printf "%d %d %d %d %d\n", d * 1000, (c - d) * 1000, (s - c) * 1000, (a - s) * 1000, a * 1000 }')
         emit_row CDN OK 'CDN: DNS имени' "разрешение за $dns_ms мс через резолвер ENTRY" '' "$dns_ms"
         case "$code" in
             5??)
