@@ -351,21 +351,26 @@ status_line() {
     printf '%s%-4s %s%s\n' "$color" "$1" "$2" "$report_reset"
 }
 
-# CDN с точки зрения ENTRY: TLS-рукопожатие с проверкой сертификата и ответ
-# edge-узла по HTTPS без тела запроса. Аплинк через CDN проверяет FRONT: его
-# строки CDN попадают в одну группу сводки.
+# CDN с точки зрения ENTRY: разрешение имени, TCP, TLS-рукопожатие с проверкой
+# сертификата и ответ edge-узла по HTTPS без тела запроса. Время разбито по
+# фазам: имя разрешает резолвер ENTRY, и его кэш может быть холодным, а клиенты
+# резолвят CDN своим DNS. Поэтому медленный DNS не выдаётся за медленную сеть.
+# Аплинк через CDN проверяет FRONT: его строки CDN попадают в одну группу сводки.
 cdn_rows() {
-    local output code appconnect total tls_ms ms
-    if output="$(curl -4 -sS -o /dev/null --max-time 10 -w '%{http_code} %{time_appconnect} %{time_total}' "https://$cdn_domain/" 2>/dev/null)"; then
-        read -r code appconnect total <<<"$output"
-        tls_ms="$(awk -v t="$appconnect" 'BEGIN { printf "%d", t * 1000 }')"
-        ms="$(awk -v t="$total" 'BEGIN { printf "%d", t * 1000 }')"
+    local output code t_dns t_conn t_tls t_total dns_ms tcp_ms tls_ms http_ms total_ms
+    if output="$(curl -4 -sS -o /dev/null --max-time 10 -w '%{http_code} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_total}' "https://$cdn_domain/" 2>/dev/null)"; then
+        read -r code t_dns t_conn t_tls t_total <<<"$output"
+        # curl отдаёт накопленные времена от начала запроса; здесь они переводятся
+        # в интервалы каждой фазы.
+        read -r dns_ms tcp_ms tls_ms http_ms total_ms < <(awk -v d="$t_dns" -v c="$t_conn" -v s="$t_tls" -v a="$t_total" \
+            'BEGIN { printf "%d %d %d %d %d", d * 1000, (c - d) * 1000, (s - c) * 1000, (a - s) * 1000, a * 1000 }')
+        emit_row CDN OK 'CDN: DNS имени' "разрешение за $dns_ms мс через резолвер ENTRY" '' "$dns_ms"
         case "$code" in
             5??)
-                emit_row CDN WARN 'CDN: HTTPS-ответ edge' "HTTP $code, TLS за $tls_ms мс" 'edge CDN отвечает ошибкой: проверьте origin-домен FRONT и настройки CDN в панели провайдера' "$ms"
+                emit_row CDN WARN 'CDN: HTTPS-ответ edge' "HTTP $code, TCP $tcp_ms мс, TLS $tls_ms мс" 'edge CDN отвечает ошибкой: проверьте origin-домен FRONT и настройки CDN в панели провайдера' "$total_ms"
                 ;;
             *)
-                emit_row CDN OK 'CDN: TLS и HTTPS' "TLS за $tls_ms мс, HTTP $code, всего $ms мс" '' "$ms"
+                emit_row CDN OK 'CDN: TLS и HTTPS' "TCP $tcp_ms мс, TLS $tls_ms мс, ответ $http_ms мс, HTTP $code" '' "$total_ms"
                 ;;
         esac
     else
