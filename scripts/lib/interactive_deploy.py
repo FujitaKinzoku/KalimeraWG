@@ -3147,10 +3147,21 @@ def show_deployment_summary(production: Path) -> None:
             ]
         )
     else:
+        # Без RU-прокси российские имена разрешает российский DoT прямо с ENTRY
+        # (roles/entry_dns, entry_dns_ru_dot_enabled включён по умолчанию).
+        ru_dot_items = entry_vars.get("entry_dns_ru_dot_upstreams") or []
+        if not entry_vars.get("entry_dns_ru_dot_enabled", True):
+            ru_dns_summary = "основной резолвер ENTRY по DoT"
+        elif ru_dot_items:
+            ru_dns_summary = "DoT напрямую с ENTRY: " + ", ".join(
+                f"{item['address']} (TLS: {item['tls_name']})" for item in ru_dot_items
+            )
+        else:
+            ru_dns_summary = "Yandex DoT напрямую с ENTRY"
         architecture_rows.extend(
             [
                 ("RU-трафик", "VPN-клиент → WAN ENTRY → Интернет"),
-                ("RU DNS", "основной резолвер ENTRY по DoT"),
+                ("RU DNS", ru_dns_summary),
             ]
         )
     architecture_rows.append(

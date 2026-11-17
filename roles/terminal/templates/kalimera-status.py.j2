@@ -190,6 +190,26 @@ def current_dot() -> str:
         return CONFIG["default_dot"]
 
 
+def current_ru_dot() -> str:
+    """Серверы российских зон Unbound; пустая строка, если файла зон нет.
+
+    Файл собирает awg-ru-dns-sync в режиме без RU-прокси. У всех российских зон
+    серверы одинаковы, поэтому берётся первая зона файла.
+    """
+    path = Path("/etc/unbound/unbound.conf.d/91-awg-ru-dot.conf")
+    try:
+        zones = re.split(
+            r"^forward-zone:\s*$", path.read_text(encoding="utf-8"), flags=re.MULTILINE
+        )
+    except OSError:
+        return ""
+    if len(zones) < 2:
+        return ""
+    return ", ".join(
+        re.findall(r"^\s*forward-addr:\s*(\S+)", zones[1], flags=re.MULTILINE)
+    )
+
+
 def current_doh() -> str:
     path = Path("/etc/sing-box/config.json")
     try:
@@ -736,12 +756,19 @@ def main() -> int:
 
     if CONFIG["role"] == "entry":
         ru_route, doh_note = proxy_route()
+        ru_dot = current_ru_dot()
+        if CONFIG["proxy_configured"]:
+            ru_dns = f"{doh_note}: {current_doh()}"
+        elif ru_dot:
+            ru_dns = f"Unbound DoT напрямую с ENTRY: {ru_dot}"
+        else:
+            ru_dns = "серверы основного DNS; отдельный российский DNS выключен"
         panel(
             "СХЕМА РАБОТЫ И DNS",
             [
                 ("Основной маршрут", "VPN-клиент → ENTRY → EXIT → Интернет", "INFO"),
                 ("RU-трафик", ru_route, "INFO"),
-                ("RU DNS", f"{doh_note}: {current_doh()}", "INFO"),
+                ("RU DNS", ru_dns, "INFO"),
                 ("Основной DNS", f"Unbound DoT: {current_dot()}", "INFO"),
             ],
         )

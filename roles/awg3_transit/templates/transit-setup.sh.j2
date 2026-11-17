@@ -43,16 +43,16 @@ elif [[ "$mode" == up ]]; then
 {% endif %}
 {% if awg_node_role == 'exit' %}
     iptables -w 10 -t nat -C POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE 2>/dev/null || iptables -w 10 -t nat -A POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE
-    iptables -w 10 -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    iptables -w 10 -t mangle -C FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    iptables -w 10 -t mangle -C FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }} 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
+    iptables -w 10 -t mangle -C FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }} 2>/dev/null || iptables -w 10 -t mangle -A FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }}
     iptables -w 10 -C FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || iptables -w 10 -I FORWARD -i "$iface" -o "$iface" -j DROP
 {% endif %}
 elif [[ "$mode" == down ]]; then
     ip -4 route del "${peer}/32" dev "$iface" 2>/dev/null || true
 {% if awg_node_role == 'exit' %}
     iptables -w 10 -t nat -D POSTROUTING -s {{ exit_awg_subnet | quote }} -o {{ exit_wan_interface | quote }} -j MASQUERADE 2>/dev/null || true
-    iptables -w 10 -t mangle -D FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-    iptables -w 10 -t mangle -D FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    iptables -w 10 -t mangle -D FORWARD -o "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }} 2>/dev/null || true
+    iptables -w 10 -t mangle -D FORWARD -i "$iface" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss {{ exit_tcp_mss_effective }} 2>/dev/null || true
     iptables -w 10 -D FORWARD -i "$iface" -o "$iface" -j DROP 2>/dev/null || true
 {% endif %}
     cleanup_interface

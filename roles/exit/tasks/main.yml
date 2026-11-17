@@ -1,4 +1,11 @@
 ---
+- name: "Предупреждение: exit_tcp_mss из inventory больше не используется"
+  ansible.builtin.debug:
+    msg: >-
+      В inventory задан exit_tcp_mss, но он больше не используется: MSS на EXIT
+      вычисляется из MTU межсерверного интерфейса. Строку можно удалить.
+  when: exit_tcp_mss is defined
+
 - name: "Проверка прежней конфигурации межсерверного AWG 2 на EXIT"
   ansible.builtin.stat:
     path: "{{ exit_awg_config_path }}"

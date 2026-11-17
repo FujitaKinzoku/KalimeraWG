@@ -261,6 +261,8 @@
               dest: awg-local-peer-apply
             - src: roles/operations/templates/awg-dns-policy.sh.j2
               dest: awg-dns-policy
+            - src: roles/entry_dns/templates/awg-ru-dns-sync.sh.j2
+              dest: awg-ru-dns-sync
             - src: roles/awg3_transit/templates/transit-setup.sh.j2
               dest: awg3-transit-setup
             - src: roles/awg3_transit/templates/transit-restart.sh.j2
@@ -438,9 +440,52 @@
             dest: "{{ rendered_shell_root }}/awg-health-entry"
             mode: "0700"
 
+        # В примерном inventory RU-прокси включён, поэтому ветви режима без прокси
+        # (российский DoT прямо с ENTRY) формируются отдельно. Значение из
+        # include_vars перекрывает только set_fact, поэтому исходное сохраняется и
+        # возвращается после формирования.
+        - name: Сохранение режима RU-прокси примерного inventory
+          ansible.builtin.set_fact:
+            rendered_entry_ru_proxy_enabled: "{{ entry_ru_proxy_enabled | bool }}"
+
+        - name: Выбор режима без RU-прокси
+          ansible.builtin.set_fact:
+            entry_ru_proxy_enabled: false
+
+        - name: Формирование программ ENTRY для режима без RU-прокси
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0700"
+          loop:
+            - src: roles/health/templates/awg-health.sh.j2
+              dest: awg-health-entry-direct-ru
+            - src: roles/entry_dns/templates/awg-ru-dns-sync.sh.j2
+              dest: awg-ru-dns-sync-direct-ru
+
+        - name: Проверка ветвей российского DoT в сформированных программах
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fxq 'readonly active=true' {{ rendered_shell_root }}/awg-ru-dns-sync-direct-ru
+            grep -Fxq 'readonly active=false' {{ rendered_shell_root }}/awg-ru-dns-sync
+            grep -Fq "check 'российские имена разрешает российский DoT с ENTRY' ru_dot_dns_is_active" \
+              {{ rendered_shell_root }}/awg-health-entry-direct-ru
+            ! grep -Fq 'ru_dot_dns_is_active' {{ rendered_shell_root }}/awg-health-entry
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Возврат режима RU-прокси примерного inventory
+          ansible.builtin.set_fact:
+            entry_ru_proxy_enabled: "{{ rendered_entry_ru_proxy_enabled | bool }}"
+
         - name: Загрузка безопасных примерных переменных EXIT
           ansible.builtin.include_vars:
             file: "{{ playbook_dir }}/../inventory/example/group_vars/exit.yml"
+
+        - name: Вычисление MSS EXIT для проверки шаблона (как в roles/exit/defaults)
+          ansible.builtin.set_fact:
+            exit_tcp_mss_effective: "{{ ((awg3_shared_effective_mtu | default(exit_awg_mtu, true)) | int) - 40 }}"
 
         - name: Выбор ветви health-шаблона EXIT
           ansible.builtin.set_fact:
@@ -616,12 +661,15 @@
               - "{{ rendered_shell_root }}/awg-mobile-firewall"
               - "{{ rendered_shell_root }}/awg-local-peer-apply"
               - "{{ rendered_shell_root }}/awg-dns-policy"
+              - "{{ rendered_shell_root }}/awg-ru-dns-sync"
+              - "{{ rendered_shell_root }}/awg-ru-dns-sync-direct-ru"
               - "{{ rendered_shell_root }}/awg3-transit-setup"
               - "{{ rendered_shell_root }}/awg3-transit-restart"
               - "{{ rendered_shell_root }}/awg3-validate-config"
               - "{{ rendered_shell_root }}/kalimera-secrets-unlock"
               - "{{ rendered_shell_root }}/certbot-deploy-hook"
               - "{{ rendered_shell_root }}/awg-health-entry"
+              - "{{ rendered_shell_root }}/awg-health-entry-direct-ru"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/awg-health-front"
               - "{{ rendered_shell_root }}/awg-health-front-standalone"

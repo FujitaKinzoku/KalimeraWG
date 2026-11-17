@@ -17,22 +17,69 @@ entry_dns_prefetch: true
 # промах достаётся прогреву, а не пользователю. Ответы нигде не сохраняются.
 entry_dns_warm_enabled: true
 entry_dns_warm_interval_seconds: 60
+# Имена, которые приложения резолвят на самом деле. Апексы без A-записи
+# (cdninstagram.com, ytimg.com) и апекс googlevideo.com не греем: видео идёт с узлов
+# вида rrN---…googlevideo.com, и по списку их не прогреть.
 entry_dns_warm_names:
+  # YouTube: API, редиректор узлов видео, миниатюры, аватарки, статика Google.
   - youtube.com
-  - googlevideo.com
-  - ytimg.com
+  - www.youtube.com
+  - m.youtube.com
+  - s.youtube.com
+  - youtubei.googleapis.com
+  - redirector.googlevideo.com
+  - i.ytimg.com
+  - i1.ytimg.com
+  - i9.ytimg.com
+  - yt3.ggpht.com
+  - yt3.googleusercontent.com
+  - www.gstatic.com
+  # Instagram
   - instagram.com
-  - cdninstagram.com
+  - www.instagram.com
+  - i.instagram.com
+  - graph.instagram.com
+  - scontent.cdninstagram.com
+  # Telegram
   - telegram.org
   - t.me
   - web.telegram.org
+  - api.telegram.org
+  - cdn.telegram.org
+  # WhatsApp
   - whatsapp.com
+  - web.whatsapp.com
+  - mmg.whatsapp.net
+  # Facebook
   - facebook.com
+  - www.facebook.com
+  - graph.facebook.com
+  # X
   - x.com
+  - twitter.com
+  - pbs.twimg.com
+  - abs.twimg.com
+  # TikTok
   - tiktok.com
+  - www.tiktok.com
+  - api.tiktok.com
+  # Discord
   - discord.com
+  - cdn.discordapp.com
+  - gateway.discord.gg
 # Срок жизни данных о задержке до серверов DoT в Unbound, секунды (по умолчанию 900).
 entry_dns_infra_host_ttl: 3600
+# Размер кэша Unbound. Больше записей остаётся в RAM без вытеснения; на диск не пишется.
+entry_dns_msg_cache_size: 32m
+entry_dns_rrset_cache_size: 64m
+# Prefetch DNSKEY: ключи популярных зон не запрашиваются заново при каждой проверке.
+entry_dns_prefetch_key: true
+# Секунды после истечения TTL, в течение которых устаревший ответ отдаётся сразу, пока
+# Unbound обновляет запись в фоне. 0 отключает. Час покрывает возврат на сайт после
+# паузы: имя, которое запрашивали за последний час, отвечает из кэша без похода к
+# DoT-серверу. Клиент получает такой ответ с TTL 30 секунд и при следующем запросе
+# видит уже обновлённую запись.
+entry_dns_serve_expired_ttl: 3600
 # DoT-серверы по умолчанию: быстрый сервер в Литве и запасной сервер в Швейцарии
 # от другого оператора. Применяются, если в inventory списка нет, он пустой или
 # содержит только устаревший Mullvad (его публичный DNS прекращён).
@@ -43,6 +90,25 @@ entry_dns_default_dot_upstreams:
     tls_name: dns.digitale-gesellschaft.ch
 entry_dns_inventory_dot_legacy: "{{ (entry_dot_upstreams | default([]) | length > 0) and (entry_dot_upstreams | default([]) | selectattr('tls_name', 'equalto', 'dns.mullvad.net') | list | length == entry_dot_upstreams | default([]) | length) }}"
 entry_dns_dot_upstreams_resolved: "{{ entry_dns_default_dot_upstreams if ((entry_dot_upstreams | default([]) | length == 0) or (entry_dns_inventory_dot_legacy | bool)) else entry_dot_upstreams }}"
+# Российские имена в режиме без RU-прокси разрешает Yandex DNS по DoT прямо с ENTRY:
+# их трафик выходит с ENTRY, поэтому и резолвер российский. Это зоны .ru и .рф и списки
+# ru-domain и entry-domain; имена se-domain внутри этих зон остаются на серверах DoT по
+# умолчанию. Остальные имена идут к серверам DoT по умолчанию, как и раньше. С
+# RU-прокси этот путь не используется: там российский DoH идёт через прокси.
+# Зоны собирает awg-ru-dns-sync в файл 91-awg-ru-dot.conf. Значение false возвращает
+# прежнее поведение: все имена через серверы DoT по умолчанию.
+entry_dns_ru_dot_enabled: true
+entry_dns_ru_dot_zones:
+  - ru
+  - xn--p1ai
+entry_dns_ru_dot_upstreams:
+  - address: 77.88.8.8
+    tls_name: common.dot.dns.yandex.net
+  - address: 77.88.8.1
+    tls_name: common.dot.dns.yandex.net
+# Российское имя для проверки после сборки зон и в awg-health.
+entry_dns_ru_dot_probe_name: yandex.ru
+entry_dns_ru_dot_active: "{{ (entry_dns_ru_dot_enabled | bool) and not (entry_ru_proxy_enabled | default(false) | bool) }}"
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf
