@@ -392,7 +392,67 @@ class ProxyDomainTests(ShellCase):
         result = self.run_command("proxy-domain", "add", "kinopoisk.ru")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("kalimera-deploy --resume --enable-ru-proxy", result.stdout)
+        self.assertNotIn("DNS-запроса", result.stdout)
         self.assertEqual(self.run_command("proxy-domain", "list").stdout, "kinopoisk.ru\n")
+
+    def flushed_sets(self) -> list[str]:
+        """Наборы, очищенные с прошлого вызова; журнал вызовов обнуляется."""
+        flushed = [line.split()[2] for line in self.call_lines("ipset flush ")]
+        self.calls.write_text("", encoding="utf-8")
+        return flushed
+
+    def test_adding_a_name_keeps_the_address_sets(self) -> None:
+        # Найдено на рабочем каскаде: любое изменение списков очищало все наборы, и
+        # адрес graphql.kinopoisk.ru выпадал из force_proxy до нового DNS-запроса
+        # устройства - до часа запросы шли мимо прокси.
+        self.domain_admin(enabled=True, scope="selected")
+        self.assertEqual(self.run_command("proxy-domain", "add", "kinopoisk.ru").returncode, 0)
+        self.assertEqual(self.flushed_sets(), [])
+        self.assertEqual(self.run_command("proxy-domain", "add", "okko.tv").returncode, 0)
+        self.assertEqual(self.run_command("ru-domain", "add", "vk.com").returncode, 0)
+        self.assertEqual(self.run_command("se-domain", "add", "nalog.ru").returncode, 0)
+        self.assertEqual(self.flushed_sets(), [])
+
+    def test_removal_flushes_only_the_set_that_lost_the_name(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.run_command("se-domain", "add", "nalog.ru")
+        self.run_command("ru-domain", "add", "vk.com")
+        self.flushed_sets()
+        self.assertEqual(self.run_command("se-domain", "del", "nalog.ru").returncode, 0)
+        self.assertEqual(self.flushed_sets(), ["force_exit"])
+        # Перенос имени в другой список: очищается только набор прежнего списка.
+        self.assertEqual(self.run_command("proxy-domain", "add", "vk.com").returncode, 0)
+        self.assertEqual(self.flushed_sets(), ["force_ru"])
+        self.assertEqual(self.run_command("proxy-domain", "clear").returncode, 0)
+        self.assertEqual(self.flushed_sets(), ["force_proxy"])
+
+    def test_deferred_removal_is_flushed_when_the_policy_is_applied(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("se-domain", "add", "nalog.ru")
+        self.flushed_sets()
+        self.assertEqual(self.run_command("se-domain", "del", "nalog.ru", "--defer").returncode, 0)
+        self.assertEqual(self.flushed_sets(), [])
+        self.assertEqual(self.run_command("ru-domain", "sync").returncode, 0)
+        self.assertEqual(self.flushed_sets(), ["force_exit"])
+
+    def test_resolver_switch_keeps_the_address_sets(self) -> None:
+        # Watchdog при отказе прокси меняет только резолвер имён: адреса остаются.
+        self.domain_admin(enabled=True, scope="selected")
+        self.flag("proxy-active")
+        self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.flushed_sets()
+        self.flag("proxy-active", present=False)
+        self.assertEqual(self.run_command("ru-domain", "sync").returncode, 0)
+        self.assertIn("server=/kinopoisk.ru/127.0.0.1#5353\n", self.policy_file())
+        self.assertEqual(self.flushed_sets(), [])
+
+    def test_adding_with_a_working_proxy_explains_the_dns_delay(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        result = self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.assertIn("после нового DNS-запроса имени", result.stdout)
+        self.assertNotIn("DNS-запроса", self.run_command("ru-domain", "add", "vk.com").stdout)
+        self.assertNotIn("DNS-запроса", self.run_command("proxy-domain", "del", "kinopoisk.ru").stdout)
 
     def test_messages_name_the_domain(self) -> None:
         # Раньше циклы чтения списков затирали имя, и сообщение выходило без домена.

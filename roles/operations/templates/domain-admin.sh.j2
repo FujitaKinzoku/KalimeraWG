@@ -181,10 +181,23 @@ domain="$requested_domain"
 
 changed=false
 if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
+    # Набор адресов очищается, только когда из него убрано имя: его адреса больше
+    # не должны идти по прежнему правилу. Остальные наборы сохраняются. Их наполняют
+    # лишь DNS-запросы клиентов, а устройство хранит ответ до часа: после очистки
+    # оно всё это время ходило бы мимо правила. Сравниваются строки ipset прежней и
+    # новой политики, поэтому учитываются и изменения, отложенные через --defer.
+    stale_sets="$(
+        LC_ALL=C comm -23 \
+            <(grep '^ipset=' "$OUT" 2>/dev/null | LC_ALL=C sort -u) \
+            <(grep '^ipset=' "$tmp" | LC_ALL=C sort -u) |
+            sed 's|.*/||' | LC_ALL=C sort -u
+    )"
     install -m 0644 "$tmp" "$OUT"
     dnsmasq --test
     for policy_set in "${policy_sets[@]}"; do
-        ipset flush "$policy_set" 2>/dev/null || true
+        if grep -Fxq -- "$policy_set" <<<"$stale_sets"; then
+            ipset flush "$policy_set" 2>/dev/null || true
+        fi
     done
     systemctl reset-failed dnsmasq.service 2>/dev/null || true
     systemctl restart dnsmasq.service
@@ -258,6 +271,12 @@ elif [[ "$action" == add ]]; then
 else
     echo "$domain удалён из $command_name."
 fi
-if [[ "$command_name" == proxy-domain && "$action" == add && "$PROXY_ENABLED" == false ]]; then
-    echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
+if [[ "$command_name" == proxy-domain && "$action" == add ]]; then
+    if [[ "$PROXY_ENABLED" == false ]]; then
+        echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
+    else
+        # Адрес попадает в набор force_proxy, когда устройство запрашивает имя у ENTRY.
+        echo 'Клиенты AmneziaWG пойдут через прокси после нового DNS-запроса имени: прежний ответ устройство хранит до часа.'
+        echo 'Чтобы не ждать, сбросьте DNS на устройстве (на телефоне - авиарежим на несколько секунд). Клиенты VLESS переходят сразу.'
+    fi
 fi
