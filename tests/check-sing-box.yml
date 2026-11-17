@@ -56,6 +56,10 @@
               content: '{"version": 1, "rules": [{"ip_cidr": ["203.0.113.0/24"]}]}'
             - name: se-domains
               content: '{"version": 1, "rules": [{"domain_suffix": ["example.invalid"]}]}'
+            - name: proxy-domains
+              content: '{"version": 1, "rules": [{"domain_suffix": ["example.org"]}]}'
+            - name: proxy-addresses
+              content: '{"version": 1, "rules": [{"ip_cidr": ["198.51.100.0/24", "203.0.113.7"]}]}'
 
         # Генерируется закреплённым бинарником на каждом запуске, а не хранится в
         # репозитории как литерал - так же, как это делает роль sing_box в
@@ -120,6 +124,8 @@
             reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
             reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
             reality_fallback_se_rule_set_path: "{{ sing_box_test_root }}/reality-se-domains.json"
+            reality_fallback_proxy_rule_set_path: "{{ sing_box_test_root }}/reality-proxy-domains.json"
+            reality_fallback_proxy_address_rule_set_path: "{{ sing_box_test_root }}/reality-proxy-addresses.json"
             entry_exit_mark: "0x1"
             entry_ru_mark: "0x2"
             entry_wan_interface: lo
@@ -171,6 +177,83 @@
             fail_msg: >-
               Backend FRONT должен содержать только служебный peer, не иметь
               прямых VLESS-клиентов и выбирать EXIT/RU через policy marks.
+
+        # Область selected: через RU-прокси идут только списки proxy-domain и
+        # proxy-address. set_fact, а не vars: значение из include_vars перекрывает
+        # переменные задачи.
+        - name: Выбор области RU-прокси selected для backend FRONT
+          ansible.builtin.set_fact:
+            entry_ru_proxy_enabled: true
+            entry_ru_proxy_scope: selected
+
+        - name: Формирование конфигурации backend FRONT для области selected
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/front_backend/templates/front-backend.json.j2"
+            dest: "{{ sing_box_test_root }}/front-backend-selected.json"
+            mode: "0600"
+          vars:
+            reality_fallback_port: 8444
+            reality_fallback_front_client_uuid: "{{ sing_box_test_reality_uuid }}"
+            reality_fallback_effective_dest: example.com
+            reality_fallback_dest: example.com
+            reality_fallback_effective_dest_port: 443
+            reality_fallback_dest_port: 443
+            reality_fallback_private_key: "{{ sing_box_test_reality_private_key }}"
+            reality_fallback_short_id: "{{ sing_box_test_reality_short_id }}"
+            reality_fallback_ru_rule_set_path: "{{ sing_box_test_root }}/reality-ru-domains.json"
+            reality_fallback_ru_zone_rule_set_path: "{{ sing_box_test_root }}/reality-ru-zone.json"
+            reality_fallback_se_rule_set_path: "{{ sing_box_test_root }}/reality-se-domains.json"
+            reality_fallback_proxy_rule_set_path: "{{ sing_box_test_root }}/reality-proxy-domains.json"
+            reality_fallback_proxy_address_rule_set_path: "{{ sing_box_test_root }}/reality-proxy-addresses.json"
+            entry_exit_mark: "0x1"
+            entry_ru_mark: "0x2"
+            entry_wan_interface: lo
+            entry_dns_default_port: 5353
+          no_log: true
+
+        - name: Возврат области RU-прокси по умолчанию
+          ansible.builtin.set_fact:
+            entry_ru_proxy_scope: all
+
+        - name: Семантическая проверка backend FRONT для области selected
+          ansible.builtin.command:
+            argv:
+              - "{{ sing_box_test_root }}/package/usr/bin/sing-box"
+              - check
+              - --config
+              - "{{ sing_box_test_root }}/front-backend-selected.json"
+          changed_when: false
+          no_log: true
+
+        - name: Чтение конфигурации backend FRONT для области selected
+          ansible.builtin.slurp:
+            src: "{{ sing_box_test_root }}/front-backend-selected.json"
+          register: sing_box_test_front_backend_selected_raw
+          no_log: true
+
+        - name: Проверка разделения российского выхода и списков RU-прокси
+          vars:
+            sing_box_test_selected: >-
+              {{ sing_box_test_front_backend_selected_raw.content | b64decode | from_json }}
+            sing_box_test_selected_proxy_rules: >-
+              {{ sing_box_test_selected.route.rules
+                 | selectattr('rule_set', 'defined')
+                 | selectattr('rule_set', 'contains', 'front-proxy-domains') | list }}
+          ansible.builtin.assert:
+            quiet: true
+            that:
+              - sing_box_test_selected.outbounds | map(attribute='tag') | list == ['direct-exit', 'direct-ru', 'proxy-ru']
+              - sing_box_test_selected.outbounds[1].routing_mark is not defined
+              - sing_box_test_selected.outbounds[2].routing_mark == '0x2'
+              - sing_box_test_selected.outbounds[2].domain_resolver.server == 'entry-split-dns'
+              - sing_box_test_selected_proxy_rules | length == 1
+              - sing_box_test_selected_proxy_rules[0].outbound == 'proxy-ru'
+              - sing_box_test_selected_proxy_rules[0].rule_set == ['front-proxy-domains', 'front-proxy-addresses']
+              - sing_box_test_selected.route.rules[2].rule_set == ['front-se-domains']
+              - sing_box_test_selected.route.rules[3].outbound == 'proxy-ru'
+            fail_msg: >-
+              В области selected списки proxy-domain и proxy-address должны идти в
+              отдельный выход с меткой RU-прокси, а российские назначения - напрямую.
 
         - name: Формирование тестовых SOCKS5/REALITY-конфигураций
           ansible.builtin.include_tasks: tasks/render-sing-box-fixture.yml

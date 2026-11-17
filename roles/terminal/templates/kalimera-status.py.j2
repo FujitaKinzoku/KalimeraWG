@@ -41,6 +41,7 @@ CONFIG = {
     "legacy_available": {{ 'True' if terminal_summary_legacy_available | bool else 'False' }},
     "mobile_available": {{ 'True' if terminal_summary_mobile_available | bool else 'False' }},
     "proxy_configured": {{ 'True' if terminal_summary_proxy_configured | bool else 'False' }},
+    "proxy_selected": {{ 'True' if (terminal_summary_proxy_configured | bool) and (terminal_summary_proxy_scope | default('all')) == 'selected' else 'False' }},
     "entry_client_interface": {{ terminal_summary_entry_client_interface | to_json }},
     "entry_transit_interface": {{ terminal_summary_entry_transit_interface | to_json }},
     "legacy_interface": {{ terminal_summary_legacy_interface | to_json }},
@@ -304,12 +305,23 @@ def proxy_route() -> tuple[str, str]:
     manual = Path(CONFIG["proxy_manual_flag"]).exists()
     fail_open = Path(CONFIG["proxy_disabled_flag"]).exists()
     active = service_active("sing-box.service") and not manual and not fail_open
+    reason = "ручное отключение" if manual else "автоматический fail-open"
+    if CONFIG["proxy_selected"]:
+        # Область selected: через прокси идут только списки proxy-domain и proxy-address.
+        if active:
+            return (
+                "VPN-клиент → ENTRY → Интернет; выбранные адреса → SOCKS5/TUN",
+                "имена proxy-domain: DoH через RU-прокси",
+            )
+        return (
+            f"VPN-клиент → ENTRY → Интернет; прокси для выбранных адресов неактивен ({reason})",
+            "имена proxy-domain: Unbound, прокси неактивен",
+        )
     if active:
         return (
             "VPN-клиент → ENTRY → SOCKS5/TUN → Интернет",
             "DoH через активный RU-прокси",
         )
-    reason = "ручное отключение" if manual else "автоматический fail-open"
     return f"VPN-клиент → ENTRY → Интернет ({reason})", "RU DoH настроен, прокси сейчас неактивен"
 
 
@@ -578,6 +590,8 @@ def command_panels() -> None:
                 ("ru-proxy status|on|off", "состояние и переключение SOCKS5/fail-open", "INFO"),
                 ("ru-proxy-set", "замена SOCKS5 с проверкой и автоматическим откатом", "INFO"),
                 ("ru-direct-ports list", "TCP-порты RU, обходящие SOCKS5", "INFO"),
+                ("proxy-domain list", "домены, которые идут через RU-прокси", "INFO"),
+                ("proxy-address list", "адреса и сети, которые идут через RU-прокси", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
@@ -757,10 +771,14 @@ def main() -> int:
     if CONFIG["role"] == "entry":
         ru_route, doh_note = proxy_route()
         ru_dot = current_ru_dot()
-        if CONFIG["proxy_configured"]:
+        if CONFIG["proxy_configured"] and not CONFIG["proxy_selected"]:
             ru_dns = f"{doh_note}: {current_doh()}"
         elif ru_dot:
             ru_dns = f"Unbound DoT напрямую с ENTRY: {ru_dot}"
+            if CONFIG["proxy_selected"]:
+                ru_dns += f"; {doh_note}"
+        elif CONFIG["proxy_selected"]:
+            ru_dns = f"серверы основного DNS; {doh_note}"
         else:
             ru_dns = "серверы основного DNS; отдельный российский DNS выключен"
         panel(

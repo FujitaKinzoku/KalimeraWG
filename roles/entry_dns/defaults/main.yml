@@ -94,7 +94,9 @@ entry_dns_dot_upstreams_resolved: "{{ entry_dns_default_dot_upstreams if ((entry
 # их трафик выходит с ENTRY, поэтому и резолвер российский. Это зоны .ru и .рф и списки
 # ru-domain и entry-domain; имена se-domain внутри этих зон остаются на серверах DoT по
 # умолчанию. Остальные имена идут к серверам DoT по умолчанию, как и раньше. С
-# RU-прокси этот путь не используется: там российский DoH идёт через прокси.
+# RU-прокси в области all этот путь не используется: там российский DoH идёт через
+# прокси. В области selected российские сети выходят напрямую с ENTRY, поэтому путь
+# работает так же, как без прокси; через прокси разрешаются только имена proxy-domain.
 # Зоны собирает awg-ru-dns-sync в файл 91-awg-ru-dot.conf. Значение false возвращает
 # прежнее поведение: все имена через серверы DoT по умолчанию.
 entry_dns_ru_dot_enabled: true
@@ -108,7 +110,7 @@ entry_dns_ru_dot_upstreams:
     tls_name: common.dot.dns.yandex.net
 # Российское имя для проверки после сборки зон и в awg-health.
 entry_dns_ru_dot_probe_name: yandex.ru
-entry_dns_ru_dot_active: "{{ (entry_dns_ru_dot_enabled | bool) and not (entry_ru_proxy_enabled | default(false) | bool) }}"
+entry_dns_ru_dot_active: "{{ (entry_dns_ru_dot_enabled | bool) and ((not (entry_ru_proxy_enabled | default(false) | bool)) or ((entry_ru_proxy_scope | default('all')) == 'selected')) }}"
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf

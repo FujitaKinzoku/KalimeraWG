@@ -8,6 +8,10 @@
 # entry-domain. Имена se-domain внутри российских зон остаются на серверах по
 # умолчанию: явное правило EXIT важнее российской зоны.
 #
+# То же действует с RU-прокси в области selected: российские сети там выходят
+# напрямую с ENTRY. Имена proxy-domain dnsmasq отправляет в российский DoH через
+# прокси, а при отказе прокси - сюда, поэтому они тоже входят в российские зоны.
+#
 # Файл зон отдельный от 90-awg-dot.conf: dot-switch удаляет в том файле все строки
 # forward-addr и дописывает новые в конец, то есть в последнюю зону.
 set -Eeuo pipefail
@@ -27,6 +31,8 @@ case "${1:-}" in
 esac
 
 readonly active={{ 'true' if (entry_dns_ru_dot_active | bool) else 'false' }}
+# Список proxy-domain учитывается, только когда RU-прокси включён при deploy.
+readonly proxy_lists={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
 readonly output={{ (entry_unbound_config_dir ~ '/91-awg-ru-dot.conf') | quote }}
 readonly base_config={{ (entry_unbound_config_dir ~ '/90-awg-dot.conf') | quote }}
 readonly policy_dir={{ (awg_domain_policy_dir | default('/etc/awg/domain-policy')) | quote }}
@@ -93,6 +99,11 @@ collect() {
     while IFS= read -r name; do
         russian["$name"]=1
     done < <(list_names ru-domain; list_names entry-domain)
+    if [[ "$proxy_lists" == true ]]; then
+        while IFS= read -r name; do
+            russian["$name"]=1
+        done < <(list_names proxy-domain)
+    fi
 
     mapfile -t se_names < <(list_names se-domain | sort -u)
     # Одно и то же имя в российском списке и в se-domain считается se-domain.
@@ -166,6 +177,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Watchdog RU-прокси работает с файловой системой только для чтения и вызывает эту
+# программу через ru-domain sync. Изменить файл зон он не может, а сбой здесь
+# сорвал бы переключение DNS-политики при отказе прокси. Файл обновит deploy или
+# команда управления списками, запущенная администратором.
+skip_if_read_only() {
+    if [[ ! -w "$(dirname "$output")" ]]; then
+        echo "Файл $output не изменён: каталог доступен только для чтения. Его обновит kalimera-deploy --resume." >&2
+        exit 0
+    fi
+}
+
 if [[ "$active" == true ]]; then
     (( ${#ru_upstreams[@]} > 0 )) || {
         echo 'Не заданы российские серверы DoT (entry_dns_ru_dot_upstreams).' >&2
@@ -180,18 +202,13 @@ if [[ "$active" == true ]]; then
     if [[ "$output_existed" == true ]] && cmp --silent "$candidate" "$output"; then
         exit 0
     fi
+    skip_if_read_only
     unbound-checkconf "$candidate" >/dev/null
     committed=true
     install -m 0644 "$candidate" "$output"
 else
     [[ "$output_existed" == true ]] || exit 0
-    # Watchdog RU-прокси работает с файловой системой только для чтения и вызывает
-    # эту программу через ru-domain sync. Удалить файл он не может, а сбой здесь
-    # сорвал бы переключение DNS-политики при отказе прокси. Файл удалит deploy.
-    if [[ ! -w "$(dirname "$output")" ]]; then
-        echo "Файл $output не удалён: каталог доступен только для чтения. Его удалит kalimera-deploy --resume." >&2
-        exit 0
-    fi
+    skip_if_read_only
     committed=true
     rm -f "$output"
 fi

@@ -626,6 +626,331 @@ def ensure_mobile_awg3_vault_material(
     return True
 
 
+def update_production_vault(
+    production: Path,
+    vault_password: Path,
+    updates: dict[str, object] | None = None,
+    remove: tuple[str, ...] = (),
+) -> bool:
+    """Записать или удалить значения в production Vault.
+
+    Возвращает True, если содержимое изменилось. Файл заменяется атомарно, значения
+    на экран не выводятся.
+    """
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not vault_path.is_file() or not vault_password.is_file():
+        fail("Не найден production Vault или внешний пароль Ansible Vault")
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    if not vault_secret:
+        fail("Файл пароля Ansible Vault пуст")
+    vault_lib = VaultLib([("default", VaultSecret(vault_secret))])
+    try:
+        document = yaml.safe_load(vault_lib.decrypt(vault_path.read_bytes()))
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    changed = False
+    for key, value in (updates or {}).items():
+        if document.get(key) != value or key not in document:
+            document[key] = value
+            changed = True
+    for key in remove:
+        if key in document:
+            del document[key]
+            changed = True
+    if not changed:
+        return False
+    encrypted = vault_lib.encrypt(yaml.safe_dump(document, sort_keys=False).encode())
+    temporary = vault_path.with_name(f".{vault_path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        secure_write(temporary, encrypted)
+        os.replace(temporary, vault_path)
+        vault_path.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+PROXY_SCOPES = ("all", "selected")
+_PROXY_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+
+
+def prompt_proxy_scope(default: str = "all") -> str:
+    """Спросить, что направлять через RU-прокси: всё российское или только списки."""
+    ui_panel(
+        "ЧТО НАПРАВЛЯТЬ ЧЕРЕЗ ПРОКСИ",
+        [
+            "1 · только выбранные домены и адреса (списки proxy-domain и proxy-address)",
+            "2 · весь российский трафик",
+            "Списки proxy-domain и proxy-address идут через прокси в обоих вариантах.",
+        ],
+        "cyan",
+    )
+    choice = prompt("Выберите вариант", "1" if default == "selected" else "2")
+    if choice not in {"1", "2"}:
+        fail("Выберите 1 для выбранных адресов или 2 для всего российского трафика")
+    return "selected" if choice == "1" else "all"
+
+
+def probe_socks5_proxy(host: str, port: int, username: str, password: str) -> str | None:
+    """Вернуть внешний IPv4 прокси или None, если запрос через него не прошёл.
+
+    Учётные данные передаются curl через stdin, а не аргументами командной строки:
+    аргументы видны другим пользователям системы.
+    """
+    curl = shutil.which("curl")
+    if curl is None:
+        return None
+    lines = [
+        "silent",
+        "ipv4",
+        "max-time = 15",
+        f'proxy = "socks5h://{host}:{port}"',
+        'url = "https://api.ipify.org"',
+    ]
+    if username:
+        escaped = f"{username}:{password}".replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'proxy-user = "{escaped}"')
+    try:
+        result = subprocess.run(
+            [curl, "--config", "-"],
+            input="\n".join(lines) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    answer = result.stdout.strip()
+    try:
+        return str(ipaddress.IPv4Address(answer))
+    except ValueError:
+        return None
+
+
+def enable_ru_proxy(production: Path, vault_password: Path) -> bool:
+    """Включить RU-прокси на установленном каскаде или заменить его параметры.
+
+    Меняются только inventory и Vault. Клиентские конфиги и ключи AWG не
+    затрагиваются; серверы настраивает последующий обычный deploy.
+    """
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        fail("Для включения RU-прокси нужен production inventory")
+    entry_vars = load_yaml(entry_path)
+    already_enabled = bool(entry_vars.get("entry_ru_proxy_enabled", False))
+    ui_section(
+        1,
+        "RU-ПРОКСИ",
+        "SOCKS5 с российским адресом. Клиентские конфиги не меняются.",
+    )
+    if already_enabled:
+        print("RU-прокси уже включён: введённые значения заменят текущие.")
+    current_host = str(entry_vars.get("entry_proxy_server") or "")
+    host = prompt(
+        "Адрес SOCKS5-прокси",
+        current_host if current_host not in {"", "127.0.0.1"} else None,
+    ).strip()
+    if not _PROXY_HOST_RE.fullmatch(host):
+        fail("Адрес SOCKS5-прокси должен быть доменным именем или IPv4-адресом")
+    current_port = entry_vars.get("entry_proxy_port")
+    port = prompt_port(
+        "Порт SOCKS5-прокси", current_port if isinstance(current_port, int) else 1080
+    )
+    username = getpass.getpass("Имя пользователя SOCKS5, если требуется (ввод скрыт): ")
+    password = getpass.getpass("Пароль SOCKS5, если требуется (ввод скрыт): ")
+    if bool(username) != bool(password):
+        fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
+
+    external_ip = probe_socks5_proxy(host, port, username, password)
+    if external_ip is None:
+        print("Проверочный запрос через прокси не прошёл: адрес, порт или учётные данные неверны либо прокси недоступен с этого сервера.")
+        if not prompt_bool("Сохранить параметры без проверки", False):
+            fail("RU-прокси не включён: параметры не сохранены")
+    else:
+        print(f"Прокси отвечает, внешний адрес: {external_ip}")
+
+    expected_ip = prompt(
+        "Ожидаемый внешний IPv4 прокси; пусто - не проверять (нужно для прокси со сменой адреса)",
+        "",
+    ).strip()
+    if expected_ip:
+        try:
+            expected_ip = str(ipaddress.IPv4Address(expected_ip))
+        except ValueError:
+            fail("Ожидаемый внешний адрес должен быть IPv4-адресом")
+    current_scope = str(entry_vars.get("entry_ru_proxy_scope", "selected"))
+    scope = prompt_proxy_scope(
+        current_scope if already_enabled and current_scope in PROXY_SCOPES else "selected"
+    )
+
+    updates: dict[str, object] = {
+        "entry_ru_proxy_enabled": True,
+        "entry_proxy_server": host,
+        "entry_proxy_port": port,
+        "entry_ru_proxy_expected_ip": expected_ip,
+        "entry_ru_proxy_scope": scope,
+    }
+    entry_changed = any(entry_vars.get(key) != value for key, value in updates.items())
+    vault_changed = update_production_vault(
+        production,
+        vault_password,
+        {"vault_proxy_username": username, "vault_proxy_password": password},
+    )
+    if entry_changed:
+        entry_vars.update(updates)
+        yaml_write(entry_path, entry_vars)
+    if scope == "selected":
+        print(
+            "Production inventory обновлён: RU-прокси включён для выбранных адресов. "
+            "После deploy добавьте их на ENTRY: proxy-domain add ДОМЕН, proxy-address add АДРЕС."
+        )
+    else:
+        print("Production inventory обновлён: RU-прокси включён для всего российского трафика.")
+    return entry_changed or vault_changed
+
+
+def disable_ru_proxy(production: Path) -> bool:
+    """Выключить RU-прокси: российский трафик снова выходит напрямую с ENTRY."""
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        fail("Для выключения RU-прокси нужен production inventory")
+    entry_vars = load_yaml(entry_path)
+    if not entry_vars.get("entry_ru_proxy_enabled", False):
+        print("RU-прокси уже выключен.")
+        return False
+    entry_vars["entry_ru_proxy_enabled"] = False
+    yaml_write(entry_path, entry_vars)
+    print(
+        "Production inventory обновлён: RU-прокси выключен. Списки proxy-domain и "
+        "proxy-address сохраняются на ENTRY и снова начнут действовать после включения."
+    )
+    return True
+
+
+def prompt_telegram_credentials() -> tuple[str, str]:
+    """Запросить и проверить токен собственного бота и chat ID."""
+    ui_panel(
+        "ЛИЧНЫЙ TELEGRAM-БОТ",
+        [
+            "1 · у меня уже есть токен собственного бота",
+            "2 · нужно создать нового бота через официальный @BotFather",
+            "KalimeraWG не предоставляет общего бота и не получает ваши данные.",
+        ],
+        "cyan",
+    )
+    telegram_setup = prompt("Выберите вариант", "1")
+    if telegram_setup not in {"1", "2"}:
+        fail("Выберите 1 для готового бота или 2 для создания нового")
+    if telegram_setup == "2":
+        ui_panel(
+            "СОЗДАНИЕ БОТА ЧЕРЕЗ @BOTFATHER",
+            [
+                "1. Откройте в Telegram официальный @BotFather с отметкой проверки.",
+                "2. Отправьте команду /newbot.",
+                "3. Укажите отображаемое имя бота.",
+                "4. Укажите уникальное имя пользователя, оканчивающееся на bot.",
+                "5. Скопируйте выданный токен целиком вместе с двоеточием.",
+            ],
+            "magenta",
+        )
+        input("Нажмите Enter после получения токена от @BotFather: ")
+    telegram_token = getpass.getpass(
+        "Полный токен Telegram-бота с двоеточием (ввод скрыт): "
+    ).strip()
+    if not re.fullmatch(r"[0-9]{6,20}:[A-Za-z0-9_-]{20,}", telegram_token):
+        fail(
+            "Некорректный токен Telegram: введите всю строку BotFather "
+            "целиком вместе с двоеточием"
+        )
+    bot = telegram_api_result(telegram_token, "getMe")
+    if not isinstance(bot, dict) or not bot.get("username"):
+        fail("Telegram не подтвердил токен бота. Проверьте токен и доступ в Интернет")
+    print(f"Telegram-бот подтверждён: @{bot['username']}")
+
+    telegram_chat = prompt(
+        "Числовой Telegram chat ID; Enter - определить автоматически"
+    )
+    if not telegram_chat:
+        ui_panel(
+            "ОПРЕДЕЛЕНИЕ TELEGRAM CHAT ID",
+            [
+                f"Откройте @{bot['username']} в Telegram.",
+                "Нажмите Start и отправьте боту любое сообщение.",
+                "После отправки вернитесь сюда и нажмите Enter.",
+            ],
+            "cyan",
+        )
+        input("Нажмите Enter после отправки сообщения боту: ")
+        discovered = telegram_latest_chat_from_updates(
+            telegram_api_result(telegram_token, "getUpdates?timeout=10")
+        )
+        if discovered is None:
+            fail(
+                "Chat ID не найден. Отправьте сообщение непосредственно боту "
+                "или введите ранее сохранённый числовой Chat ID"
+            )
+        telegram_chat, chat_label = discovered
+        print(f"Telegram chat найден: {chat_label} (ID {telegram_chat})")
+    if not telegram_credentials_valid(telegram_token, telegram_chat):
+        fail("Telegram chat ID должен быть отдельным положительным или отрицательным числом")
+    return telegram_token, telegram_chat
+
+
+def enable_telegram_monitor(production: Path, vault_password: Path) -> bool:
+    """Включить Telegram-уведомления на установленном каскаде или заменить бота."""
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if not all_vars_path.is_file():
+        fail("Для включения Telegram нужен production inventory")
+    all_vars = load_yaml(all_vars_path)
+    ui_section(
+        1,
+        "TELEGRAM-УВЕДОМЛЕНИЯ",
+        "Собственный бот сообщает о сбоях и восстановлении серверов каскада.",
+    )
+    if all_vars.get("awg_telegram_monitor_enabled", False):
+        print("Telegram-уведомления уже включены: введённые значения заменят текущие.")
+    token, chat = prompt_telegram_credentials()
+    vault_changed = update_production_vault(
+        production,
+        vault_password,
+        {"vault_telegram_bot_token": token, "vault_telegram_chat_id": chat},
+    )
+    vars_changed = not bool(all_vars.get("awg_telegram_monitor_enabled", False))
+    if vars_changed:
+        all_vars["awg_telegram_monitor_enabled"] = True
+        yaml_write(all_vars_path, all_vars)
+    print(
+        "Production inventory обновлён: Telegram-уведомления включены. "
+        "После deploy проверьте отправку командой telegram-test."
+    )
+    return vars_changed or vault_changed
+
+
+def disable_telegram_monitor(production: Path, vault_password: Path) -> bool:
+    """Выключить Telegram-уведомления и удалить токен бота из Vault."""
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if not all_vars_path.is_file():
+        fail("Для выключения Telegram нужен production inventory")
+    all_vars = load_yaml(all_vars_path)
+    vars_changed = bool(all_vars.get("awg_telegram_monitor_enabled", False))
+    if vars_changed:
+        all_vars["awg_telegram_monitor_enabled"] = False
+        yaml_write(all_vars_path, all_vars)
+    vault_changed = update_production_vault(
+        production,
+        vault_password,
+        remove=("vault_telegram_bot_token", "vault_telegram_chat_id"),
+    )
+    if vars_changed or vault_changed:
+        print("Production inventory обновлён: Telegram-уведомления выключены, токен бота удалён из Vault.")
+    else:
+        print("Telegram-уведомления уже выключены.")
+    return vars_changed or vault_changed
+
+
 _DOMAIN_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
 )
@@ -3139,7 +3464,21 @@ def show_deployment_summary(production: Path) -> None:
                 "клиент → FRONT → отдельный REALITY backend ENTRY → EXIT/RU",
             )
         )
-    if proxy_enabled:
+    proxy_selected = proxy_enabled and entry_vars.get("entry_ru_proxy_scope", "all") == "selected"
+    if proxy_selected:
+        # Область selected: через прокси идут только списки proxy-domain и
+        # proxy-address, российские сети выходят напрямую с ENTRY.
+        architecture_rows.extend(
+            [
+                ("RU-трафик", "VPN-клиент → WAN ENTRY → Интернет"),
+                ("Через RU-прокси", "только списки proxy-domain и proxy-address → SOCKS5/TUN"),
+                (
+                    "RU DNS",
+                    "российский DoT напрямую с ENTRY; имена proxy-domain - DoH через прокси",
+                ),
+            ]
+        )
+    elif proxy_enabled:
         architecture_rows.extend(
             [
                 ("RU-трафик", "VPN-клиент → ENTRY → SOCKS5/TUN → Интернет"),
@@ -3256,7 +3595,7 @@ def show_deployment_summary(production: Path) -> None:
             "Состояние:  awg-health · server-audit · dns-status",
             "Клиенты:    vpn-user list/create/delete · awg-old · awg-mobile",
             "Маршруты:   ru-domain · se-domain · entry-domain · ru-direct-ports",
-            "Прокси/DNS: ru-proxy · ru-proxy-set · dot-switch · doh-switch",
+            "Прокси/DNS: ru-proxy · ru-proxy-set · proxy-domain · proxy-address · dot-switch · doh-switch",
             "Система:    maintenance · update-all · f2b-reset",
             "Обновления: kalimera-updates · --update-amneziawg · --update-xray",
         ],
@@ -3760,6 +4099,29 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--enable-ru-proxy",
+        action="store_true",
+        help=(
+            "при --resume включить RU-прокси (SOCKS5) на установленном каскаде или "
+            "заменить его параметры; клиентские конфиги не меняются"
+        ),
+    )
+    parser.add_argument(
+        "--disable-ru-proxy",
+        action="store_true",
+        help="при --resume выключить RU-прокси: российский трафик выходит напрямую с ENTRY",
+    )
+    parser.add_argument(
+        "--enable-telegram",
+        action="store_true",
+        help="при --resume включить Telegram-уведомления или заменить бота",
+    )
+    parser.add_argument(
+        "--disable-telegram",
+        action="store_true",
+        help="при --resume выключить Telegram-уведомления и удалить токен из Vault",
+    )
+    parser.add_argument(
         "--replace-front",
         action="store_true",
         help="при --resume подготовить новый FRONT без отключения прежнего",
@@ -3859,6 +4221,32 @@ def main() -> None:
         )
     ):
         parser.error(f"{update_flags[0]} нельзя объединять с операциями FRONT")
+    feature_flags = [
+        name
+        for name, value in (
+            ("--enable-ru-proxy", args.enable_ru_proxy),
+            ("--disable-ru-proxy", args.disable_ru_proxy),
+            ("--enable-telegram", args.enable_telegram),
+            ("--disable-telegram", args.disable_telegram),
+        )
+        if value
+    ]
+    if feature_flags and not args.resume:
+        parser.error(f"{feature_flags[0]} используется только вместе с --resume")
+    if args.enable_ru_proxy and args.disable_ru_proxy:
+        parser.error("--enable-ru-proxy и --disable-ru-proxy нельзя указывать вместе")
+    if args.enable_telegram and args.disable_telegram:
+        parser.error("--enable-telegram и --disable-telegram нельзя указывать вместе")
+    if feature_flags and (
+        update_flags
+        or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
+    ):
+        parser.error(
+            f"{feature_flags[0]} нельзя объединять с обновлениями компонентов и операциями FRONT"
+        )
     if args.enable_mobile and not args.resume:
         parser.error("--enable-mobile используется только вместе с --resume")
     if args.enable_front and not args.resume:
@@ -3895,6 +4283,7 @@ def main() -> None:
         or args.commit_front_replacement
         or args.rollback_front_replacement
         or update_flags
+        or feature_flags
     ):
         parser.error("--terminal-only нельзя объединять с другими режимами deploy")
     repo = args.repo_root.resolve()
@@ -3924,6 +4313,7 @@ def main() -> None:
         or args.summary
         or args.terminal_only
         or update_flags
+        or feature_flags
         or args.enable_mobile
         or args.enable_front
         or args.replace_front
@@ -4024,6 +4414,17 @@ def main() -> None:
         )
         if args.enable_mobile:
             enable_mobile_profile(production, vault_password)
+        # Дополнительные функции включаются на работающем каскаде: меняются только
+        # inventory и Vault, а серверы настраивает обычный прогон ниже. Ключи и
+        # клиентские конфиги при этом не пересоздаются.
+        if args.enable_ru_proxy:
+            enable_ru_proxy(production, vault_password)
+        if args.disable_ru_proxy:
+            disable_ru_proxy(production)
+        if args.enable_telegram:
+            enable_telegram_monitor(production, vault_password)
+        if args.disable_telegram:
+            disable_telegram_monitor(production, vault_password)
         update_saved_client_configs_cps(state_root / "clients")
         # Обновление пакетов AmneziaWG: полный набор компонентов или только сами
         # пакеты. В обоих случаях нужна транзакция пакетов с откатом.
@@ -4432,6 +4833,7 @@ def main() -> None:
     proxy_username = ""
     proxy_password = ""
     expected_proxy_ip = ""
+    proxy_scope = "all"
     if proxy_enabled:
         proxy_host = prompt(
             "Адрес SOCKS5-прокси", "proxy.soax.com" if proxy_choice == "2" else None
@@ -4442,6 +4844,7 @@ def main() -> None:
         if bool(proxy_username) != bool(proxy_password):
             fail("Имя пользователя и пароль SOCKS5 должны быть указаны вместе либо оба оставлены пустыми")
         expected_proxy_ip = prompt("Ожидаемый внешний IPv4 прокси; пусто - определить автоматически", "")
+        proxy_scope = prompt_proxy_scope("all")
 
     reality_fallback_enabled = front_enabled
     reality_fallback_dest = "yandex.ru"
@@ -4546,70 +4949,7 @@ def main() -> None:
     telegram_token = ""
     telegram_chat = ""
     if telegram_enabled:
-        ui_panel(
-            "ЛИЧНЫЙ TELEGRAM-БОТ",
-            [
-                "1 · у меня уже есть токен собственного бота",
-                "2 · нужно создать нового бота через официальный @BotFather",
-                "KalimeraWG не предоставляет общего бота и не получает ваши данные.",
-            ],
-            "cyan",
-        )
-        telegram_setup = prompt("Выберите вариант", "1")
-        if telegram_setup not in {"1", "2"}:
-            fail("Выберите 1 для готового бота или 2 для создания нового")
-        if telegram_setup == "2":
-            ui_panel(
-                "СОЗДАНИЕ БОТА ЧЕРЕЗ @BOTFATHER",
-                [
-                    "1. Откройте в Telegram официальный @BotFather с отметкой проверки.",
-                    "2. Отправьте команду /newbot.",
-                    "3. Укажите отображаемое имя бота.",
-                    "4. Укажите уникальное имя пользователя, оканчивающееся на bot.",
-                    "5. Скопируйте выданный токен целиком вместе с двоеточием.",
-                ],
-                "magenta",
-            )
-            input("Нажмите Enter после получения токена от @BotFather: ")
-        telegram_token = getpass.getpass(
-            "Полный токен Telegram-бота с двоеточием (ввод скрыт): "
-        ).strip()
-        if not re.fullmatch(r"[0-9]{6,20}:[A-Za-z0-9_-]{20,}", telegram_token):
-            fail(
-                "Некорректный токен Telegram: введите всю строку BotFather "
-                "целиком вместе с двоеточием"
-            )
-        bot = telegram_api_result(telegram_token, "getMe")
-        if not isinstance(bot, dict) or not bot.get("username"):
-            fail("Telegram не подтвердил токен бота. Проверьте токен и доступ в Интернет")
-        print(f"Telegram-бот подтверждён: @{bot['username']}")
-
-        telegram_chat = prompt(
-            "Числовой Telegram chat ID; Enter - определить автоматически"
-        )
-        if not telegram_chat:
-            ui_panel(
-                "ОПРЕДЕЛЕНИЕ TELEGRAM CHAT ID",
-                [
-                    f"Откройте @{bot['username']} в Telegram.",
-                    "Нажмите Start и отправьте боту любое сообщение.",
-                    "После отправки вернитесь сюда и нажмите Enter.",
-                ],
-                "cyan",
-            )
-            input("Нажмите Enter после отправки сообщения боту: ")
-            discovered = telegram_latest_chat_from_updates(
-                telegram_api_result(telegram_token, "getUpdates?timeout=10")
-            )
-            if discovered is None:
-                fail(
-                    "Chat ID не найден. Отправьте сообщение непосредственно боту "
-                    "или введите ранее сохранённый числовой Chat ID"
-                )
-            telegram_chat, chat_label = discovered
-            print(f"Telegram chat найден: {chat_label} (ID {telegram_chat})")
-        if not telegram_credentials_valid(telegram_token, telegram_chat):
-            fail("Telegram chat ID должен быть отдельным положительным или отрицательным числом")
+        telegram_token, telegram_chat = prompt_telegram_credentials()
 
     dot_upstreams = [
         {"address": "162.254.86.13", "tls_name": "vno01.dnscry.pt"},
@@ -5003,6 +5343,7 @@ def main() -> None:
             "entry_proxy_server": proxy_host or "127.0.0.1",
             "entry_proxy_port": proxy_port or 1080,
             "entry_ru_proxy_expected_ip": expected_proxy_ip,
+            "entry_ru_proxy_scope": proxy_scope,
             "reality_fallback_enabled": reality_fallback_enabled,
             "reality_fallback_dest": reality_fallback_dest,
             "front_enabled": front_enabled,

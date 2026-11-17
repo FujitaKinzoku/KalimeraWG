@@ -122,6 +122,8 @@
     - {name: ru-domain}
     - {name: se-domain}
     - {name: entry-domain}
+    - {name: proxy-domain}
+    - {name: proxy-address}
   when: awg_node_role == 'entry'
 
 - name: "Установка: администрирование - этап 10"
@@ -140,6 +142,7 @@
     - {src: reality-dest-switch.sh.j2, dest: reality-dest-switch}
     - {src: dns-status.sh.j2, dest: dns-status}
     - {src: ru-direct-ports.sh.j2, dest: ru-direct-ports}
+    - {src: proxy-address.sh.j2, dest: proxy-address}
     - {src: vpn-user.sh.j2, dest: vpn-user}
     - {src: awg-old.sh.j2, dest: awg-old}
     - {src: awg-mobile.sh.j2, dest: awg-mobile}
@@ -263,7 +266,7 @@
     dest: "/usr/local/sbin/{{ item }}"
     state: link
     force: true
-  loop: [ru-domain, se-domain, entry-domain]
+  loop: [ru-domain, se-domain, entry-domain, proxy-domain]
   when: awg_node_role == 'entry'
 
 - name: "Синхронизация: администрирование - этап 13"
@@ -271,6 +274,15 @@
     argv: ["{{ awg_dns_policy_path }}"]
   register: operations_dns_policy
   changed_when: operations_dns_policy.stdout | length > 0
+  when: awg_node_role == 'entry'
+
+# Список proxy-address применяется при каждом deploy: маршрутизация загружает его
+# в ipset, а для клиентов VLESS пересобирается rule-set. Так включение RU-прокси
+# сразу подхватывает адреса, добавленные заранее.
+- name: "Синхронизация списка адресов RU-прокси"
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/proxy-address, sync]
+  changed_when: false
   when: awg_node_role == 'entry'
 
 - name: "Установка: администрирование - этап 14"

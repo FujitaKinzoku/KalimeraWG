@@ -183,10 +183,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.4.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.5.0/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.4.1`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.5.0`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -198,7 +198,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.4.1 --depth 1 \
+git clone --branch v3.5.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -251,7 +251,8 @@ systemctl --failed --no-pager
 | Клиенты AmneziaWG | `vpn-user ИМЯ ПРОФИЛЬ`, `vpn-user list`, `vpn-user delete ИМЯ` |
 | Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete`; профиль с резервным каскадом: `vless-user auto ИМЯ ФАЙЛ` |
 | Маршруты доменов | `ru-domain add`, `se-domain add`, `entry-domain add` |
-| Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
+| Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports`; только выбранные адреса через прокси: `proxy-domain add`, `proxy-address add` |
+| Включение функций после установки | `kalimera-deploy --resume --enable-ru-proxy`, `--enable-telegram`; выключение: `--disable-ru-proxy`, `--disable-telegram` |
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
@@ -264,7 +265,15 @@ systemctl --failed --no-pager
 ru-domain add example.ru       # открывать напрямую с ENTRY
 se-domain add example.com      # всегда через EXIT
 entry-domain add example.org   # напрямую, минуя российский прокси
+proxy-domain add example.net   # через российский прокси (SOCKS5)
+proxy-address add 203.0.113.0/24   # адрес или сеть через российский прокси
 ```
+
+Прокси и Telegram-уведомления можно включить позже, на работающем каскаде:
+`kalimera-deploy --resume --enable-ru-proxy` спросит адрес SOCKS5 и что через
+него направлять - весь российский трафик или только списки `proxy-domain` и
+`proxy-address`. Ключи и клиентские конфиги при этом не меняются. Подробнее:
+[docs/interactive-deploy.md](docs/interactive-deploy.md).
 
 ### Клиентские профили
 
@@ -353,7 +362,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.4.1
+sudo git -C /root/KalimeraWG switch --detach v3.5.0
 kalimera-deploy --resume
 ```
 
@@ -380,6 +389,7 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.5.0:** через российский прокси можно направлять только выбранные сайты: списки `proxy-domain` и `proxy-address`, остальной российский трафик выходит напрямую с ENTRY. Прокси и Telegram-уведомления включаются на работающем каскаде: `kalimera-deploy --resume --enable-ru-proxy`, `--enable-telegram`; ключи и клиентские конфиги не меняются.
 - **v3.4.1:** `dot-switch` сам обновляет контрольные суммы управляемых файлов: после смены серверов DoT аудит больше не показывает ошибку целостности до следующего deploy.
 - **v3.4.0:** исправлен MSS на EXIT (считается из MTU канала: полные TCP-сегменты больше не застревают в туннеле); Unbound отдаёт устаревший ответ сразу и до часа после TTL; DNS клиентов VLESS отвечает резолвер ENTRY; без RU-прокси российские имена разрешает Yandex DNS по DoT прямо с ENTRY; прогрев 38 имён; BBR для TCP серверов.
 - **v3.3.2:** DNS по умолчанию применяется сам: устаревший Mullvad в inventory заменяется парой dnscry и Digitale Gesellschaft; `dot-switch reset` и панель статуса показывают тот же список; установщик принимает пары `IP:TLS`.

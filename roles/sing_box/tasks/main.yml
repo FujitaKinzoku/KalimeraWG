@@ -541,6 +541,39 @@
   changed_when: false
   when: reality_fallback_enabled | default(false) | bool
 
+- name: "Проверка: заготовки rule-set REALITY для списков RU-прокси"
+  ansible.builtin.shell:
+    cmd: |
+      set -Eeuo pipefail
+      path={{ item | quote }}
+      if [[ ! -s "$path" ]] || ! jq -e '.version and (.rules != null)' "$path" >/dev/null 2>&1; then
+        printf '{"version": 1, "rules":[]}\n' >"$path"
+        chown root:root "$path"
+        chmod 0644 "$path"
+      fi
+    executable: /bin/bash
+  loop:
+    - "{{ reality_fallback_proxy_rule_set_path }}"
+    - "{{ reality_fallback_proxy_address_rule_set_path }}"
+  changed_when: false
+  when: reality_fallback_enabled | default(false) | bool
+
+# Область selected разделяет российские сети и списки proxy-* по разным выходам.
+# Прежний REALITY внутри общей службы sing-box этого не умеет: watchdog
+# переключает там все российские правила разом.
+- name: "Проверка: область RU-прокси selected требует отдельный backend FRONT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_backend_enabled | default(false) | bool
+    fail_msg: >-
+      entry_ru_proxy_scope: selected не поддерживается вместе с прежним REALITY
+      внутри службы sing-box. Используйте отдельный FRONT или область all.
+  when:
+    - entry_ru_proxy_enabled | bool
+    - entry_ru_proxy_scope | default('all') == 'selected'
+    - reality_fallback_enabled | default(false) | bool
+
 - name: "Проверка: заготовка rule-set REALITY для российских подсетей"
   ansible.builtin.shell:
     cmd: |

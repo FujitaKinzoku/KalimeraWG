@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Адреса и сети, которые идут через RU-прокси: список proxy-address. Маршрутизация
+# загружает его в ipset force_proxy_net; для клиентов VLESS из него же собирается
+# rule-set. Домены задаются командой proxy-domain.
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly file={{ entry_ru_proxy_address_file | default('/etc/awg/domain-policy/proxy-address') | quote }}
+readonly routing={{ entry_routing_script_path | quote }}
+readonly backup_dir=/root/config-backups/entry/routing
+readonly proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
+{% if reality_fallback_enabled | default(false) | bool %}
+readonly rule_set={{ reality_fallback_proxy_address_rule_set_path | default((reality_fallback_rule_set_dir | default('/etc/sing-box/reality/rules')) ~ '/proxy-addresses.json') | quote }}
+{% else %}
+readonly rule_set=''
+{% endif %}
+
+usage() { echo 'Использование: proxy-address [list|clear|sync|add АДРЕС[/ПРЕФИКС]|del АДРЕС[/ПРЕФИКС]]'; }
+action="${1:-list}"
+case "$action" in
+    list) [[ $# -le 1 ]] || { usage >&2; exit 2; } ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    clear|sync) [[ $# -eq 1 ]] || { usage >&2; exit 2; } ;;
+    add|del) [[ $# -eq 2 ]] || { usage >&2; exit 2; } ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+install -d -m 0755 "$(dirname "$file")"
+[[ -e "$file" ]] || install -m 0644 /dev/null "$file"
+
+if [[ "$action" == list ]]; then
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file"
+    exit 0
+fi
+
+# Адрес приводится к каноническому виду: 203.0.113.7 или 203.0.113.0/24. Сеть с
+# битами узла (203.0.113.7/24) отклоняется, чтобы запись в списке была однозначной.
+normalize_address() {
+    python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+value = sys.argv[1]
+try:
+    network = ipaddress.IPv4Network(value, strict=True)
+except ValueError as error:
+    raise SystemExit(f"Некорректный IPv4-адрес или сеть: {error}")
+if network.prefixlen == 0:
+    raise SystemExit("Сеть 0.0.0.0/0 отправила бы в прокси весь трафик")
+print(network.network_address if network.prefixlen == 32 else network)
+PY
+}
+
+if [[ "$action" =~ ^(add|del)$ ]]; then
+    address="$(normalize_address "$2")" || exit 2
+fi
+
+exec 9>/run/awg-proxy-address.lock
+flock 9
+
+old_file="$(mktemp /run/awg-proxy-address.old.XXXXXX)"
+new_file="$(mktemp /run/awg-proxy-address.new.XXXXXX)"
+rule_set_tmp="$(mktemp /run/awg-proxy-address.rules.XXXXXX)"
+trap 'rm -f "$old_file" "$new_file" "$rule_set_tmp"' EXIT
+cp -a "$file" "$old_file"
+sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file" >"$new_file"
+
+case "$action" in
+    clear) : >"$new_file" ;;
+    add)
+        grep -Fxq -- "$address" "$new_file" || printf '%s\n' "$address" >>"$new_file"
+        ;;
+    del)
+        grep -Fxv -- "$address" "$new_file" >"$rule_set_tmp" || true
+        cp "$rule_set_tmp" "$new_file"
+        ;;
+esac
+sort -u -o "$new_file" "$new_file"
+
+changed=true
+if cmp --silent "$new_file" "$file"; then
+    changed=false
+fi
+
+# Rule-set для клиентов VLESS. sing-box сам перечитывает локальные rule-set при
+# изменении файла, перезапуск не нужен.
+write_rule_set() {
+    [[ -n "$rule_set" ]] || return 0
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $addresses |
+        {"version": 1, "rules": (if ($addresses | length) > 0 then [{"ip_cidr": $addresses}] else [] end)}
+    ' <"$1" >"$rule_set_tmp"
+    if [[ ! -f "$rule_set" ]] || ! cmp --silent "$rule_set_tmp" "$rule_set"; then
+        install -m 0644 "$rule_set_tmp" "$rule_set"
+    fi
+}
+
+if [[ "$changed" == false && "$action" != sync ]]; then
+    echo 'Список proxy-address уже соответствует запросу.'
+    exit 0
+fi
+
+if [[ "$changed" == true ]]; then
+    install -d -m 0700 "$backup_dir"
+    install -m 0600 "$file" "$backup_dir/proxy-address.$(date -u +%Y%m%dT%H%M%SZ)"
+    install -m 0644 "$new_file" "$file"
+fi
+if ! "$routing" apply; then
+    install -m 0644 "$old_file" "$file"
+    "$routing" apply >/dev/null 2>&1 || true
+    echo 'Изменение proxy-address отменено из-за ошибки маршрутизации.' >&2
+    exit 1
+fi
+# Из очищенного списка: в исходном файле могли остаться комментарии.
+write_rule_set "$new_file"
+
+case "$action" in
+    clear) echo 'Список proxy-address очищен.' ;;
+    add) echo "$address добавлен в proxy-address." ;;
+    del) echo "$address удалён из proxy-address." ;;
+    sync) echo 'Список proxy-address применён.' ;;
+esac
+if [[ "$action" == add && "$proxy_enabled" == false ]]; then
+    echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
+fi

@@ -8,12 +8,16 @@ readonly PROXY_DISABLED={{ entry_ru_proxy_disabled_flag | quote }}
 readonly PROXY_MANUAL_DISABLED={{ entry_ru_proxy_manual_disabled_flag | quote }}
 command_name="$(basename "$0")"
 readonly command_name
-readonly -a policy_names=(ru-domain se-domain entry-domain)
-readonly -a policy_sets=(force_ru force_exit force_entry_bank)
+readonly -a policy_names=(ru-domain se-domain entry-domain proxy-domain)
+readonly -a policy_sets=(force_ru force_exit force_entry_bank force_proxy)
+# Область RU-прокси. selected: через прокси идут только списки proxy-domain и
+# proxy-address, поэтому ru-domain разрешается и выходит как без прокси.
+readonly PROXY_ENABLED={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
+readonly PROXY_SCOPE={{ 'selected' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'all' }}
 
 case "$command_name" in
-    ru-domain|se-domain|entry-domain) file="$DIR/$command_name" ;;
-    *) echo 'Запускайте как ru-domain, se-domain или entry-domain' >&2; exit 2 ;;
+    ru-domain|se-domain|entry-domain|proxy-domain) file="$DIR/$command_name" ;;
+    *) echo 'Запускайте как ru-domain, se-domain, entry-domain или proxy-domain' >&2; exit 2 ;;
 esac
 
 usage() {
@@ -124,14 +128,19 @@ if systemctl is-active --quiet {{ sing_box_service_name | quote }} &&
     proxy_dns=true
 fi
 
+# Циклы ниже читают списки в переменную domain. Домен из команды сохраняется:
+# иначе итоговое сообщение выводилось без его имени.
+requested_domain="${domain:-}"
 {
     echo '# Сформировано локальными командами управления доменами AWG.'
     while read -r domain; do
         [[ -z "$domain" ]] || {
             echo "ipset=/$domain/force_ru"
-            if [[ "$proxy_dns" == false ]]; then
+            if [[ "$proxy_dns" == false || "$PROXY_SCOPE" == selected ]]; then
                 # SOAX выключен полностью - RU-DoH порт всё равно не работает,
-                # единственный рабочий резолвер сейчас дефолтная ветка.
+                # единственный рабочий резолвер сейчас дефолтная ветка. В области
+                # selected ru-domain выходит напрямую с ENTRY, и имя разрешает
+                # Unbound: его российские зоны ведут в российский DoT.
                 echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
             else
                 # Явно перечисленный ru-domain: только RU-DoH, без фолбэка на
@@ -154,14 +163,41 @@ fi
     while read -r domain; do
         [[ -z "$domain" ]] || echo "ipset=/$domain/force_entry_bank"
     done <"$DIR/entry-domain"
+    # proxy-domain: адреса попадают в ipset force_proxy, который маршрутизация
+    # отправляет в RU-прокси. Имя разрешает российский DoH через тот же прокси, а
+    # без работающего прокси - Unbound.
+    while read -r domain; do
+        [[ -z "$domain" ]] || {
+            echo "ipset=/$domain/force_proxy"
+            if [[ "$proxy_dns" == true ]]; then
+                echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
+            else
+                echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
+            fi
+        }
+    done <"$DIR/proxy-domain"
 } >"$tmp"
+domain="$requested_domain"
 
 changed=false
 if [[ ! -f "$OUT" ]] || ! cmp --silent "$tmp" "$OUT"; then
+    # Набор адресов очищается, только когда из него убрано имя: его адреса больше
+    # не должны идти по прежнему правилу. Остальные наборы сохраняются. Их наполняют
+    # лишь DNS-запросы клиентов, а устройство хранит ответ до часа: после очистки
+    # оно всё это время ходило бы мимо правила. Сравниваются строки ipset прежней и
+    # новой политики, поэтому учитываются и изменения, отложенные через --defer.
+    stale_sets="$(
+        LC_ALL=C comm -23 \
+            <(grep '^ipset=' "$OUT" 2>/dev/null | LC_ALL=C sort -u) \
+            <(grep '^ipset=' "$tmp" | LC_ALL=C sort -u) |
+            sed 's|.*/||' | LC_ALL=C sort -u
+    )"
     install -m 0644 "$tmp" "$OUT"
     dnsmasq --test
     for policy_set in "${policy_sets[@]}"; do
-        ipset flush "$policy_set" 2>/dev/null || true
+        if grep -Fxq -- "$policy_set" <<<"$stale_sets"; then
+            ipset flush "$policy_set" 2>/dev/null || true
+        fi
     done
     systemctl reset-failed dnsmasq.service 2>/dev/null || true
     systemctl restart dnsmasq.service
@@ -203,6 +239,20 @@ if [[ ! -f "$REALITY_SE_RULE_SET" ]] || ! cmp --silent "$reality_se_tmp" "$REALI
     install -m 0644 "$reality_se_tmp" "$REALITY_SE_RULE_SET"
 fi
 rm -f "$reality_se_tmp"
+
+# И для proxy-domain: клиенты VLESS попадают в прокси по имени сайта, клиенты
+# AmneziaWG - по адресу из ipset force_proxy.
+readonly REALITY_PROXY_RULE_SET={{ reality_fallback_proxy_rule_set_path | default((reality_fallback_rule_set_dir | default('/etc/sing-box/reality/rules')) ~ '/proxy-domains.json') | quote }}
+reality_proxy_tmp="$(mktemp /run/awg-domain-policy-reality-proxy.XXXXXX)"
+sed -E '/^[[:space:]]*(#|$)/d' "$DIR/proxy-domain" |
+    jq -R -s '
+        (split("\n") | map(select(length > 0))) as $domains |
+        {"version": 1, "rules": (if ($domains | length) > 0 then [{"domain_suffix": $domains}] else [] end)}
+    ' >"$reality_proxy_tmp"
+if [[ ! -f "$REALITY_PROXY_RULE_SET" ]] || ! cmp --silent "$reality_proxy_tmp" "$REALITY_PROXY_RULE_SET"; then
+    install -m 0644 "$reality_proxy_tmp" "$REALITY_PROXY_RULE_SET"
+fi
+rm -f "$reality_proxy_tmp"
 {% endif %}
 # Зоны Unbound для российских имён собираются из тех же списков: в режиме без
 # RU-прокси ru-domain и entry-domain разрешает российский DoT, а se-domain остаётся
@@ -220,4 +270,13 @@ elif [[ "$action" == add ]]; then
     echo "$domain добавлен в $command_name."
 else
     echo "$domain удалён из $command_name."
+fi
+if [[ "$command_name" == proxy-domain && "$action" == add ]]; then
+    if [[ "$PROXY_ENABLED" == false ]]; then
+        echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
+    else
+        # Адрес попадает в набор force_proxy, когда устройство запрашивает имя у ENTRY.
+        echo 'Клиенты AmneziaWG пойдут через прокси после нового DNS-запроса имени: прежний ответ устройство хранит до часа.'
+        echo 'Чтобы не ждать, сбросьте DNS на устройстве (на телефоне - авиарежим на несколько секунд). Клиенты VLESS переходят сразу.'
+    fi
 fi

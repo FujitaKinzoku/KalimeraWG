@@ -37,8 +37,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Область selected: российские зоны выходят напрямую с ENTRY, их имена разрешает
+# Unbound через российский DoT. В российский DoH через прокси идут только имена
+# из proxy-domain, их добавляет ru-domain sync.
+readonly proxy_scope={{ 'selected' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'all' }}
 proxy_dns=false
-if systemctl is-active --quiet {{ sing_box_service_name | quote }} && \
+if [[ "$proxy_scope" == all ]] && systemctl is-active --quiet {{ sing_box_service_name | quote }} && \
         [[ ! -e "$disabled_flag" && ! -e "$manual_flag" ]]; then
     proxy_dns=true
 fi
