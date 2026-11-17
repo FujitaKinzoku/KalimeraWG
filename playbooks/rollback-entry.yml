@@ -71,6 +71,7 @@
           - 60-domain-policy.conf
           - 61-ru-split-dns.conf
           - 62-force-entry.conf
+          - 64-awg-client-doh.conf
       when: rollback_component == 'dnsmasq'
 
     - name: Проверка разрешённой границы backup ENTRY
