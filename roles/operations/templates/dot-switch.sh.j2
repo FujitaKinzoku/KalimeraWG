@@ -11,6 +11,7 @@ readonly override={{ entry_dns_dot_override_path | quote }}
 readonly backup_dir=/root/config-backups/entry/dns/unbound
 readonly dns_port={{ entry_dns_default_port }}
 readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
+readonly integrity={{ awg_managed_integrity_path | default('/usr/local/sbin/awg-managed-integrity') | quote }}
 
 validate_ipv4() {
     python3 - "$1" <<'PY'
@@ -104,6 +105,14 @@ done
 
 exec 9>/run/awg-dot-switch.lock
 flock 9
+# 90-awg-dot.conf входит в манифест awg-managed-integrity, поэтому манифест
+# проверяется до изменения. После успешной смены DoT он обновляется, только если
+# до неё все управляемые файлы с ним совпадали. Иначе манифест остаётся прежним,
+# и server-audit продолжает показывать изменения, сделанные вне KalimeraWG.
+integrity_intact=false
+if "$integrity" check >/dev/null 2>&1; then
+    integrity_intact=true
+fi
 install -d -m 0700 "$backup_dir" "$(dirname "$override")"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 config_backup="$backup_dir/90-awg-dot.conf.$timestamp"
@@ -163,3 +172,16 @@ dig +short +time=5 +tries=1 @127.0.0.1 -p "$dns_port" example.com A |
 {% endif %}
 committed=false
 echo 'Upstream-серверы DoT проверены и применены.'
+# Манифест обновляется после фиксации изменения: при откате возвращается прежний
+# файл, и манифест с ним совпадает. Сбой записи манифеста проверенную смену DoT
+# не отменяет, а оставляет ошибку целостности в server-audit.
+if [[ "$integrity_intact" == false ]]; then
+    printf '%s\n' \
+        'ВНИМАНИЕ: манифест целостности не обновлён: проверка управляемых файлов не проходила ещё до смены DoT.' \
+        'Причина: sudo awg-managed-integrity check.' \
+        'Если файлы меняли не вы - проверьте сервер, иначе выполните kalimera-deploy --resume.' >&2
+elif ! "$integrity" seal; then
+    printf '%s\n' \
+        'ВНИМАНИЕ: DoT применён, но не удалось обновить манифест целостности.' \
+        'server-audit будет показывать ошибку целостности до kalimera-deploy --resume.' >&2
+fi
