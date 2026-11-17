@@ -338,7 +338,7 @@ class ProxyDomainTests(ShellCase):
         return (self.dnsmasq / "63-awg-local-domain-policy.conf").read_text(encoding="utf-8")
 
     def test_proxy_domain_fills_the_proxy_set_and_uses_russian_doh(self) -> None:
-        self.domain_admin(enabled=True, scope="selected")
+        self.domain_admin(enabled=True, scope="all")
         self.flag("proxy-active")
         result = self.run_command("proxy-domain", "add", "Kinopoisk.RU.")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -346,6 +346,18 @@ class ProxyDomainTests(ShellCase):
         text = self.policy_file()
         self.assertIn("ipset=/kinopoisk.ru/force_proxy\n", text)
         self.assertIn("server=/kinopoisk.ru/127.0.0.1#5354\n", text)
+
+    def test_selected_scope_resolves_proxy_domain_through_unbound(self) -> None:
+        # Запрос через прокси нигде не кэшируется: на рабочем каскаде он занимал сотни
+        # миллисекунд на каждое имя. В области selected имя разрешает Unbound, как и
+        # остальные российские имена; в прокси по-прежнему идёт сам трафик.
+        self.domain_admin(enabled=True, scope="selected")
+        self.flag("proxy-active")
+        self.assertEqual(self.run_command("proxy-domain", "add", "kinopoisk.ru").returncode, 0)
+        text = self.policy_file()
+        self.assertIn("ipset=/kinopoisk.ru/force_proxy\n", text)
+        self.assertIn("server=/kinopoisk.ru/127.0.0.1#5353\n", text)
+        self.assertNotIn("#5354", text)
 
     def test_inactive_proxy_resolves_the_list_through_unbound(self) -> None:
         self.domain_admin(enabled=True, scope="selected")
@@ -438,7 +450,7 @@ class ProxyDomainTests(ShellCase):
 
     def test_resolver_switch_keeps_the_address_sets(self) -> None:
         # Watchdog при отказе прокси меняет только резолвер имён: адреса остаются.
-        self.domain_admin(enabled=True, scope="selected")
+        self.domain_admin(enabled=True, scope="all")
         self.flag("proxy-active")
         self.run_command("proxy-domain", "add", "kinopoisk.ru")
         self.flushed_sets()
@@ -835,7 +847,7 @@ class ReportTests(unittest.TestCase):
             entry_dns_ru_dot_active=True,
         )
         self.assertIn("российский DoT напрямую с ENTRY (через RU-прокси идут только выбранные адреса)", rows[0])
-        # Прямая проверка российского DoH остаётся: через него разрешаются имена proxy-domain.
+        # Прямая проверка российского DoH остаётся: она показывает, что DNS через прокси работает.
         self.assertTrue(any("DNS: yandex.ru напрямую через RU DoH" in row for row in rows))
 
 

@@ -164,12 +164,15 @@ requested_domain="${domain:-}"
         [[ -z "$domain" ]] || echo "ipset=/$domain/force_entry_bank"
     done <"$DIR/entry-domain"
     # proxy-domain: адреса попадают в ipset force_proxy, который маршрутизация
-    # отправляет в RU-прокси. Имя разрешает российский DoH через тот же прокси, а
-    # без работающего прокси - Unbound.
+    # отправляет в RU-прокси. В области all имя разрешает российский DoH через тот
+    # же прокси, как и остальные российские имена. В области selected имя разрешает
+    # Unbound: российский DoT прямо с ENTRY, с кэшем. Запрос через прокси не
+    # кэшируется нигде и занимал сотни миллисекунд на каждое имя, а ответ тот же:
+    # его даёт тот же Yandex DNS.
     while read -r domain; do
         [[ -z "$domain" ]] || {
             echo "ipset=/$domain/force_proxy"
-            if [[ "$proxy_dns" == true ]]; then
+            if [[ "$proxy_dns" == true && "$PROXY_SCOPE" == all ]]; then
                 echo "server=/$domain/127.0.0.1#{{ entry_dns_ru_port }}"
             else
                 echo "server=/$domain/127.0.0.1#{{ entry_dns_default_port }}"
