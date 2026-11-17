@@ -13,6 +13,7 @@ readonly entry_dns_ru_port={{ (entry_dns_ru_port | default(5354)) | int }}
 readonly entry_exit_iface={{ (entry_exit_interface | default('')) | quote }}
 readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
 readonly ru_dot_active={{ 'true' if (entry_dns_ru_dot_active | default(false) | bool) else 'false' }}
+readonly ru_proxy_selected={{ 'true' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'false' }}
 readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
 readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
@@ -113,15 +114,18 @@ check_ru_proxy() {
     if [[ "$ru_proxy_enabled" != true ]]; then
         return 0
     fi
+    local traffic='РФ-трафик клиентов'
+    # Область selected: через прокси идут только списки proxy-domain и proxy-address.
+    [[ "$ru_proxy_selected" != true ]] || traffic='трафик к выбранным доменам и адресам'
     if [[ -e "$ru_proxy_manual_flag" ]]; then
         ru_state=manual
-        add WARN 'RU-прокси (sing-box)' 'выключен вручную; РФ-трафик клиентов идёт напрямую с ENTRY' 'ru-proxy status; включить: ru-proxy on'
+        add WARN 'RU-прокси (sing-box)' "выключен вручную; $traffic идёт напрямую с ENTRY" 'ru-proxy status; включить: ru-proxy on'
     elif [[ -e "$ru_proxy_failopen_flag" ]] || ! systemctl is-active --quiet "$ru_proxy_service"; then
         ru_state=failopen
-        add WARN 'RU-прокси (sing-box)' 'fail-open: РФ-трафик клиентов идёт напрямую с ENTRY' 'ru-proxy status; если SOCKS5 снова доступен: ru-proxy on'
+        add WARN 'RU-прокси (sing-box)' "fail-open: $traffic идёт напрямую с ENTRY" 'ru-proxy status; если SOCKS5 снова доступен: ru-proxy on'
     else
         ru_state=active
-        add OK 'RU-прокси (sing-box)' 'активен: РФ-трафик клиентов идёт через SOCKS5/TUN'
+        add OK 'RU-прокси (sing-box)' "активен: $traffic идёт через SOCKS5/TUN"
     fi
 }
 
@@ -150,8 +154,10 @@ dns_row() {
 
 check_dns() {
     local route_ru dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
-    if [[ "$ru_state" == active ]]; then
+    if [[ "$ru_state" == active && "$ru_proxy_selected" != true ]]; then
         route_ru='маршрут: RU DoH через RU-прокси'
+    elif [[ "$ru_dot_active" == true && "$ru_proxy_selected" == true ]]; then
+        route_ru='маршрут: Unbound → российский DoT напрямую с ENTRY (через RU-прокси идут только выбранные адреса)'
     elif [[ "$ru_dot_active" == true ]]; then
         route_ru='маршрут: Unbound → российский DoT напрямую с ENTRY (RU-прокси не используется)'
     else

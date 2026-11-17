@@ -40,15 +40,37 @@
         "strategy": "ipv4_only"
       }
     },
+{#
+   Метка entry_ru_mark ведёт в таблицу RU-прокси, пока он работает, а без него -
+   в обычный маршрут через WAN ENTRY. В области selected через прокси идут только
+   списки proxy-domain и proxy-address (выход proxy-ru), а российские назначения
+   выходят напрямую с ENTRY, поэтому direct-ru остаётся без метки.
+#}
+{% set front_proxy_enabled = entry_ru_proxy_enabled | default(false) | bool %}
+{% set front_proxy_selected = front_proxy_enabled and (entry_ru_proxy_scope | default('all')) == 'selected' %}
     {
       "type": "direct",
+{% if not front_proxy_selected %}
+      "routing_mark": "{{ entry_ru_mark }}",
+{% endif %}
       "tag": "direct-ru",
+      "domain_resolver": {
+        "server": "entry-split-dns",
+        "strategy": "ipv4_only"
+      }
+    }{% if front_proxy_selected %},
+    {
+      "type": "direct",
+      "tag": "proxy-ru",
       "routing_mark": "{{ entry_ru_mark }}",
       "domain_resolver": {
         "server": "entry-split-dns",
         "strategy": "ipv4_only"
       }
     }
+{% else %}
+
+{% endif %}
   ],
 {#
    Российские назначения разрешает dnsmasq ENTRY, тот же, что обслуживает
@@ -94,7 +116,22 @@
         "tag": "front-se-domains",
         "format": "source",
         "path": "{{ reality_fallback_se_rule_set_path }}"
+      }{% if front_proxy_enabled %},
+      {
+        "type": "local",
+        "tag": "front-proxy-domains",
+        "format": "source",
+        "path": "{{ reality_fallback_proxy_rule_set_path }}"
+      },
+      {
+        "type": "local",
+        "tag": "front-proxy-addresses",
+        "format": "source",
+        "path": "{{ reality_fallback_proxy_address_rule_set_path }}"
       }
+{% else %}
+
+{% endif %}
     ],
     "rules": [
       {
@@ -118,6 +155,18 @@
         "rule_set": ["front-se-domains"],
         "outbound": "direct-exit"
       },
+{% if front_proxy_enabled %}
+{#
+   Списки proxy-domain и proxy-address стоят выше российских правил: сайт из
+   списка идёт в прокси, даже если он в зоне .ru или в российской сети. В области
+   all весь российский выход и так ведёт в прокси, отдельный выход не нужен.
+#}
+      {
+        "inbound": ["front-reality-in"],
+        "rule_set": ["front-proxy-domains", "front-proxy-addresses"],
+        "outbound": "{{ 'proxy-ru' if front_proxy_selected else 'direct-ru' }}"
+      },
+{% endif %}
       {
         "inbound": ["front-reality-in"],
         "domain_suffix": [".ru", ".xn--p1ai"],

@@ -251,7 +251,8 @@ systemctl --failed --no-pager
 | Клиенты AmneziaWG | `vpn-user ИМЯ ПРОФИЛЬ`, `vpn-user list`, `vpn-user delete ИМЯ` |
 | Клиенты VLESS (на FRONT) | `vless-user create ИМЯ cdn`, `list`, `export`, `delete`; профиль с резервным каскадом: `vless-user auto ИМЯ ФАЙЛ` |
 | Маршруты доменов | `ru-domain add`, `se-domain add`, `entry-domain add` |
-| Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports` |
+| Российский прокси | `ru-proxy`, `ru-proxy-set`, `ru-direct-ports`; только выбранные адреса через прокси: `proxy-domain add`, `proxy-address add` |
+| Включение функций после установки | `kalimera-deploy --resume --enable-ru-proxy`, `--enable-telegram`; выключение: `--disable-ru-proxy`, `--disable-telegram` |
 | DNS | `dns-status`, `dot-switch`, `doh-switch` |
 | Безопасность | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Обслуживание | `maintenance`, `update-all`, `kalimera-deploy --resume` |
@@ -264,7 +265,15 @@ systemctl --failed --no-pager
 ru-domain add example.ru       # открывать напрямую с ENTRY
 se-domain add example.com      # всегда через EXIT
 entry-domain add example.org   # напрямую, минуя российский прокси
+proxy-domain add example.net   # через российский прокси (SOCKS5)
+proxy-address add 203.0.113.0/24   # адрес или сеть через российский прокси
 ```
+
+Прокси и Telegram-уведомления можно включить позже, на работающем каскаде:
+`kalimera-deploy --resume --enable-ru-proxy` спросит адрес SOCKS5 и что через
+него направлять - весь российский трафик или только списки `proxy-domain` и
+`proxy-address`. Ключи и клиентские конфиги при этом не меняются. Подробнее:
+[docs/interactive-deploy.md](docs/interactive-deploy.md).
 
 ### Клиентские профили
 

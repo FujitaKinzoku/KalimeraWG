@@ -50,6 +50,10 @@ reality_fallback_ru_zone_rule_set_path: "{{ reality_fallback_rule_set_dir }}/ru-
 # подсетям даёт ложные срабатывания на зарубежных сервисах, отдающихся с
 # кеш-узлов внутри РФ (googlevideo.com и прочий Google Global Cache).
 reality_fallback_se_rule_set_path: "{{ reality_fallback_rule_set_dir }}/se-domains.json"
+# Списки proxy-domain и proxy-address («через RU-прокси») для клиентов VLESS.
+# Клиенты AmneziaWG получают то же через ipset force_proxy и force_proxy_net.
+reality_fallback_proxy_rule_set_path: "{{ reality_fallback_rule_set_dir }}/proxy-domains.json"
+reality_fallback_proxy_address_rule_set_path: "{{ reality_fallback_rule_set_dir }}/proxy-addresses.json"
 
 # Служебный REALITY-клиент, зарезервированный за FRONT-релеем. Отдельный UUID
 # не распространяется конечным пользователям и применяется только на участке

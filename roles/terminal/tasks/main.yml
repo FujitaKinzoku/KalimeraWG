@@ -57,6 +57,8 @@
       {{ hostvars[groups['entry'][0]].entry_mobile_client_available | default(false) | bool }}
     terminal_summary_proxy_configured: >-
       {{ hostvars[groups['entry'][0]].entry_ru_proxy_enabled | default(false) | bool }}
+    terminal_summary_proxy_scope: >-
+      {{ hostvars[groups['entry'][0]].entry_ru_proxy_scope | default('all') }}
     terminal_summary_entry_client_interface: >-
       {{ hostvars[groups['entry'][0]].entry_client_interface | default('awg0') }}
     terminal_summary_entry_transit_interface: >-

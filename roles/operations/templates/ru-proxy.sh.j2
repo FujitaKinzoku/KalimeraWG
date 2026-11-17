@@ -46,6 +46,11 @@ case "${1:-status}" in
     else
         echo 'Маршрутизация через RU-прокси: ВКЛЮЧЕНА'
     fi
+{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
+    echo 'Область: только списки proxy-domain и proxy-address; российские сети идут напрямую через ENTRY'
+{% else %}
+    echo 'Область: весь российский трафик и списки proxy-domain, proxy-address'
+{% endif %}
     [[ -e {{ sing_box_runtime_override_path | quote }} ]] && echo 'Источник настроек: локальное переопределение ru-proxy-set' || echo 'Источник настроек: зашифрованный inventory'
 {% endif %}
     ;;

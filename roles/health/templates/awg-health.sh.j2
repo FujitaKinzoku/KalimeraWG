@@ -248,7 +248,7 @@ health_hint() {
             hint='на ENTRY: kalimera-deploy --resume восстановит политику без журналов' ;;
         *'mark 0x2'*|*'таблице 200'*|*'российский TUN'*|*'российского DoH'*|*'RU UDP'*|*'российский UDP'*|*'force_ru UDP'*|*'российского прокси'*|*sing-box*|*SOAX*)
             hint='ru-proxy status; если SOCKS5 недоступен - ru-proxy-set (новые данные) или ru-proxy off' ;;
-        *'policy routing'*|*'mark 0x1'*|*'таблице 100'*|*'через EXIT'*|*'идут напрямую'*|*'цепочка маршрутизации'*|*ipset*|*'прямой'*|*'прямых'*|*'порт 25'*|*'служба маршрутизации'*|*'перенаправление DNS'*|*'принудительный DNS'*)
+        *'policy routing'*|*'mark 0x1'*|*'таблице 100'*|*'через EXIT'*|*'идут напрямую'*|*'выходят напрямую'*|*'proxy-'*|*'цепочка маршрутизации'*|*ipset*|*'прямой'*|*'прямых'*|*'порт 25'*|*'служба маршрутизации'*|*'перенаправление DNS'*|*'принудительный DNS'*)
             hint='sudo systemctl reload {{ entry_routing_service_name | default("awg-entry-routing.service") }}; если ошибка вернётся - на ENTRY: kalimera-deploy --resume' ;;
         *handshake*)
             hint='проверьте, что второй сервер каскада включён и хостинг не блокирует его UDP-порт; затем на ENTRY: kalimera-deploy --resume' ;;
@@ -660,6 +660,32 @@ udp_ru_bypass_absent() {
         grep -Eq -- '-p udp .*--match-set (force_ru|ru) dst .* -j RETURN'
 }
 
+# Списки proxy-domain и proxy-address: адреса из обоих наборов получают метку прокси.
+proxy_lists_marked() {
+    local mark="$1" set_name
+    for set_name in force_proxy force_proxy_net; do
+        iptables -w 10 -t mangle -C AWG_RU_PROXY -m set --match-set "$set_name" dst \
+            -j MARK --set-xmark "$mark/0xffffffff" || return 1
+    done
+}
+
+# Область selected: российские сети и ru-domain метку прокси не получают. Правила
+# сначала читаются целиком: grep -q в конвейере при pipefail дал бы ложный успех.
+ru_networks_bypass_proxy() {
+    local rules
+    rules="$(iptables -w 10 -t mangle -S AWG_RU_PROXY)" || return 1
+    ! grep -Eq -- '--match-set (force_ru|ru) dst -j MARK' <<<"$rules"
+}
+
+# SOCKS5 без UDP: UDP к адресам из списков отклоняется, а не выходит с ENTRY.
+proxy_udp_rejected() {
+    local interface="$1" subnet="$2" set_name
+    for set_name in force_proxy force_proxy_net; do
+        iptables -w 10 -C FORWARD -i "$interface" -s "$subnet" -p udp \
+            -m set --match-set "$set_name" dst -j REJECT --reject-with icmp-port-unreachable || return 1
+    done
+}
+
 {% if reality_fallback_enabled | default(false) | bool %}
 tcp_port_listening() {
     local port="$1"
@@ -833,6 +859,8 @@ check_minor 'systemd-networkd не удаляет правила policy routing'
 check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
 check 'ipset российских сетей' ipset list ru
+check 'ipset force_proxy' ipset list force_proxy
+check 'ipset force_proxy_net' ipset list force_proxy_net
 check 'цепочка маршрутизации ENTRY сервера' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -j AWG_RU_PROXY
 check 'клиенты AWG изолированы от cloud metadata' \
     ufw_client_destination_denied {{ entry_client_interface | quote }} \
@@ -907,13 +935,21 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
     check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
     check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
     check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port | int }} yandex.ru A
+    check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked {{ entry_ru_mark | quote }}
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
+    if [[ "$proxy_udp_mode" != proxy ]]; then
+        check 'UDP списков proxy-* не выходит мимо прокси' proxy_udp_rejected {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }}
+    fi
+{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
+    check 'российские сети выходят напрямую с ENTRY, область selected' ru_networks_bypass_proxy
+{% else %}
     if [[ "$proxy_udp_mode" == proxy ]]; then
         check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
     else
         check 'force_ru UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy force_ru
         check 'российский UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy ru
     fi
+{% endif %}
 else
     check_passed 'активен fail-open российского прокси'
 fi

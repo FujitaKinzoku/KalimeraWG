@@ -30,6 +30,14 @@ readonly PROXY_MANUAL_DISABLED_FLAG={{ entry_ru_proxy_manual_disabled_flag | quo
 readonly PROXY_UDP_MODE_FILE={{ entry_ru_proxy_udp_mode_path | quote }}
 readonly RU_CACHE={{ entry_ru_zone_cache_path | quote }}
 readonly CHAIN=AWG_RU_PROXY
+# Область RU-прокси: all - через прокси идёт весь российский трафик; selected -
+# только адреса из списков proxy-domain и proxy-address, а российские сети выходят
+# напрямую с ENTRY. Списки proxy-* направляются в прокси в обеих областях. Если
+# прокси не включён при deploy, списки хранятся, но на маршруты не влияют.
+readonly PROXY_ENABLED={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
+readonly PROXY_SCOPE={{ 'selected' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'all' }}
+readonly PROXY_ADDRESS_FILE={{ entry_ru_proxy_address_file | default('/etc/awg/domain-policy/proxy-address') | quote }}
+readonly -a PROXY_SETS=(force_proxy force_proxy_net)
 
 interface_is_up() {
     ip -o link show dev "$1" 2>/dev/null |
@@ -73,6 +81,23 @@ remove_policy_rule() {
     while ip rule del fwmark "$mark" table "$table" priority "$priority" 2>/dev/null; do :; done
 }
 
+# UDP к адресам из списков proxy-*, когда SOCKS5 не умеет UDP. Напрямую с ENTRY
+# такой трафик выпускать нельзя: сайт увидел бы адрес сервера вместо адреса прокси.
+# Отказ с ICMP заставляет приложение сразу перейти с QUIC на TCP, а TCP идёт в прокси.
+remove_proxy_udp_reject() {
+    local client_if="$1" client_subnet="$2" set_name
+    for set_name in "${PROXY_SETS[@]}"; do
+        delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p udp -m set --match-set "$set_name" dst -j REJECT --reject-with icmp-port-unreachable
+    done
+}
+
+add_proxy_udp_reject() {
+    local client_if="$1" client_subnet="$2" set_name
+    for set_name in "${PROXY_SETS[@]}"; do
+        iptables -w 10 -I FORWARD 1 -i "$client_if" -s "$client_subnet" -p udp -m set --match-set "$set_name" dst -j REJECT --reject-with icmp-port-unreachable
+    done
+}
+
 remove_state() {
     local index client_if client_subnet dns_address
     for index in "${!CLIENT_IFS[@]}"; do
@@ -89,6 +114,7 @@ remove_state() {
         delete_all mangle FORWARD -i "$client_if" -s "$client_subnet" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
         delete_all mangle FORWARD -o "$client_if" -d "$client_subnet" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
         delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
+        remove_proxy_udp_reject "$client_if" "$client_subnet"
     done
     remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
     remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
@@ -120,6 +146,20 @@ ipset create force_ru hash:ip family inet timeout 86400 maxelem 262144 -exist
 ipset create force_entry_bank hash:ip family inet timeout 86400 maxelem 262144 -exist
 ipset create ru hash:net family inet maxelem 65536 -exist
 ipset create ru_tmp hash:net family inet maxelem 65536 -exist
+# force_proxy наполняет dnsmasq по списку proxy-domain, force_proxy_net - адреса и
+# сети из списка proxy-address. Наборы есть всегда: правила FORWARD и проверки
+# ссылаются на них и без включённого прокси.
+ipset create force_proxy hash:ip family inet timeout 86400 maxelem 262144 -exist
+ipset create force_proxy_net hash:net family inet maxelem 65536 -exist
+{
+    printf 'create force_proxy_net hash:net family inet maxelem 65536 -exist\n'
+    printf 'flush force_proxy_net\n'
+    if [[ -r "$PROXY_ADDRESS_FILE" ]]; then
+        sed -E 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$PROXY_ADDRESS_FILE" |
+            grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$' |
+            sed 's/^/add force_proxy_net /' || true
+    fi
+} | ipset restore -exist
 ipset create ru_direct_tcp_ports bitmap:port range 1-65535 -exist
 {
     printf 'create ru_direct_tcp_ports bitmap:port range 1-65535 -exist\n'
@@ -162,18 +202,40 @@ fi
     printf '%s\n' "-A $CHAIN -m set --match-set force_entry_bank dst -j ACCEPT"
     printf '%s\n' "-A $CHAIN -m set --match-set force_exit dst -j MARK --set-xmark $EXIT_MARK/0xffffffff"
     printf '%s\n' "-A $CHAIN -m set --match-set force_exit dst -j RETURN"
+    # Списки proxy-domain и proxy-address: в прокси, пока он работает; при его
+    # отказе - напрямую с ENTRY, как и остальной российский трафик (fail-open).
+    if [[ "$PROXY_ENABLED" == true ]]; then
+        for set_name in "${PROXY_SETS[@]}"; do
+            printf '%s\n' "-A $CHAIN -p tcp -m set --match-set $set_name dst -m set --match-set ru_direct_tcp_ports dst -j RETURN"
+        done
+        if [[ "$proxy_ready" == true ]]; then
+            for set_name in "${PROXY_SETS[@]}"; do
+                if [[ "$PROXY_UDP_MODE" == direct ]]; then
+                    # Без метки: пакет отклоняет правило FORWARD (add_proxy_udp_reject).
+                    printf '%s\n' "-A $CHAIN -p udp -m set --match-set $set_name dst -j RETURN"
+                fi
+                printf '%s\n' "-A $CHAIN -m set --match-set $set_name dst -j MARK --set-xmark $RU_MARK/0xffffffff"
+                printf '%s\n' "-A $CHAIN -m set --match-set $set_name dst -j RETURN"
+            done
+        else
+            for set_name in "${PROXY_SETS[@]}"; do
+                printf '%s\n' "-A $CHAIN -m set --match-set $set_name dst -j RETURN"
+            done
+        fi
+    fi
     printf '%s\n' "-A $CHAIN -p tcp -m set --match-set force_ru dst -m set --match-set ru_direct_tcp_ports dst -j RETURN"
     printf '%s\n' "-A $CHAIN -p tcp -m set --match-set ru dst -m set --match-set ru_direct_tcp_ports dst -j RETURN"
-    if [[ "$proxy_ready" == true && "$PROXY_UDP_MODE" == direct ]]; then
+    if [[ "$PROXY_SCOPE" == all && "$proxy_ready" == true && "$PROXY_UDP_MODE" == direct ]]; then
         printf '%s\n' "-A $CHAIN -p udp -m set --match-set force_ru dst -j RETURN"
         printf '%s\n' "-A $CHAIN -p udp -m set --match-set ru dst -j RETURN"
     fi
-    if [[ "$proxy_ready" == true ]]; then
+    if [[ "$PROXY_SCOPE" == all && "$proxy_ready" == true ]]; then
         printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j MARK --set-xmark $RU_MARK/0xffffffff"
         printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j RETURN"
         printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j MARK --set-xmark $RU_MARK/0xffffffff"
         printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j RETURN"
     else
+        # Область selected или прокси не работает: российские сети выходят с ENTRY.
         printf '%s\n' "-A $CHAIN -m set --match-set force_ru dst -j RETURN"
         printf '%s\n' "-A $CHAIN -m set --match-set ru dst -j RETURN"
     fi
@@ -204,6 +266,7 @@ for index in "${!CLIENT_IFS[@]}"; do
             delete_all mangle FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
         done
         delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
+        remove_proxy_udp_reject "$client_if" "$client_subnet"
         continue
     fi
 
@@ -230,6 +293,11 @@ for index in "${!CLIENT_IFS[@]}"; do
         delete_all mangle FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
         iptables -w 10 -t mangle -A FORWARD "${mss_args[@]}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     done
+
+    remove_proxy_udp_reject "$client_if" "$client_subnet"
+    if [[ "$proxy_ready" == true && "$PROXY_UDP_MODE" == direct ]]; then
+        add_proxy_udp_reject "$client_if" "$client_subnet"
+    fi
 
     delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
     iptables -w 10 -I FORWARD 1 -i "$client_if" -o "$client_if" -j DROP

@@ -70,7 +70,10 @@ if [[ -f "$ru_dot_config" ]]; then
     echo 'Источник: зоны .ru и .рф, списки ru-domain и entry-domain'
     printf 'Режим RU DNS: DoT напрямую с ENTRY · зон: %s · исключений se-domain: %s · тест: %s\n' \
         "$ru_zones" "$ru_exceptions" "$(query_state {{ entry_dns_default_port }} yandex.ru)"
-elif [[ -f "$doh_config" ]]; then
+fi
+# С RU-прокси в области selected есть оба пути: российские зоны идут в DoT напрямую,
+# имена proxy-domain - в DoH через прокси. Поэтому разделы показываются независимо.
+if [[ -f "$doh_config" ]]; then
     printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
     jq -r '
       .dns.servers[] | select(.tag == "yandex-doh-ru") |
@@ -79,18 +82,23 @@ elif [[ -f "$doh_config" ]]; then
     [[ -e "$doh_override" ]] && echo 'Источник: локальное переопределение doh-switch' || echo 'Источник: зашифрованный inventory'
     if systemctl is-active --quiet {{ sing_box_service_name | quote }} &&
             [[ ! -e "$disabled_flag" && ! -e "$manual_flag" ]]; then
+{% if (entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected' %}
+        printf 'Режим DoH: через SOCKS5 для имён proxy-domain · тест: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
+{% else %}
         printf 'Режим RU DNS: DoH через SOCKS5 · тест: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
+{% endif %}
     else
         echo 'Режим RU DNS: резервный DoT через ENTRY'
     fi
-else
+elif [[ ! -f "$ru_dot_config" ]]; then
     printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
     echo 'DoH не настроен: RU-прокси не выбран при установке.'
     echo 'Режим RU DNS: серверы DoT по умолчанию'
 fi
 
 printf '\n%sДоменные политики%s\n' "$cyan" "$reset"
-for policy in ru-domain se-domain entry-domain; do
-    count="$(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$policy_dir/$policy" 2>/dev/null | wc -l)"
+for policy in ru-domain se-domain entry-domain proxy-domain proxy-address; do
+    # Списки proxy-* появляются после обновления каскада: отсутствие файла - ноль строк.
+    count="$( { sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$policy_dir/$policy" 2>/dev/null || true; } | wc -l)"
     printf '  %-13s %s\n' "$policy" "$count"
 done

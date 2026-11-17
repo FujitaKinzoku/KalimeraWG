@@ -13,3 +13,10 @@ entry_ru_proxy_disabled_flag: /run/awg-ru-proxy.disabled
 entry_ru_proxy_manual_disabled_flag: /var/lib/awg-routing/ru-proxy.manual-off
 entry_ru_direct_tcp_ports_file: /etc/awg/ru-direct-ports
 entry_ru_proxy_udp_mode_path: /var/lib/awg-routing/proxy-udp.mode
+# Что идёт через RU-прокси, когда он включён:
+#   all      - весь российский трафик (сети из базы и список ru-domain);
+#   selected - только домены из proxy-domain и адреса из proxy-address, а российские
+#              сети выходят напрямую с ENTRY, как без прокси.
+# Списки proxy-domain и proxy-address направляются в прокси в обеих областях.
+entry_ru_proxy_scope: all
+entry_ru_proxy_address_file: "{{ awg_domain_policy_dir | default('/etc/awg/domain-policy') }}/proxy-address"

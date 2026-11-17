@@ -64,6 +64,8 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function ru-domain { _kalimera_admin ru-domain "$@"; }
     function se-domain { _kalimera_admin se-domain "$@"; }
     function entry-domain { _kalimera_admin entry-domain "$@"; }
+    function proxy-domain { _kalimera_admin proxy-domain "$@"; }
+    function proxy-address { _kalimera_admin proxy-address "$@"; }
     function ru-proxy { _kalimera_admin ru-proxy "$@"; }
     function ru-proxy-set { _kalimera_admin ru-proxy-set "$@"; }
     function ru-direct-ports { _kalimera_admin ru-direct-ports "$@"; }

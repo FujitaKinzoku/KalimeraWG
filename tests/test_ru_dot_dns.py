@@ -638,7 +638,12 @@ class StatusPanelTests(unittest.TestCase):
         text = STATUS.read_text(encoding="utf-8")
         self.assertIn('("RU DNS", ru_dns, "INFO")', text)
         self.assertIn('ru_dns = f"Unbound DoT напрямую с ENTRY: {ru_dot}"', text)
-        self.assertIn('if CONFIG["proxy_configured"]:\n            ru_dns = f"{doh_note}: {current_doh()}"', text)
+        # DoH показывается только когда через прокси идёт весь российский трафик.
+        self.assertIn(
+            'if CONFIG["proxy_configured"] and not CONFIG["proxy_selected"]:\n'
+            '            ru_dns = f"{doh_note}: {current_doh()}"',
+            text,
+        )
 
 
 class WiringTests(unittest.TestCase):
