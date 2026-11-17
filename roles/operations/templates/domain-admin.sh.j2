@@ -204,6 +204,12 @@ if [[ ! -f "$REALITY_SE_RULE_SET" ]] || ! cmp --silent "$reality_se_tmp" "$REALI
 fi
 rm -f "$reality_se_tmp"
 {% endif %}
+# Зоны Unbound для российских имён собираются из тех же списков: в режиме без
+# RU-прокси ru-domain и entry-domain разрешает российский DoT, а se-domain остаётся
+# на серверах по умолчанию. Программа сама решает, нужен ли файл зон.
+if [[ -x /usr/local/sbin/awg-ru-dns-sync ]]; then
+    /usr/local/sbin/awg-ru-dns-sync
+fi
 completed=true
 
 if [[ "$action" == sync ]]; then

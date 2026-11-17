@@ -61,8 +61,10 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
   ENTRY or through your SOCKS5 proxy (for example, SOAX); everything else goes
   through EXIT. If the proxy fails, traffic falls back to the direct route.
 - **Leak-free DNS.** Clients use a local Unbound resolver on ENTRY; upstream
-  queries leave over DoT or DoH. DNSSEC recursion on EXIT inside the tunnel is
-  available as an option.
+  queries leave over DoT or DoH. Russian names are resolved by Yandex DNS: over
+  DoH through the proxy or, without a proxy, over DoT straight from ENTRY. All
+  other names go to DoT servers abroad. DNSSEC recursion on EXIT inside the
+  tunnel is available as an option.
 - **Profiles for every client.** `performance`, `balanced`, `masking`,
   `mobile/AWG3+` for AmneziaWG 5, and a compatibility profile for KeeneticOS 4.3.
 - **Automatic MTU.** The installer measures path MTU in both directions and
@@ -181,10 +183,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.3.2/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.4.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.3.2` release rather than the moving `main`
+The command installs the pinned `v3.4.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -196,7 +198,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.3.2 --depth 1 \
+git clone --branch v3.4.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -351,7 +353,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.3.2
+sudo git -C /root/KalimeraWG switch --detach v3.4.0
 kalimera-deploy --resume
 ```
 
@@ -378,6 +380,7 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.4.0:** the EXIT MSS is fixed (derived from the channel MTU, so full-size TCP segments no longer stall in the tunnel); Unbound serves a stale answer immediately for up to an hour after the TTL; DNS queries of VLESS clients are answered by the ENTRY resolver; without the RU proxy, Russian names are resolved by Yandex DNS over DoT straight from ENTRY; 38 warm-up names; BBR for the servers' own TCP.
 - **v3.3.2:** the DNS defaults apply on their own: an outdated Mullvad entry in the inventory is replaced by the dnscry and Digitale Gesellschaft pair; `dot-switch reset` and the status panel show the same list; the installer accepts `IP:TLS` pairs.
 - **v3.3.1:** DNS defaults are now two DoT servers instead of Mullvad (dnscry in Lithuania and Digitale Gesellschaft in Switzerland); prefetch and cache-min-ttl in Unbound; `IP:TLS` pairs in `dot-switch`; the CDN check row is split into DNS and network.
 - **v3.3.0:** `cascade-reboot` and `maintenance-time` (ENTRY only): planned

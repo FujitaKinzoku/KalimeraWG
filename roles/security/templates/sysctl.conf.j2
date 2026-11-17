@@ -14,6 +14,13 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 net.ipv4.icmp_echo_ignore_all = 1
 net.ipv4.icmp_ignore_bogus_error_responses = 1
 net.ipv4.tcp_syncookies = 1
+# TCP самого сервера: FRONT↔ENTRY (REALITY), соединения FRONT с CDN, исходящие
+# соединения sing-box. TCP клиентов завершается на их устройствах, поэтому транзит
+# этими параметрами не меняется. BBR устойчивее к потерям, после паузы не сбрасывает
+# окно, MTU probing защищает от чёрных дыр PMTU там, где ICMP режется по пути.
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
 # Защита ядра без запрета DKMS, TUN, трассировки PMTU и сетевого администрирования.
 kernel.kptr_restrict = 1
 kernel.dmesg_restrict = 1

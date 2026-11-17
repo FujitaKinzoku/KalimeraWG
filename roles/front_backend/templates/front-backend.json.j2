@@ -101,6 +101,18 @@
         "inbound": ["front-reality-in"],
         "action": "sniff"
       },
+{#
+   DNS-запросы клиентов VLESS отвечает резолвер ENTRY: тот же dnsmasq и кэш
+   Unbound, что и у клиентов AmneziaWG (см. правило в разделе dns ниже). Без
+   перехвата запрос уходил дальше, к резолверу из настроек клиента: мимо кэша и
+   прогрева ENTRY и открытым текстом с адреса ENTRY или EXIT. Правило стоит
+   сразу после sniff: протокол dns известен только после него.
+#}
+      {
+        "inbound": ["front-reality-in"],
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
       {
         "inbound": ["front-reality-in"],
         "rule_set": ["front-se-domains"],
@@ -131,6 +143,13 @@
         "tag": "entry-split-dns",
         "server": "{{ entry_client_listen_address }}",
         "server_port": 53
+      }
+    ],
+    "rules": [
+      {
+        "inbound": ["front-reality-in"],
+        "action": "route",
+        "server": "entry-split-dns"
       }
     ],
     "final": "bootstrap-unbound",

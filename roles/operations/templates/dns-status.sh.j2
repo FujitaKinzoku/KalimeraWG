@@ -9,6 +9,7 @@ case "${1:-}" in
 esac
 
 readonly dot_config=/etc/unbound/unbound.conf.d/90-awg-dot.conf
+readonly ru_dot_config={{ ((entry_unbound_config_dir | default('/etc/unbound/unbound.conf.d')) ~ '/91-awg-ru-dot.conf') | quote }}
 readonly doh_config={{ sing_box_config_path | quote }}
 readonly dot_override={{ entry_dns_dot_override_path | quote }}
 readonly doh_override={{ sing_box_dns_override_path | quote }}
@@ -55,8 +56,22 @@ grep -E '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null |
     sed -E 's/^[[:space:]]*forward-addr:[[:space:]]*/  /' || true
 [[ -e "$dot_override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
 
-printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
-if [[ -f "$doh_config" ]]; then
+if [[ -f "$ru_dot_config" ]]; then
+    # Режим без RU-прокси: файл зон собирает awg-ru-dns-sync. У всех российских зон
+    # серверы одинаковы, поэтому показаны серверы первой. Зоны после строки про
+    # se-domain - исключения, они остаются на серверах DoT по умолчанию.
+    printf '\n%sDoT российских имён%s\n' "$cyan" "$reset"
+    awk '/^forward-zone:/ { zones++ } zones == 1 && $1 == "forward-addr:" { print "  " $2 }' "$ru_dot_config"
+    read -r ru_zones ru_exceptions < <(awk '
+        /^# Имена se-domain/ { tail = 1 }
+        /^forward-zone:/ { if (tail) excluded++; else russian++ }
+        END { printf "%d %d\n", russian, excluded }
+    ' "$ru_dot_config")
+    echo 'Источник: зоны .ru и .рф, списки ru-domain и entry-domain'
+    printf 'Режим RU DNS: DoT напрямую с ENTRY · зон: %s · исключений se-domain: %s · тест: %s\n' \
+        "$ru_zones" "$ru_exceptions" "$(query_state {{ entry_dns_default_port }} yandex.ru)"
+elif [[ -f "$doh_config" ]]; then
+    printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
     jq -r '
       .dns.servers[] | select(.tag == "yandex-doh-ru") |
       "  https://\(.tls.server_name):\(.server_port)\(.path) [адрес \(.server)]"
@@ -69,7 +84,9 @@ if [[ -f "$doh_config" ]]; then
         echo 'Режим RU DNS: резервный DoT через ENTRY'
     fi
 else
+    printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
     echo 'DoH не настроен: RU-прокси не выбран при установке.'
+    echo 'Режим RU DNS: серверы DoT по умолчанию'
 fi
 
 printf '\n%sДоменные политики%s\n' "$cyan" "$reset"

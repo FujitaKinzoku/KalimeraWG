@@ -12,6 +12,7 @@ readonly entry_dns_port={{ (entry_dns_default_port | default(5353)) | int }}
 readonly entry_dns_ru_port={{ (entry_dns_ru_port | default(5354)) | int }}
 readonly entry_exit_iface={{ (entry_exit_interface | default('')) | quote }}
 readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
+readonly ru_dot_active={{ 'true' if (entry_dns_ru_dot_active | default(false) | bool) else 'false' }}
 readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
 readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
@@ -151,6 +152,8 @@ check_dns() {
     local route_ru dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
     if [[ "$ru_state" == active ]]; then
         route_ru='маршрут: RU DoH через RU-прокси'
+    elif [[ "$ru_dot_active" == true ]]; then
+        route_ru='маршрут: Unbound → российский DoT напрямую с ENTRY (RU-прокси не используется)'
     else
         route_ru='маршрут: Unbound (RU DoH недоступен, RU-прокси выключен)'
     fi

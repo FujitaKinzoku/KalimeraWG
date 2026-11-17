@@ -61,7 +61,9 @@ KalimeraWG превращает две-три чистые VPS с Ubuntu 24.04 �
   или через ваш SOCKS5 (например, SOAX), всё остальное уходит через EXIT.
   Если прокси отказал, трафик сам переключается на прямой маршрут.
 - **DNS без утечек.** Клиенты используют локальный Unbound на ENTRY, наружу
-  запросы уходят по DoT или DoH. Можно включить DNSSEC-рекурсию на EXIT внутри
+  запросы уходят по DoT или DoH. Российские имена разрешает Yandex DNS: по DoH
+  через прокси или, без прокси, по DoT прямо с ENTRY. Остальные имена идут к
+  зарубежным серверам DoT. Можно включить DNSSEC-рекурсию на EXIT внутри
   туннеля.
 - **Профили для любых клиентов.** `performance`, `balanced`, `masking`,
   `mobile/AWG3+` для AmneziaWG 5 и совместимый профиль для KeeneticOS 4.3.
@@ -181,10 +183,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.3.2/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.4.0/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.3.2`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.4.0`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -196,7 +198,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.3.2 --depth 1 \
+git clone --branch v3.4.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -351,7 +353,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.3.2
+sudo git -C /root/KalimeraWG switch --detach v3.4.0
 kalimera-deploy --resume
 ```
 
@@ -378,6 +380,7 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.4.0:** исправлен MSS на EXIT (считается из MTU канала: полные TCP-сегменты больше не застревают в туннеле); Unbound отдаёт устаревший ответ сразу и до часа после TTL; DNS клиентов VLESS отвечает резолвер ENTRY; без RU-прокси российские имена разрешает Yandex DNS по DoT прямо с ENTRY; прогрев 38 имён; BBR для TCP серверов.
 - **v3.3.2:** DNS по умолчанию применяется сам: устаревший Mullvad в inventory заменяется парой dnscry и Digitale Gesellschaft; `dot-switch reset` и панель статуса показывают тот же список; установщик принимает пары `IP:TLS`.
 - **v3.3.1:** DNS по умолчанию - два DoT-сервера вместо Mullvad (dnscry, Литва, и Digitale Gesellschaft, Швейцария); prefetch и cache-min-ttl в Unbound; пары `IP:TLS` в `dot-switch`; строка CDN разбита на DNS и сеть.
 - **v3.3.0:** `cascade-reboot` и `maintenance-time` (только ENTRY): плановая

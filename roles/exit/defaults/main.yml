@@ -12,5 +12,14 @@ exit_legacy_awg_interface: awg0
 exit_wan_interface: eth0
 exit_awg_listen_port: 443
 exit_awg_mtu: 1420
-exit_tcp_mss: 1336
+# MSS TCP через межсерверный интерфейс EXIT = MTU интерфейса минус 40 байт (IP и TCP).
+# Фиксированное 1336 при MTU 1368 давало сегменты по 1376 байт, которые не проходят
+# в канал. Значение вычисляется из MTU, поэтому автоматический пересчёт MTU его не
+# ломает. Для userspace-движка берётся awg3_transit_effective_mtu.
+# clamp-to-pmtu здесь не годится: для направления из туннеля маршрут уходит в интернет
+# через eth0 (MTU 1500), и clamp ничего не урежет.
+exit_tcp_mss_effective: >-
+  {{ ((awg3_transit_effective_mtu
+       if (awg3_transit_enabled | default(false) | bool)
+       else (awg3_shared_effective_mtu | default(exit_awg_mtu, true))) | int) - 40 }}
 awg3_transit_enabled: false

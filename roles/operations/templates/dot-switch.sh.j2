@@ -136,6 +136,9 @@ cleanup() {
         else
             rm -f "$override"
         fi
+        if [[ -x /usr/local/sbin/awg-ru-dns-sync ]]; then
+            /usr/local/sbin/awg-ru-dns-sync --no-restart >/dev/null 2>&1 || true
+        fi
         systemctl restart unbound.service >/dev/null 2>&1 || true
         echo 'Изменение DoT отменено; предыдущая конфигурация восстановлена.' >&2
     fi
@@ -155,6 +158,11 @@ if [[ "$action" == reset ]]; then
     rm -f "$override"
 else
     install -m 0600 "$override_tmp" "$override"
+fi
+# Имена se-domain внутри российских зон повторяют серверы DoT по умолчанию, поэтому
+# файл зон пересобирается до перезапуска: одного перезапуска хватает на оба файла.
+if [[ -x /usr/local/sbin/awg-ru-dns-sync ]]; then
+    /usr/local/sbin/awg-ru-dns-sync --no-restart
 fi
 systemctl restart unbound.service
 dig +short +time=5 +tries=1 @127.0.0.1 -p "$dns_port" example.com A |
