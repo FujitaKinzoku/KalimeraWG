@@ -67,12 +67,13 @@ if [[ -f "$ru_dot_config" ]]; then
         /^forward-zone:/ { if (tail) excluded++; else russian++ }
         END { printf "%d %d\n", russian, excluded }
     ' "$ru_dot_config")
-    echo 'Источник: зоны .ru и .рф, списки ru-domain и entry-domain'
+    echo 'Источник: зоны .ru и .рф, списки ru-domain и entry-domain{{ ', proxy-domain' if (entry_ru_proxy_enabled | default(false) | bool) else '' }}'
     printf 'Режим RU DNS: DoT напрямую с ENTRY · зон: %s · исключений se-domain: %s · тест: %s\n' \
         "$ru_zones" "$ru_exceptions" "$(query_state {{ entry_dns_default_port }} yandex.ru)"
 fi
-# С RU-прокси в области selected есть оба пути: российские зоны идут в DoT напрямую,
-# имена proxy-domain - в DoH через прокси. Поэтому разделы показываются независимо.
+# С RU-прокси в области selected настроены оба пути, но клиенты пользуются одним:
+# российские зоны и имена proxy-domain идут в DoT напрямую с ENTRY. DoH через прокси
+# остаётся настроенным и проверяется. Поэтому разделы показываются независимо.
 if [[ -f "$doh_config" ]]; then
     printf '\n%sDoH российских доменов%s\n' "$cyan" "$reset"
     jq -r '
@@ -83,7 +84,7 @@ if [[ -f "$doh_config" ]]; then
     if systemctl is-active --quiet {{ sing_box_service_name | quote }} &&
             [[ ! -e "$disabled_flag" && ! -e "$manual_flag" ]]; then
 {% if (entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected' %}
-        printf 'Режим DoH: через SOCKS5 для имён proxy-domain · тест: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
+        printf 'Режим DoH: клиентами не используется, имена proxy-domain разрешает DoT с ENTRY · тест через SOCKS5: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
 {% else %}
         printf 'Режим RU DNS: DoH через SOCKS5 · тест: %s\n' "$(query_state {{ entry_dns_ru_port }} yandex.ru)"
 {% endif %}

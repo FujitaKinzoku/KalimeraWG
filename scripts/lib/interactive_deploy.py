@@ -3474,7 +3474,7 @@ def show_deployment_summary(production: Path) -> None:
                 ("Через RU-прокси", "только списки proxy-domain и proxy-address → SOCKS5/TUN"),
                 (
                     "RU DNS",
-                    "российский DoT напрямую с ENTRY; имена proxy-domain - DoH через прокси",
+                    "российский DoT напрямую с ENTRY, включая имена proxy-domain",
                 ),
             ]
         )

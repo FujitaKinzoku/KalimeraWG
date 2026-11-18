@@ -71,6 +71,19 @@
       - entry_dns_effective_dot_upstreams | length >= 1
     fail_msg: "Для DNS ENTRY требуются проверенные listeners, upstream-серверы и доменные политики"
 
+- name: "Проверка: служебные имена шифрованного DNS клиентов"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_dns_client_doh_names is sequence
+      - entry_dns_client_doh_names is not string
+      - >-
+        entry_dns_client_doh_names
+        | reject('match', '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+        | list | length == 0
+    fail_msg: "entry_dns_client_doh_names: имена записываются строчными буквами ASCII, без точки в конце"
+  when: entry_dns_client_doh_fallback_enabled | bool
+
 - name: "Проверка: DNS ENTRY сервера - этап 2b"
   ansible.builtin.assert:
     quiet: true

@@ -54,6 +54,7 @@ managed_files() {
 {% endif %}
 {% if awg_node_role == 'entry' %}
 /etc/dnsmasq.d/50-awg-base.conf
+/etc/dnsmasq.d/64-awg-client-doh.conf
 /etc/systemd/resolved.conf.d/60-kalimerawg.conf
 /etc/unbound/unbound.conf.d/90-awg-dot.conf
 /usr/local/sbin/awg-entry-routing

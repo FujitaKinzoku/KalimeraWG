@@ -96,7 +96,7 @@ entry_dns_dot_upstreams_resolved: "{{ entry_dns_default_dot_upstreams if ((entry
 # умолчанию. Остальные имена идут к серверам DoT по умолчанию, как и раньше. С
 # RU-прокси в области all этот путь не используется: там российский DoH идёт через
 # прокси. В области selected российские сети выходят напрямую с ENTRY, поэтому путь
-# работает так же, как без прокси; через прокси разрешаются только имена proxy-domain.
+# работает так же, как без прокси, и имена proxy-domain разрешаются им же.
 # Зоны собирает awg-ru-dns-sync в файл 91-awg-ru-dot.conf. Значение false возвращает
 # прежнее поведение: все имена через серверы DoT по умолчанию.
 entry_dns_ru_dot_enabled: true
@@ -111,6 +111,44 @@ entry_dns_ru_dot_upstreams:
 # Российское имя для проверки после сборки зон и в awg-health.
 entry_dns_ru_dot_probe_name: yandex.ru
 entry_dns_ru_dot_active: "{{ (entry_dns_ru_dot_enabled | bool) and ((not (entry_ru_proxy_enabled | default(false) | bool)) or ((entry_ru_proxy_scope | default('all')) == 'selected')) }}"
+# Шифрованный DNS клиентов (DoH). Браузер, который видит в системе адрес известного
+# публичного резолвера (приложение AmneziaVPN ставит 1.1.1.1), сам переходит на DoH
+# и спрашивает имена у этого резолвера, а не у ENTRY. Тогда на него не действуют
+# списки ru-domain, se-domain, entry-domain и proxy-domain, а запрос уходит через
+# EXIT. Чтобы браузер остался на резолвере ENTRY, dnsmasq отвечает "нет такого
+# имени" на служебные имена DoH: браузер в автоматическом режиме возвращается к
+# обычному DNS. DoT клиентов (порт 853) каскад отклоняет давно.
+# Ограничения: DoH, заданный в клиенте IP-адресом, так не остановить; браузер, где
+# DoH включён в строгом режиме с одним из этих провайдеров, перестанет разрешать
+# имена, пока VPN включён. Значение false отключает эти ответы.
+entry_dns_client_doh_fallback_enabled: true
+entry_dns_client_doh_names:
+  # Сигнальное имя Firefox: без адреса в ответе он не включает DoH по умолчанию.
+  - use-application-dns.net
+  # Обнаружение шифрованного резолвера системой (DDR, RFC 9462).
+  - resolver.arpa
+  # Cloudflare: chrome., mozilla., security., family.
+  - cloudflare-dns.com
+  # Google
+  - dns.google
+  # Quad9
+  - dns.quad9.net
+  - dns9.quad9.net
+  - dns10.quad9.net
+  - dns11.quad9.net
+  # OpenDNS
+  - doh.opendns.com
+  - doh.familyshield.opendns.com
+  # AdGuard
+  - dns.adguard-dns.com
+  - unfiltered.adguard-dns.com
+  - family.adguard-dns.com
+  - dns.adguard.com
+  # NextDNS: chromium., firefox.
+  - dns.nextdns.io
+  # CleanBrowsing, DNS.SB
+  - doh.cleanbrowsing.org
+  - doh.dns.sb
 entry_domain_files_enabled: false
 entry_dnsmasq_managed_files:
   - name: 50-awg-base.conf
@@ -119,3 +157,5 @@ entry_dnsmasq_managed_files:
     template: 60-domain-policy.conf.j2
   - name: 62-force-entry.conf
     template: 62-force-entry.conf.j2
+  - name: 64-awg-client-doh.conf
+    template: 64-awg-client-doh.conf.j2

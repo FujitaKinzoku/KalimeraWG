@@ -1,0 +1,12 @@
+{% if entry_dns_client_doh_fallback_enabled | default(true) | bool %}
+# Служебные имена шифрованного DNS (DoH) браузеров и систем: ответ "нет такого
+# имени". Браузер в автоматическом режиме остаётся на резолвере ENTRY, и к нему
+# применяются списки доменов. Список: entry_dns_client_doh_names, выключение:
+# entry_dns_client_doh_fallback_enabled: false.
+{% for name in entry_dns_client_doh_names | default([]) %}
+server=/{{ name }}/
+{% endfor %}
+{% else %}
+# Ответы на служебные имена шифрованного DNS выключены
+# (entry_dns_client_doh_fallback_enabled: false).
+{% endif %}
