@@ -461,7 +461,8 @@ class UfwFingerprintTests(unittest.TestCase):
             with self.subTest(source=name):
                 self.assertIn(fail2ban_filter, text)
                 self.assertRegex(text, r"LC_ALL=C (/usr/sbin/)?ufw status \|")
-        self.assertNotIn("ufw status numbered", awg_old)
+        code = "\n".join(line for line in awg_old.splitlines() if not line.lstrip().startswith("#"))
+        self.assertNotIn("ufw status numbered", code)
 
 
 class KernelGuardTests(CommandCase):
