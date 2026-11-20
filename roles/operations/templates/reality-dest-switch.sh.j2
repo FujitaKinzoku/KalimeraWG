@@ -191,11 +191,13 @@ fi
 
 if [[ "$service_was_active" == true ]]; then
     systemctl restart "$service"
+    # Вывод ss читается целиком: при двух слушающих сокетах grep -q в конвейере
+    # закрыл бы канал после первой строки, и при pipefail порт считался бы закрытым.
     for _ in {1..15}; do
-        ss -H -ltn "( sport = :${reality_port} )" | grep -q . && break
+        [[ -z "$(ss -H -ltn "( sport = :${reality_port} )" 2>/dev/null || true)" ]] || break
         sleep 1
     done
-    ss -H -ltn "( sport = :${reality_port} )" | grep -q . || {
+    [[ -n "$(ss -H -ltn "( sport = :${reality_port} )" 2>/dev/null || true)" ]] || {
         echo "REALITY-инбаунд не начал слушать порт ${reality_port} после перезапуска." >&2
         exit 1
     }

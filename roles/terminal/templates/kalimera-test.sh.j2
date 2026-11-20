@@ -34,8 +34,11 @@ fi
 case "$role" in
     entry)
         if systemctl is-enabled --quiet kalimera-front-backend.service 2>/dev/null; then
+            # Текст юнита читается целиком: оборванный конвейер под pipefail превратил бы
+            # найденную ссылку на front-backend.json в "ссылки нет".
+            sing_box_unit="$(systemctl cat sing-box.service 2>/dev/null || true)"
             if systemctl is-active --quiet kalimera-front-backend.service &&
-                ! systemctl cat sing-box.service 2>/dev/null | grep -Fq 'front-backend.json'; then
+                ! grep -Fq 'front-backend.json' <<<"$sing_box_unit"; then
                 printf 'OK   FRONT backend изолирован от RU-прокси\n'
             else
                 printf 'FAIL FRONT backend не изолирован от RU-прокси\n'

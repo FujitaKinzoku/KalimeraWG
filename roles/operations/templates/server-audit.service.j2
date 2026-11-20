@@ -9,11 +9,19 @@ User=root
 Group=root
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Аудит должен видеть то же, что и при запуске администратором, иначе исправный
+# сервер по расписанию считается неисправным:
+# - /root и /home: ссылки историй root на /dev/null, authorized_keys root и
+#   рабочего администратора. С ProtectHome=true этих файлов для службы нет, а
+#   посторонний ключ root не был бы найден. Каталоги видны только для чтения;
+# - /usr/lib/modules: проверка модуля AmneziaWG читает индекс модулей ядра, а
+#   ProtectKernelModules=true делает каталог недоступным, поэтому здесь его нет;
+# - /run: nginx -t и служебные проверки открывают там файлы.
+ProtectHome=read-only
 ProtectSystem=strict
+ReadWritePaths=/run
 ProtectClock=true
 ProtectControlGroups=true
-ProtectKernelModules=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 UMask=0077

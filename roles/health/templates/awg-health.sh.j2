@@ -193,9 +193,16 @@ check() { run_check FAIL "$@"; }
 check_minor() { run_check WARN "$@"; }
 
 run_check() {
-    local severity="$1" label="$2"
+    local severity="$1" label="$2" rc=0
     shift 2
-    if "$@" >/dev/null 2>&1; then
+    # Проверки написаны как "команда | grep -q": важен только результат grep. При
+    # pipefail команда, которой grep закрыл канал раньше времени, считалась бы
+    # ошибкой, и исправная система давала бы FAIL. На время проверки pipefail
+    # выключается; итог конвейера - результат его последней команды.
+    set +o pipefail
+    "$@" >/dev/null 2>&1 || rc=$?
+    set -o pipefail
+    if (( rc == 0 )); then
         check_passed "$label"
     else
         check_failed "$severity" "$label" "$(health_hint "$label" "$@")"
@@ -601,11 +608,23 @@ client_doh_names_refused() {
 }
 
 # dig возвращает 0 и при SERVFAIL, а при таймауте пишет ошибку в stdout,
-# поэтому успехом считается только полученный IPv4-адрес.
+# поэтому успехом считается только полученный IPv4-адрес. $1 - резолвер,
+# $2 - имя, $3 - порт (по умолчанию 53).
 dns_resolves_a() {
     local answer
-    answer="$(dig +short +time=5 +tries=1 "@$1" "$2" A 2>/dev/null)" || return 1
+    local -a port_args=()
+    [[ -z "${3:-}" ]] || port_args=(-p "$3")
+    answer="$(dig +short +time=5 +tries=1 "@$1" "${port_args[@]}" "$2" A 2>/dev/null)" || return 1
     grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"
+}
+
+# Набор российских сетей есть и наполнен. Пустой набор означал бы, что все
+# российские назначения молча уходят на EXIT, а проверка существования набора
+# этого не видит.
+ru_set_is_populated() {
+    local entries
+    entries="$(ipset list ru -terse 2>/dev/null | sed -n 's/^Number of entries: //p')"
+    [[ "$entries" =~ ^[0-9]+$ ]] && (( entries >= {{ entry_ru_zone_min_networks | default(1000) | int }} ))
 }
 
 ufw_interserver_restricted() {
@@ -846,8 +865,8 @@ check_minor 'синтаксис dnsmasq' dnsmasq --test
 check_minor 'синтаксис Unbound' unbound-checkconf
 check_minor 'DNS-запросы не журналируются и промежуточные кэши отключены' dns_no_logs_policy_is_active
 check_minor 'sing-box не журналирует активность и не кэширует DNS' sing_box_no_logs_policy_is_active
-check 'основной DNS по UDP' dig +time=3 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} example.com A
-check 'клиентский DNS по UDP' dig +time=3 +tries=1 @{{ entry_client_listen_address }} example.com A
+check 'основной DNS по UDP' dns_resolves_a 127.0.0.1 example.com {{ entry_dns_default_port | int }}
+check 'клиентский DNS по UDP' dns_resolves_a {{ entry_client_listen_address | quote }} example.com
 check 'AAAA подавляются для предотвращения обхода IPv4-каскада' aaaa_filtered
 {% if (entry_dns_client_doh_fallback_enabled | default(true) | bool) and ('use-application-dns.net' in (entry_dns_client_doh_names | default(['use-application-dns.net']))) %}
 check 'служебные имена DoH не разрешаются: браузеры клиентов остаются на DNS ENTRY' client_doh_names_refused
@@ -857,12 +876,12 @@ check 'российские имена разрешает российский D
 {% endif %}
 {% if entry_legacy_client_available | default(false) | bool %}
 if systemctl is-active --quiet awg-quick@{{ entry_legacy_client_interface }}.service; then
-    check 'DNS совместимых клиентов по UDP' dig +time=3 +tries=1 @{{ entry_legacy_client_listen_address }} example.com A
+    check 'DNS совместимых клиентов по UDP' dns_resolves_a {{ entry_legacy_client_listen_address | quote }} example.com
 fi
 {% endif %}
 {% if entry_mobile_client_available | default(false) | bool %}
 if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
-    check 'DNS мобильных клиентов по UDP' dig +time=3 +tries=1 @{{ entry_mobile_client_listen_address }} example.com A
+    check 'DNS мобильных клиентов по UDP' dns_resolves_a {{ entry_mobile_client_listen_address | quote }} example.com
 fi
 {% endif %}
 check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
@@ -871,7 +890,7 @@ check 'mark 0x1 направляется через EXIT сервер' route_use
 check_minor 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
 check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru
-check 'ipset российских сетей' ipset list ru
+check 'ipset российских сетей' ru_set_is_populated
 check 'ipset force_proxy' ipset list force_proxy
 check 'ipset force_proxy_net' ipset list force_proxy_net
 check 'цепочка маршрутизации ENTRY сервера' iptables -w 10 -t mangle -C PREROUTING -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -j AWG_RU_PROXY
@@ -947,7 +966,7 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
     check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
     check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
     check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
-    check 'прослушивание российского DoH' dig +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_ru_port | int }} yandex.ru A
+    check 'прослушивание российского DoH' dns_resolves_a 127.0.0.1 yandex.ru {{ entry_dns_ru_port | int }}
     check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked {{ entry_ru_mark | quote }}
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" != proxy ]]; then
@@ -1052,7 +1071,7 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 {% endif %}
 {% if entry_dns_default_via_exit | default(false) | bool %}
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
-check 'рекурсивный DNS EXIT сервера отвечает' dig +time=3 +tries=1 @{{ exit_awg_address | ansible.utils.ipaddr('address') }} example.com A
+check 'рекурсивный DNS EXIT сервера отвечает' dns_resolves_a {{ exit_awg_address | ansible.utils.ipaddr('address') | quote }} example.com
 {% endif %}
 {% elif awg_node_role == 'front' %}
 nginx_no_logs_policy_is_active() {

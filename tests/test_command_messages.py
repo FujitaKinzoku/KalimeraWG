@@ -276,6 +276,159 @@ class PipelineTests(unittest.TestCase):
             self.assertNotRegex(code, r"\|\s*\n?\s*grep -[A-Za-z]*q", path.name)
 
 
+HEALTH = ROOT / "roles" / "health" / "templates" / "awg-health.sh.j2"
+AUDIT = TEMPLATES / "server-audit.sh.j2"
+
+
+def shell_function(path: Path, name: str) -> str:
+    """Текст функции из шаблона; подстановки Jinja заменяются числом 1000."""
+    import re
+
+    text = path.read_text(encoding="utf-8")
+    start = text.index(f"{name}() {{")
+    source = text[start:text.index("\n}\n", start) + 3]
+    return re.sub(r"\{\{[^}]*\}\}", "1000", source)
+
+
+class CheckRunnerTests(CommandCase):
+    """Проверки вида "команда | grep -q" не дают ложный отказ под pipefail."""
+
+    # seq пишет много строк, grep -q выходит после первой: seq получает SIGPIPE.
+    NOISY = "noisy() { seq 1 400000 | grep -q '^1$'; }\n"
+
+    def run_script(self, body: str) -> str:
+        script = self.dir / "probe.sh"
+        script.write_text("#!/usr/bin/env bash\nset -Eeuo pipefail\n" + body, encoding="utf-8")
+        result = self.execute(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_pipeline_without_the_runner_fails_under_pipefail(self) -> None:
+        # Контроль: именно этот отказ и устраняет обёртка проверок.
+        output = self.run_script(self.NOISY + "if noisy; then echo PASS; else echo FAIL; fi\n")
+        self.assertEqual(output, "FAIL\n")
+
+    def test_health_runner_takes_the_result_of_the_last_command(self) -> None:
+        output = self.run_script(
+            'check_passed() { echo "PASS $1"; }\ncheck_failed() { echo "FAIL $2"; }\nhealth_hint() { :; }\n'
+            + shell_function(HEALTH, "run_check")
+            + self.NOISY
+            + "absent() { seq 1 400000 | grep -q 'нет такой строки'; }\n"
+            "run_check FAIL 'найдено' noisy\nrun_check FAIL 'не найдено' absent\n"
+            "[[ -o pipefail ]] && echo 'pipefail включён'\n"
+        )
+        self.assertEqual(output, "PASS найдено\nFAIL не найдено\npipefail включён\n")
+
+    def test_audit_runner_takes_the_result_of_the_last_command(self) -> None:
+        output = self.run_script(
+            shell_function(AUDIT, "audit_probe")
+            + self.NOISY
+            + "if audit_probe noisy; then echo PASS; else echo FAIL; fi\n"
+            "if audit_probe false; then echo PASS; else echo FAIL; fi\n"
+            "[[ -o pipefail ]] && echo 'pipefail включён'\n"
+        )
+        self.assertEqual(output, "PASS\nFAIL\npipefail включён\n")
+
+
+class HealthProbeTests(CommandCase):
+    def verdict(self, function: str, call: str, tool: str, tool_body: str) -> str:
+        fake = self.fakebin / tool
+        fake.write_text("#!/usr/bin/env bash\n" + tool_body, encoding="utf-8")
+        fake.chmod(0o755)
+        script = self.dir / "probe.sh"
+        script.write_text(
+            "#!/usr/bin/env bash\nset -Eeuo pipefail\n"
+            + shell_function(HEALTH, function)
+            + f"\nif {call}; then echo PASS; else echo FAIL; fi\n",
+            encoding="utf-8",
+        )
+        result = self.execute(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_dns_check_needs_an_address_not_just_an_answer(self) -> None:
+        # dig возвращает 0 и при SERVFAIL: прежняя проверка "dig ... A" проходила,
+        # когда резолвер отвечал ошибкой на каждый запрос.
+        arguments = shlex.quote(str(self.dir / "dig-arguments.txt"))
+        record = f'printf \'%s\\n\' "$*" >{arguments}\n'
+        self.assertEqual(
+            self.verdict("dns_resolves_a", "dns_resolves_a 127.0.0.1 example.com 5353", "dig", record + "echo 93.184.216.34\n"),
+            "PASS",
+        )
+        self.assertIn("@127.0.0.1 -p 5353 example.com A", (self.dir / "dig-arguments.txt").read_text(encoding="utf-8"))
+        self.assertEqual(
+            self.verdict("dns_resolves_a", "dns_resolves_a 10.66.0.1 example.com", "dig", record + "echo 93.184.216.34\n"),
+            "PASS",
+        )
+        self.assertNotIn(" -p ", (self.dir / "dig-arguments.txt").read_text(encoding="utf-8"))
+        # SERVFAIL: dig +short ничего не печатает и завершается успешно.
+        self.assertEqual(
+            self.verdict("dns_resolves_a", "dns_resolves_a 127.0.0.1 example.com 5353", "dig", "exit 0\n"), "FAIL"
+        )
+
+    def test_dns_checks_use_the_strict_probe(self) -> None:
+        text = HEALTH.read_text(encoding="utf-8")
+        for label in (
+            "основной DNS по UDP",
+            "клиентский DNS по UDP",
+            "DNS мобильных клиентов по UDP",
+            "прослушивание российского DoH",
+            "рекурсивный DNS EXIT сервера отвечает",
+        ):
+            line = next(row for row in text.splitlines() if row.strip().startswith(f"check '{label}'"))
+            self.assertIn(" dns_resolves_a ", line)
+
+    def test_empty_russian_network_set_is_a_failure(self) -> None:
+        # Набор существует, но пуст: все российские назначения молча ушли бы на EXIT.
+        header = "Name: ru\nType: hash:net\nNumber of entries: {count}\n"
+        populated = "cat <<'EOF'\n" + header.format(count=12345) + "EOF\n"
+        empty = "cat <<'EOF'\n" + header.format(count=0) + "EOF\n"
+        self.assertEqual(self.verdict("ru_set_is_populated", "ru_set_is_populated", "ipset", populated), "PASS")
+        self.assertEqual(self.verdict("ru_set_is_populated", "ru_set_is_populated", "ipset", empty), "FAIL")
+        self.assertEqual(self.verdict("ru_set_is_populated", "ru_set_is_populated", "ipset", "exit 1\n"), "FAIL")
+        text = HEALTH.read_text(encoding="utf-8")
+        self.assertIn("check 'ipset российских сетей' ru_set_is_populated\n", text)
+
+
+class AuditEnvironmentTests(unittest.TestCase):
+    """Аудит по расписанию видит то же, что при запуске администратором.
+
+    Проверено на systemd 255: с ProtectHome=true служба не видит файлы в /root и
+    /home, с ProtectKernelModules=true не читается /usr/lib/modules, а при
+    ProtectSystem=strict без ReadWritePaths нет записи в /run. Аудит в такой среде
+    не проходил на исправном сервере.
+    """
+
+    def unit(self, name: str) -> list[str]:
+        text = (TEMPLATES / name).read_text(encoding="utf-8")
+        return [line for line in text.splitlines() if line and not line.startswith("#")]
+
+    def test_scheduled_audit_can_read_what_it_checks(self) -> None:
+        for name in ("server-audit.service.j2", "telegram-monitor.service.j2"):
+            with self.subTest(unit=name):
+                lines = self.unit(name)
+                self.assertIn("ProtectHome=read-only", lines)
+                self.assertNotIn("ProtectHome=true", lines)
+                self.assertNotIn("ProtectKernelModules=true", lines)
+                paths = next(line for line in lines if line.startswith("ReadWritePaths="))
+                self.assertIn("/run", paths.split("=", 1)[1].split())
+                self.assertIn("ProtectSystem=strict", lines)
+
+    def test_checks_that_need_those_paths_exist(self) -> None:
+        # Если проверки изменятся, требования к среде нужно пересмотреть вместе с ними.
+        audit = AUDIT.read_text(encoding="utf-8")
+        health = HEALTH.read_text(encoding="utf-8")
+        self.assertIn("/root/.bash_history", audit)
+        self.assertIn("security_root_authorized_keys_path", audit)
+        self.assertIn("modprobe -n amneziawg", health)
+        self.assertIn("verify", audit)
+
+    def test_ppa_key_check_does_not_depend_on_the_root_home(self) -> None:
+        source = shell_function(AUDIT, "ppa_key_isolated")
+        self.assertIn('--homedir "$gnupg_home"', source)
+        self.assertNotRegex(source, r"\|\s*\n?\s*grep")
+
+
 class KernelGuardTests(CommandCase):
     def test_kernel_list_is_separated_by_comma_and_space(self) -> None:
         text = (TEMPLATES / "awg-kernel-guard.sh.j2").read_text(encoding="utf-8")

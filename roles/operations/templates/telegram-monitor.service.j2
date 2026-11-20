@@ -10,13 +10,18 @@ User=root
 Group=root
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Мониторинг запускает server-audit, и тот должен видеть то же, что при запуске
+# администратором: /root и /home (ссылки историй, authorized_keys), индекс модулей
+# ядра в /usr/lib/modules и /run. С ProtectHome=true и ProtectKernelModules=true
+# аудит не проходил на исправном сервере: состояние навсегда оставалось "ошибка",
+# и уведомления о настоящих изменениях не приходили. Подробности - в
+# server-audit.service.
+ProtectHome=read-only
 ProtectSystem=strict
 ReadOnlyPaths={{ awg_telegram_monitor_env_path }}
-ReadWritePaths={{ awg_telegram_monitor_state_dir }}
+ReadWritePaths={{ awg_telegram_monitor_state_dir }} /run
 ProtectClock=true
 ProtectControlGroups=true
-ProtectKernelModules=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 UMask=0077

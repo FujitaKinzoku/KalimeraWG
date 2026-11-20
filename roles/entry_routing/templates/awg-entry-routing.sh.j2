@@ -40,8 +40,9 @@ readonly PROXY_ADDRESS_FILE={{ entry_ru_proxy_address_file | default('/etc/awg/d
 readonly -a PROXY_SETS=(force_proxy force_proxy_net)
 
 interface_is_up() {
-    ip -o link show dev "$1" 2>/dev/null |
-        grep -Eq '(^|[,<])UP([,>]|$)'
+    local link
+    link="$(ip -o link show dev "$1" 2>/dev/null || true)"
+    grep -Eq '(^|[,<])UP([,>]|$)' <<<"$link"
 }
 
 wait_for_interface_up() {

@@ -190,10 +190,22 @@ report_note_lines() {
 record() { record_as FAIL "$@"; }
 record_minor() { record_as WARN "$@"; }
 
+# Проверки написаны как "команда | grep -q": важен только результат grep. При
+# pipefail команда, которой grep закрыл канал раньше времени, считалась бы
+# ошибкой, и исправная система давала бы FAIL. На время проверки pipefail
+# выключается; итог конвейера - результат его последней команды.
+audit_probe() {
+    local rc=0
+    set +o pipefail
+    "$@" >/dev/null 2>&1 || rc=$?
+    set -o pipefail
+    return "$rc"
+}
+
 record_as() {
     local severity="$1" label="$2"
     shift 2
-    if "$@" >/dev/null 2>&1; then
+    if audit_probe "$@"; then
         audit_passed "$label"
     else
         audit_failed "$severity" "$label" "$(audit_hint "$label")"
@@ -216,7 +228,7 @@ record_warn_result() {
     local success_label="$1"
     local failure_label="$2"
     shift 2
-    if "$@" >/dev/null 2>&1; then
+    if audit_probe "$@"; then
         audit_passed "$success_label"
     else
         [[ "$quiet" == true ]] || report_line WARN "$failure_label"
@@ -414,10 +426,16 @@ root_authorized_keys_clean() {
 {% endif %}
 
 ppa_key_isolated() {
+    local gnupg_home keys
     grep -Fxq 'Signed-By: /etc/apt/keyrings/amnezia-ppa.asc' \
-        /etc/apt/sources.list.d/amnezia-ppa.sources &&
-        gpg --batch --show-keys --with-colons /etc/apt/keyrings/amnezia-ppa.asc |
-        grep -Fq 'fpr:::::::::75C9DD72C799870E310542E24166F2C257290828:'
+        /etc/apt/sources.list.d/amnezia-ppa.sources || return 1
+    # Свой временный каталог GnuPG: проверка не зависит от /root/.gnupg, который
+    # служба аудита видит только для чтения, и ничего там не создаёт.
+    gnupg_home="$(mktemp -d)" || return 1
+    keys="$(gpg --homedir "$gnupg_home" --batch --show-keys --with-colons \
+        /etc/apt/keyrings/amnezia-ppa.asc 2>/dev/null || true)"
+    rm -rf "$gnupg_home"
+    grep -Fq 'fpr:::::::::75C9DD72C799870E310542E24166F2C257290828:' <<<"$keys"
 }
 
 apparmor_enabled() {

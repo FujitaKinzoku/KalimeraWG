@@ -157,7 +157,8 @@ if systemctl is-active --quiet sing-box.service; then
     rm -f "$disabled_flag" "$manual_disabled_flag"
     "$routing" apply
     {{ awg_dns_policy_path | quote }}
-    ip -4 route show table {{ entry_ru_table }} default | grep -Fq "dev $proxy_if" || {
+    proxy_route="$(ip -4 route show table {{ entry_ru_table }} default 2>/dev/null || true)"
+    grep -Fq "dev $proxy_if" <<<"$proxy_route" || {
         echo 'Маршрут RU-прокси в таблице 200 не восстановлен.' >&2
         exit 1
     }
