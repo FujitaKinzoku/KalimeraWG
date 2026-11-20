@@ -67,8 +67,10 @@ case "$name" in
         fi
         ;;
     iptables)
-        # Правил ещё нет: проверка -C всегда отвечает "не найдено".
-        [[ " $* " != *" -C "* ]] || exit 1
+        # Проверка -C отвечает "не найдено", пока тест не создал файл rules-exist.
+        if [[ " $* " == *" -C "* ]]; then
+            [[ -e "$state/rules-exist" ]] || exit 1
+        fi
         ;;
     iptables-restore) cat >"$state/restore.txt" ;;
     ipset)
@@ -81,6 +83,9 @@ case "$name" in
         ;;
     awg-entry-routing)
         [[ ! -e "$state/routing-fails" ]] || exit 1
+        ;;
+    kalimera-secretctl)
+        [[ ! -e "$state/seal-fails" ]] || exit 1
         ;;
 esac
 """
@@ -280,18 +285,68 @@ class RoutingChainTests(ShellCase):
         )
         self.routing(enabled=True, scope="selected")
         restored = (self.dir / "ipset-restore.txt").read_text(encoding="utf-8").splitlines()
-        self.assertIn("flush force_proxy_net", restored)
-        self.assertIn("add force_proxy_net 203.0.113.7", restored)
-        self.assertIn("add force_proxy_net 198.51.100.0/24", restored)
-        self.assertEqual(len([line for line in restored if line.startswith("add force_proxy_net")]), 2)
+        self.assertIn("flush force_proxy_net_load", restored)
+        self.assertIn("add force_proxy_net_load 203.0.113.7", restored)
+        self.assertIn("add force_proxy_net_load 198.51.100.0/24", restored)
+        self.assertEqual(len([line for line in restored if line.startswith("add force_proxy_net_load")]), 2)
+        self.assertTrue(self.call_lines("ipset swap force_proxy_net_load force_proxy_net"))
+
+    def test_working_sets_are_replaced_without_being_emptied(self) -> None:
+        # Раньше наборы очищались и наполнялись заново при каждом применении: пока
+        # набор ru был пуст, российские назначения уходили на EXIT.
+        (self.policy / "proxy-address").write_text("203.0.113.7\n", encoding="utf-8")
+        (self.dir / "ru.zone").write_text("# база\n5.3.0.0/16\n95.24.0.0/13\nмусор\n", encoding="utf-8")
+        self.routing(enabled=True, scope="selected")
+        restored = (self.dir / "ipset-restore.txt").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            [line for line in restored if line.startswith("add ru_load")],
+            ["add ru_load 5.3.0.0/16", "add ru_load 95.24.0.0/13"],
+        )
+        self.assertTrue(self.call_lines("ipset swap ru_load ru"))
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        for working in ("ru", "force_proxy_net"):
+            self.assertNotIn(f"flush {working}", restored)
+            self.assertNotIn(f"ipset flush {working}", calls)
+
+    def test_damaged_network_cache_keeps_the_set_and_the_rules(self) -> None:
+        # Файл без единой корректной сети раньше прерывал применение до построения
+        # цепочки: трафик клиентов остался бы без меток маршрута.
+        (self.dir / "ru.zone").write_text("<html>ошибка</html>\n", encoding="utf-8")
+        rules = self.routing(enabled=True, scope="selected")
+        self.assertIn("-A AWG_RU_PROXY -j MARK --set-xmark 0x1/0xffffffff", rules)
+        self.assertFalse(self.call_lines("ipset swap ru_load ru"))
+
+    def test_existing_rules_are_left_in_place(self) -> None:
+        # Раньше каждое применение удаляло правила и ставило заново: между двумя
+        # командами пакеты клиентов шли без перехода в цепочку, то есть без метки.
+        self.flag("rules-exist")
+        self.routing(enabled=True, scope="selected", udp="direct")
+        calls = self.call_lines("iptables ")
+        self.assertTrue([line for line in calls if " -C PREROUTING -i awg0 " in line])
+        changed = [line for line in calls if any(flag in f" {line} " for flag in (" -D ", " -A ", " -I "))]
+        self.assertEqual(changed, [])
+
+    def test_missing_rules_are_added(self) -> None:
+        self.routing(enabled=True, scope="selected", udp="direct")
+        calls = self.call_lines("iptables ")
+        for fragment in (
+            "-t mangle -A PREROUTING -i awg0 -s 10.66.0.0/24 -j AWG_RU_PROXY",
+            "-t nat -A POSTROUTING -s 10.66.0.0/24 -o awg3 -j MASQUERADE",
+            "-I FORWARD 1 -i awg0 -s 10.66.0.0/24 -p tcp --dport 853 -j REJECT --reject-with tcp-reset",
+            "-t nat -I PREROUTING 1 -i awg0 -s 10.66.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.66.0.1:53",
+            "-t mangle -A FORWARD -i awg0 -s 10.66.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
+            "-I FORWARD 1 -i awg0 -o awg0 -j DROP",
+        ):
+            self.assertTrue([line for line in calls if fragment in line], fragment)
+        self.assertFalse([line for line in calls if " -D " in f" {line} "])
 
     def test_sets_exist_even_without_the_proxy(self) -> None:
         self.flag("missing-sb-ru")
         self.routing(enabled=False)
-        created = self.call_lines("ipset create force_proxy")
-        self.assertEqual(len(created), 2)
-        self.assertIn("hash:ip", created[0])
-        self.assertIn("hash:net", created[1])
+        created = {line.split()[2]: line for line in self.call_lines("ipset create force_proxy")}
+        self.assertIn("hash:ip", created["force_proxy"])
+        self.assertIn("hash:net", created["force_proxy_net"])
+        self.assertIn("hash:net", created["force_proxy_net_load"])
 
     def test_rendered_script_passes_shellcheck(self) -> None:
         shellcheck = shutil.which("shellcheck")
@@ -307,11 +362,12 @@ class RoutingChainTests(ShellCase):
 
 
 class ProxyDomainTests(ShellCase):
-    tools = ("systemctl", "dnsmasq", "ipset")
+    tools = ("systemctl", "dnsmasq", "ipset", "kalimera-secretctl")
 
-    def domain_admin(self, *, enabled: bool, scope: str = "all") -> Path:
+    def domain_admin(self, *, enabled: bool, scope: str = "all", secrets: bool = False) -> Path:
         self.dnsmasq = self.dir / "dnsmasq.d"
         self.dnsmasq.mkdir(exist_ok=True)
+        self.seal_pending = self.run_dir / "kalimera-lists.seal-pending"
         text = render(
             DOMAIN_ADMIN,
             awg_domain_policy_dir=str(self.policy),
@@ -323,6 +379,8 @@ class ProxyDomainTests(ShellCase):
             entry_dns_default_port=5353,
             entry_dns_ru_port=5354,
             reality_fallback_enabled=False,
+            runtime_secrets_enabled=secrets,
+            runtime_secrets_ctl_path=str(self.fakebin / "kalimera-secretctl"),
         ).replace("/etc/dnsmasq.d/", f"{self.dnsmasq}/")
         script = self.install("awg-domain-admin", text)
         for name in ("ru-domain", "se-domain", "entry-domain", "proxy-domain"):
@@ -466,6 +524,47 @@ class ProxyDomainTests(ShellCase):
         self.assertNotIn("DNS-запроса", self.run_command("ru-domain", "add", "vk.com").stdout)
         self.assertNotIn("DNS-запроса", self.run_command("proxy-domain", "del", "kinopoisk.ru").stdout)
 
+    def test_removing_an_absent_domain_says_so(self) -> None:
+        # Найдено на рабочем каскаде: "vk.ru удалён из proxy-domain" выводилось и
+        # тогда, когда домена в списке не было.
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.flushed_sets()
+        result = self.run_command("proxy-domain", "del", "vk.ru")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "vk.ru не найден в proxy-domain.\n")
+        self.assertEqual(self.flushed_sets(), [])
+        self.assertEqual(self.run_command("proxy-domain", "list").stdout, "kinopoisk.ru\n")
+
+    def test_removal_touches_only_its_own_list(self) -> None:
+        # Раньше del убирал домен из всех списков: proxy-domain del молча менял ru-domain.
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("ru-domain", "add", "vk.ru")
+        result = self.run_command("proxy-domain", "del", "vk.ru")
+        self.assertEqual(
+            result.stdout,
+            "vk.ru не найден в proxy-domain: он в списке ru-domain. Удалить оттуда: ru-domain del vk.ru\n",
+        )
+        self.assertEqual(self.run_command("ru-domain", "list").stdout, "vk.ru\n")
+        self.assertIn("ipset=/vk.ru/force_ru\n", self.policy_file())
+        self.assertEqual(self.run_command("ru-domain", "del", "vk.ru").stdout, "vk.ru удалён из ru-domain.\n")
+
+    def test_adding_reports_repeat_and_move(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.assertIn("vk.ru добавлен в ru-domain.", self.run_command("ru-domain", "add", "vk.ru").stdout)
+        self.assertEqual(self.run_command("ru-domain", "add", "vk.ru").stdout, "vk.ru уже есть в ru-domain.\n")
+        moved = self.run_command("proxy-domain", "add", "vk.ru")
+        self.assertIn("vk.ru перенесён из ru-domain в proxy-domain.", moved.stdout)
+        self.assertIn("после нового DNS-запроса имени", moved.stdout)
+        # Повтор ничего не меняет: подсказка о DNS не нужна.
+        self.assertEqual(self.run_command("proxy-domain", "add", "vk.ru").stdout, "vk.ru уже есть в proxy-domain.\n")
+
+    def test_clearing_an_empty_list_says_so(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.assertEqual(self.run_command("se-domain", "clear").stdout, "Список se-domain уже пуст.\n")
+        self.run_command("se-domain", "add", "example.org")
+        self.assertEqual(self.run_command("se-domain", "clear").stdout, "Список se-domain очищен.\n")
+
     def test_messages_name_the_domain(self) -> None:
         # Раньше циклы чтения списков затирали имя, и сообщение выходило без домена.
         self.domain_admin(enabled=False)
@@ -480,6 +579,70 @@ class ProxyDomainTests(ShellCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(self.run_command("proxy-domain", "list").stdout, "")
 
+    def test_list_change_is_saved_into_the_encrypted_bundle(self) -> None:
+        # Списки лежат в tmpfs runtime-секретов: при загрузке сервера он собирается из
+        # зашифрованного пакета. Без seal добавленный домен пропадал после
+        # перезагрузки ENTRY.
+        self.domain_admin(enabled=True, scope="selected", secrets=True)
+        self.assertEqual(self.run_command("proxy-domain", "add", "kinopoisk.ru").returncode, 0)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), ["kalimera-secretctl seal"])
+        self.assertFalse(self.seal_pending.exists())
+        # Повтор, просмотр и удаление отсутствующего домена списки не меняют.
+        self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.run_command("proxy-domain", "list")
+        self.run_command("ru-domain", "del", "vk.ru")
+        self.run_command("ru-domain", "sync")
+        self.assertEqual(len(self.call_lines("kalimera-secretctl")), 1)
+        self.assertEqual(self.run_command("proxy-domain", "del", "kinopoisk.ru").returncode, 0)
+        self.assertEqual(len(self.call_lines("kalimera-secretctl")), 2)
+
+    def test_deferred_change_is_saved_when_it_is_applied(self) -> None:
+        self.domain_admin(enabled=True, scope="selected", secrets=True)
+        self.assertEqual(self.run_command("ru-domain", "add", "vk.ru", "--defer").returncode, 0)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), [])
+        self.assertTrue(self.seal_pending.exists())
+        self.assertEqual(self.run_command("ru-domain", "sync").returncode, 0)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), ["kalimera-secretctl seal"])
+        self.assertFalse(self.seal_pending.exists())
+
+    def test_failed_save_keeps_the_change_and_says_how_to_finish(self) -> None:
+        self.domain_admin(enabled=True, scope="selected", secrets=True)
+        self.flag("seal-fails")
+        result = self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("kinopoisk.ru добавлен в proxy-domain.", result.stdout)
+        self.assertIn("не сохранено в зашифрованном пакете", result.stderr)
+        self.assertIn("sudo kalimera-secretctl seal", result.stderr)
+        self.assertNotIn("отменено", result.stderr)
+        self.assertEqual(self.run_command("proxy-domain", "list").stdout, "kinopoisk.ru\n")
+        self.assertIn("ipset=/kinopoisk.ru/force_proxy\n", self.policy_file())
+        self.assertTrue(self.seal_pending.exists())
+        # Следующая команда повторяет сохранение, даже если сама ничего не меняет.
+        self.flag("seal-fails", present=False)
+        repeat = self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.assertEqual(repeat.returncode, 0, repeat.stderr)
+        self.assertEqual(repeat.stderr, "")
+        self.assertFalse(self.seal_pending.exists())
+
+    def test_proxy_watchdog_does_not_touch_the_bundle(self) -> None:
+        # Сторож запускает ru-domain sync в изолированном окружении, где пакет
+        # недоступен для записи: попытка seal ломала бы переключение режима прокси.
+        self.domain_admin(enabled=True, scope="all", secrets=True)
+        self.run_command("ru-domain", "add", "vk.ru", "--defer")
+        with mock.patch.dict(os.environ, {"KALIMERA_LISTS_NO_SEAL": "1"}):
+            result = self.run_command("ru-domain", "sync")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), [])
+        self.assertTrue(self.seal_pending.exists())
+        watchdog = (ROOT / "roles/entry_watchdog/templates/awg-ru-proxy-watch.sh.j2").read_text(encoding="utf-8")
+        self.assertIn("export KALIMERA_LISTS_NO_SEAL=1\n", watchdog)
+
+    def test_without_runtime_secrets_nothing_is_sealed(self) -> None:
+        script = self.domain_admin(enabled=True, scope="selected")
+        self.assertNotIn("secretctl", script.read_text(encoding="utf-8"))
+        self.assertEqual(self.run_command("proxy-domain", "add", "kinopoisk.ru").returncode, 0)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), [])
+
     def test_vless_rule_set_is_written_from_the_same_list(self) -> None:
         text = DOMAIN_ADMIN.read_text(encoding="utf-8")
         block = text[text.index("readonly REALITY_PROXY_RULE_SET="):text.index("{% endif %}", text.index("readonly REALITY_PROXY_RULE_SET="))]
@@ -491,18 +654,20 @@ class ProxyDomainTests(ShellCase):
         shellcheck = shutil.which("shellcheck")
         if shellcheck is None:
             self.skipTest("нужен shellcheck")
-        script = self.domain_admin(enabled=True, scope="selected")
-        result = subprocess.run(
-            [shellcheck, "--exclude=SC2317", str(script)], capture_output=True, text=True
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for secrets in (False, True):
+            script = self.domain_admin(enabled=True, scope="selected", secrets=secrets)
+            result = subprocess.run(
+                [shellcheck, "--exclude=SC2317", str(script)], capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class ProxyAddressTests(ShellCase):
-    tools = ("awg-entry-routing",)
+    tools = ("awg-entry-routing", "kalimera-secretctl")
 
-    def proxy_address(self, *, enabled: bool = True, reality: bool = False) -> Path:
+    def proxy_address(self, *, enabled: bool = True, reality: bool = False, secrets: bool = False) -> Path:
         self.rules = self.dir / "proxy-addresses.json"
+        self.seal_pending = self.run_dir / "kalimera-lists.seal-pending"
         text = render(
             PROXY_ADDRESS,
             entry_ru_proxy_address_file=str(self.policy / "proxy-address"),
@@ -510,6 +675,8 @@ class ProxyAddressTests(ShellCase):
             entry_ru_proxy_enabled=enabled,
             reality_fallback_enabled=reality,
             reality_fallback_proxy_address_rule_set_path=str(self.rules),
+            runtime_secrets_enabled=secrets,
+            runtime_secrets_ctl_path=str(self.fakebin / "kalimera-secretctl"),
         ).replace("/root/config-backups/", f"{self.dir}/backups/")
         return self.install("proxy-address", text)
 
@@ -538,8 +705,19 @@ class ProxyAddressTests(ShellCase):
         self.assertEqual(self.execute(script, "add", "203.0.113.7").returncode, 0)
         result = self.execute(script, "add", "203.0.113.7")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("уже соответствует запросу", result.stdout)
+        self.assertEqual(result.stdout, "203.0.113.7 уже есть в proxy-address.\n")
         self.assertEqual(len(self.call_lines("awg-entry-routing apply")), 1)
+
+    def test_messages_say_what_actually_happened(self) -> None:
+        # Раньше ответ был один на все случаи: "уже соответствует запросу".
+        script = self.proxy_address()
+        self.assertEqual(self.execute(script, "clear").stdout, "Список proxy-address уже пуст.\n")
+        missing = self.execute(script, "del", "203.0.113.7")
+        self.assertEqual(missing.returncode, 0)
+        self.assertEqual(missing.stdout, "203.0.113.7 не найден в proxy-address.\n")
+        self.assertFalse(self.call_lines("awg-entry-routing"))
+        self.execute(script, "add", "203.0.113.7")
+        self.assertIn("203.0.113.7 удалён из proxy-address.", self.execute(script, "del", "203.0.113.7").stdout)
 
     def test_delete_and_clear(self) -> None:
         script = self.proxy_address()
@@ -573,6 +751,40 @@ class ProxyAddressTests(ShellCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("kalimera-deploy --resume --enable-ru-proxy", result.stdout)
 
+    def test_list_change_is_saved_into_the_encrypted_bundle(self) -> None:
+        script = self.proxy_address(secrets=True)
+        self.assertEqual(self.execute(script, "add", "203.0.113.7").returncode, 0)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), ["kalimera-secretctl seal"])
+        # Повтор, просмотр и повторное применение список не меняют.
+        self.execute(script, "add", "203.0.113.7")
+        self.execute(script, "list")
+        self.execute(script, "sync")
+        self.assertEqual(len(self.call_lines("kalimera-secretctl")), 1)
+        self.assertEqual(self.execute(script, "clear").returncode, 0)
+        self.assertEqual(len(self.call_lines("kalimera-secretctl")), 2)
+
+    def test_failed_save_keeps_the_change_and_is_repeated(self) -> None:
+        script = self.proxy_address(secrets=True)
+        self.flag("seal-fails")
+        result = self.execute(script, "add", "203.0.113.7")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("203.0.113.7 добавлен в proxy-address.", result.stdout)
+        self.assertIn("не сохранено в зашифрованном пакете", result.stderr)
+        self.assertEqual(self.listed(script), ["203.0.113.7"])
+        self.assertTrue(self.seal_pending.exists())
+        self.flag("seal-fails", present=False)
+        repeat = self.execute(script, "add", "203.0.113.7")
+        self.assertEqual(repeat.returncode, 0, repeat.stderr)
+        self.assertEqual(repeat.stdout, "203.0.113.7 уже есть в proxy-address.\n")
+        self.assertFalse(self.seal_pending.exists())
+
+    def test_rejected_change_is_not_saved(self) -> None:
+        script = self.proxy_address(secrets=True)
+        self.flag("routing-fails")
+        self.assertEqual(self.execute(script, "add", "203.0.113.7").returncode, 1)
+        self.assertEqual(self.call_lines("kalimera-secretctl"), [])
+        self.assertFalse(self.seal_pending.exists())
+
     def test_vless_rule_set_follows_the_list(self) -> None:
         if shutil.which("jq") is None:
             self.skipTest("нужен jq")
@@ -588,8 +800,8 @@ class ProxyAddressTests(ShellCase):
         shellcheck = shutil.which("shellcheck")
         if shellcheck is None:
             self.skipTest("нужен shellcheck")
-        for reality in (False, True):
-            script = self.proxy_address(reality=reality)
+        for reality, secrets in ((False, False), (True, False), (True, True)):
+            script = self.proxy_address(reality=reality, secrets=secrets)
             result = subprocess.run(
                 [shellcheck, "--exclude=SC2317", str(script)], capture_output=True, text=True
             )

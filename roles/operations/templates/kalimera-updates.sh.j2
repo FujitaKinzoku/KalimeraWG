@@ -289,7 +289,7 @@ check_kernel() {
 check_amneziawg() {
     # Счётчик вместо длины массива: "решётка" сразу после фигурной скобки
     # открывает комментарий Jinja и сломала бы шаблон.
-    local package installed candidate current='' count=0
+    local package installed candidate current='' count=0 found_list
     local -a found=()
     for package in amneziawg-dkms amneziawg-tools; do
         installed="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
@@ -306,7 +306,10 @@ check_amneziawg() {
     if [[ -z "$current" ]]; then
         record INFO amneziawg 'пакеты AmneziaWG не установлены'
     elif (( count > 0 )); then
-        record UPD amneziawg "доступен AmneziaWG: $(IFS=';'; printf '%s' "${found[*]}")" \
+        # Соединение через IFS берёт только первый символ разделителя: пакеты
+        # печатались слитно, через точку с запятой без пробела.
+        found_list="$(printf '%s; ' "${found[@]}")"
+        record UPD amneziawg "доступен AmneziaWG: ${found_list%; }" \
             'на ENTRY: kalimera-deploy --resume --update-amneziawg (ENTRY и EXIT вместе, с откатом; клиентские конфиги не меняются)'
     else
         record OK amneziawg "AmneziaWG $current актуален"
@@ -414,9 +417,17 @@ install_kernel() {
     exec 9>&-
     run_checks no-refresh
     show_state
-    printf '%s\n' \
-        'Ядро установлено, но начнёт работать после перезагрузки: sudo reboot' \
-        'Серверы одного каскада перезагружайте по очереди: следующий - только после awg-health --strict на предыдущем.'
+    # Сообщение о перезагрузке - только если новое ядро действительно установлено.
+    # Раньше оно выводилось и тогда, когда ставить было нечего.
+    if grep -Eq $'^UPD\tkernel\tядро [^\t]+ установлено' "$STATE_FILE"; then
+        printf '%s\n' \
+            'Ядро установлено, но начнёт работать после перезагрузки: sudo reboot' \
+            'Серверы одного каскада перезагружайте по очереди: следующий - только после awg-health --strict на предыдущем.'
+    elif grep -q $'^UPD\tkernel\t' "$STATE_FILE"; then
+        printf '%s\n' 'Новое ядро доступно, но не установилось: причина в выводе apt выше.' >&2
+    else
+        printf '%s\n' 'Новое ядро не требуется: работает актуальное, перезагрузка не нужна.'
+    fi
 }
 
 case "${1:-}" in

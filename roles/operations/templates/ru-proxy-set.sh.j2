@@ -24,6 +24,10 @@ if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
 fi
 if [[ "${1:-}" == reset ]]; then
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
+    [[ -e "$override" ]] || {
+        echo 'Локального переопределения нет: параметры прокси уже берутся из inventory.'
+        exit 0
+    }
     rm -f "$override"
 {% if runtime_secrets_enabled | default(false) | bool %}
     "$secretctl" seal
@@ -153,7 +157,8 @@ if systemctl is-active --quiet sing-box.service; then
     rm -f "$disabled_flag" "$manual_disabled_flag"
     "$routing" apply
     {{ awg_dns_policy_path | quote }}
-    ip -4 route show table {{ entry_ru_table }} default | grep -Fq "dev $proxy_if" || {
+    proxy_route="$(ip -4 route show table {{ entry_ru_table }} default 2>/dev/null || true)"
+    grep -Fq "dev $proxy_if" <<<"$proxy_route" || {
         echo 'Маршрут RU-прокси в таблице 200 не восстановлен.' >&2
         exit 1
     }

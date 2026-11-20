@@ -198,7 +198,7 @@ check_tunnel() {
     if (( ok < 3 )); then
         emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict' "$avg"
     elif (( avg > 250 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'канал медленный: проверьте MTU и нагрузку EXIT: awg-health --strict' "$avg"
+        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'сравните со строкой «ENTRY → EXIT: SSH»: если задержка высока и там, медленный маршрут между хостингами ENTRY и EXIT, серверы исправны - повторите проверку позже; если только здесь - нагрузка EXIT: awg-health --strict на EXIT' "$avg"
     else
         emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
     fi

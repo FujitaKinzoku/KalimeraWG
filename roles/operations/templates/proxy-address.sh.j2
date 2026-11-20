@@ -14,6 +14,27 @@ readonly rule_set={{ reality_fallback_proxy_address_rule_set_path | default((rea
 {% else %}
 readonly rule_set=''
 {% endif %}
+{% if runtime_secrets_enabled | default(false) | bool %}
+# Список лежит в каталоге runtime-секретов. Это tmpfs: при загрузке сервера он
+# восстанавливается из зашифрованного пакета, и без seal изменение действовало бы
+# только до перезагрузки ENTRY. Отметка остаётся, пока пакет не обновлён: его
+# обновит следующая команда управления списками.
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
+readonly seal_pending=/run/kalimera-lists.seal-pending
+persist_lists() {
+    : >"$seal_pending"
+    [[ "${KALIMERA_LISTS_NO_SEAL:-}" != 1 ]] || return 0
+    if "$secretctl" seal >/dev/null; then
+        rm -f "$seal_pending"
+        return 0
+    fi
+    printf '%s\n' \
+        'ВНИМАНИЕ: изменение применено, но не сохранено в зашифрованном пакете.' \
+        'После перезагрузки ENTRY списки вернутся к прежнему состоянию.' \
+        'Проверьте связь с EXIT и FRONT (cascade-check) и выполните: sudo kalimera-secretctl seal' >&2
+    return 1
+}
+{% endif %}
 
 usage() { echo 'Использование: proxy-address [list|clear|sync|add АДРЕС[/ПРЕФИКС]|del АДРЕС[/ПРЕФИКС]]'; }
 action="${1:-list}"
@@ -25,7 +46,7 @@ case "$action" in
     *) usage >&2; exit 2 ;;
 esac
 
-install -d -m 0755 "$(dirname "$file")"
+mkdir -p "$(dirname "$file")"
 [[ -e "$file" ]] || install -m 0644 /dev/null "$file"
 
 if [[ "$action" == list ]]; then
@@ -96,7 +117,16 @@ write_rule_set() {
 }
 
 if [[ "$changed" == false && "$action" != sync ]]; then
-    echo 'Список proxy-address уже соответствует запросу.'
+    case "$action" in
+        add) echo "$address уже есть в proxy-address." ;;
+        del) echo "$address не найден в proxy-address." ;;
+        clear) echo 'Список proxy-address уже пуст.' ;;
+    esac
+{% if runtime_secrets_enabled | default(false) | bool %}
+    if [[ -e "$seal_pending" ]]; then
+        persist_lists || exit 1
+    fi
+{% endif %}
     exit 0
 fi
 
@@ -123,3 +153,8 @@ esac
 if [[ "$action" == add && "$proxy_enabled" == false ]]; then
     echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
 fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+if [[ "$changed" == true || -e "$seal_pending" ]]; then
+    persist_lists || exit 1
+fi
+{% endif %}

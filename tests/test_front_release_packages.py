@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -251,6 +253,45 @@ class FrontReleasePackagesTest(unittest.TestCase):
         playbook = (ROOT / "playbooks/front.yml").read_text(encoding="utf-8")
         self.assertIn("role: runtime_secrets", playbook)
         self.assertIn("awg-managed-integrity, seal", playbook)
+
+    def test_standalone_entry_and_exit_playbooks_reseal_integrity(self) -> None:
+        # Подтверждение замены FRONT повторно применяет entry.yml уже после манифеста
+        # из site.yml: роль health перезаписывает awg-health с новым состоянием
+        # замены, и без обновления манифеста server-audit показывал ошибку целостности.
+        installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(encoding="utf-8")
+        self.assertIn('"playbooks/entry.yml"', installer)
+        for name in ("entry.yml", "exit.yml"):
+            playbook = yaml.safe_load((ROOT / "playbooks" / name).read_text(encoding="utf-8"))
+            post_tasks = playbook[0].get("post_tasks", [])
+            self.assertTrue(
+                any(
+                    task.get("ansible.builtin.command", {}).get("argv")
+                    == ["/usr/local/sbin/awg-managed-integrity", "seal"]
+                    for task in post_tasks
+                ),
+                name,
+            )
+
+    def test_rollback_playbooks_save_the_restored_file_into_the_bundle(self) -> None:
+        # Восстановленная конфигурация лежит в tmpfs runtime-секретов: без seal после
+        # перезагрузки возвращалась та, от которой откатились.
+        for name in ("rollback-entry.yml", "rollback-exit.yml"):
+            playbook = yaml.safe_load((ROOT / "playbooks" / name).read_text(encoding="utf-8"))
+            tasks = playbook[0]["tasks"]
+            sealing = [
+                task
+                for task in tasks
+                if (task.get("ansible.builtin.command", {}).get("argv") or [None, None])[1:] == ["seal"]
+            ]
+            self.assertEqual(len(sealing), 1, name)
+            self.assertEqual(sealing[0]["when"], "runtime_secrets_enabled | default(false) | bool")
+            # Сохраняется только проверенное состояние: seal идёт после awg-health.
+            health = next(
+                index
+                for index, task in enumerate(tasks)
+                if task.get("ansible.builtin.command", {}).get("argv") == ["/usr/local/sbin/awg-health", "--strict"]
+            )
+            self.assertGreater(tasks.index(sealing[0]), health, name)
 
     def test_replacement_is_staged_and_preserves_cdn_identifiers(self) -> None:
         installer = (ROOT / "scripts/lib/interactive_deploy.py").read_text(

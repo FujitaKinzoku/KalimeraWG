@@ -1287,7 +1287,9 @@ def prepare_front_replacement(production: Path, vault_password: Path) -> bool:
     for source in (hosts_path, entry_path, front_path, vault_path):
         target = backup_dir / source.name
         secure_write(target, source.read_bytes())
-    secure_write(
+    # Маркер мог остаться от попытки, прерванной до изменения inventory: он
+    # заменяется, иначе повторный запуск падал бы на существующем файле.
+    restore_file(
         backup_root / "current.json",
         json.dumps({"backup": str(backup_dir)}, ensure_ascii=False).encode("utf-8"),
     )
@@ -1382,11 +1384,15 @@ def rollback_front_replacement(production: Path) -> bool:
         "front.yml": production / "group_vars" / "front.yml",
         "vault.yml": production / "group_vars" / "all" / "vault.yml",
     }
-    for name, target in mapping.items():
-        source = backup_dir / name
-        if not source.is_file():
+    # Сначала проверяется вся копия: частично восстановленный inventory описывал бы
+    # два разных FRONT сразу.
+    for name in mapping:
+        if not (backup_dir / name).is_file():
             fail("Резервная копия FRONT неполна")
-        secure_write(target, source.read_bytes())
+    # Файлы нового FRONT уже лежат на месте. secure_write перезапись запрещает, и
+    # откат падал на первом же файле; restore_file заменяет файл атомарно.
+    for name, target in mapping.items():
+        restore_file(target, (backup_dir / name).read_bytes())
     print(
         "Inventory прежнего FRONT восстановлен; deploy повторно применит его "
         "состояние. Маркер отката будет удалён только после успешной проверки."
@@ -3982,6 +3988,32 @@ def wait_for_host_reboot(
     return False
 
 
+LIST_SEAL_PENDING = Path("/run/kalimera-lists.seal-pending")
+
+
+def save_pending_list_changes(production: Path) -> bool:
+    """Сохранить в зашифрованный пакет изменения списков, которые в него не попали.
+
+    Команды ru-domain, proxy-domain, proxy-address и ru-direct-ports оставляют
+    отметку, если не смогли обновить пакет. Списки лежат в tmpfs, и после
+    перезагрузки ENTRY такие изменения пропали бы.
+    """
+    if not LIST_SEAL_PENDING.exists():
+        return True
+    all_path = production / "group_vars" / "all" / "main.yml"
+    all_vars = load_yaml(all_path) if all_path.is_file() else {}
+    secretctl = str(
+        all_vars.get("runtime_secrets_ctl_path") or "/usr/local/sbin/kalimera-secretctl"
+    )
+    try:
+        result = subprocess.run(
+            [secretctl, "seal"], check=False, stdout=subprocess.DEVNULL
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def status_line(level: str, text: str) -> None:
     """Строка проверки: OK зелёным, FAIL красным (цвет только в терминале)."""
     colours = {"OK": "\033[1;32m", "FAIL": "\033[1;31m"}
@@ -4022,6 +4054,15 @@ def run_cascade_reboot(
         status_line("FAIL", "ночное обслуживание выполняется сейчас")
         fail("Повторите позже, когда обслуживание завершится.")
     status_line("OK", "ночное обслуживание не выполняется")
+    if LIST_SEAL_PENDING.exists():
+        if not save_pending_list_changes(production):
+            status_line("FAIL", "изменения списков не сохранены в зашифрованном пакете")
+            fail(
+                "Перезагрузка не начата: после неё списки доменов, адресов и портов на ENTRY "
+                "вернулись бы к прежнему состоянию. Проверьте связь с EXIT и FRONT "
+                "(cascade-check) и выполните: sudo kalimera-secretctl seal"
+            )
+        status_line("OK", "изменения списков сохранены в зашифрованном пакете")
     if unreachable:
         fail(
             f"Перезагрузка не начата: не отвечают {', '.join(unreachable)}. Ничего не перезагружено. "
@@ -4668,6 +4709,31 @@ def main() -> None:
                 "переключите CDN origin и выполните "
                 "'kalimera-deploy --resume --commit-front-replacement'."
             )
+        elif (
+            args.enable_ru_proxy
+            or args.disable_ru_proxy
+            or args.enable_telegram
+            or args.disable_telegram
+        ):
+            # Итог называет то, что изменилось: общее "повторно применена" не говорило,
+            # включилась ли функция.
+            if args.enable_ru_proxy:
+                print(
+                    "RU-прокси включён, каскад проверен. Состояние: ru-proxy status; "
+                    "адреса для прокси: proxy-domain add ДОМЕН, proxy-address add АДРЕС."
+                )
+            if args.disable_ru_proxy:
+                print(
+                    "RU-прокси выключен, каскад проверен. Российский трафик выходит "
+                    "напрямую с ENTRY; списки proxy-domain и proxy-address сохранены."
+                )
+            if args.enable_telegram:
+                print(
+                    "Telegram-уведомления включены, каскад проверен. Проверка доставки "
+                    "на каждом сервере: telegram-test."
+                )
+            if args.disable_telegram:
+                print("Telegram-уведомления выключены, каскад проверен.")
         else:
             print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)

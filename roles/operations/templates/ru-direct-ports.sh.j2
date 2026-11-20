@@ -5,6 +5,27 @@ set -Eeuo pipefail
 readonly file={{ entry_ru_direct_tcp_ports_file | quote }}
 readonly routing={{ entry_routing_script_path | quote }}
 readonly backup_dir=/root/config-backups/entry/routing
+{% if runtime_secrets_enabled | default(false) | bool %}
+# Список лежит в каталоге runtime-секретов. Это tmpfs: при загрузке сервера он
+# восстанавливается из зашифрованного пакета, и без seal изменение действовало бы
+# только до перезагрузки ENTRY. Отметка остаётся, пока пакет не обновлён: его
+# обновит следующая команда управления списками.
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
+readonly seal_pending=/run/kalimera-lists.seal-pending
+persist_lists() {
+  : >"$seal_pending"
+  [[ "${KALIMERA_LISTS_NO_SEAL:-}" != 1 ]] || return 0
+  if "$secretctl" seal >/dev/null; then
+    rm -f "$seal_pending"
+    return 0
+  fi
+  printf '%s\n' \
+    'ВНИМАНИЕ: изменение применено, но не сохранено в зашифрованном пакете.' \
+    'После перезагрузки ENTRY списки вернутся к прежнему состоянию.' \
+    'Проверьте связь с EXIT и FRONT (cascade-check) и выполните: sudo kalimera-secretctl seal' >&2
+  return 1
+}
+{% endif %}
 
 usage() { echo 'Использование: ru-direct-ports [list|clear|add PORT|del PORT|apply] [--defer]'; }
 action="${1:-list}"
@@ -34,6 +55,11 @@ flock 9
 if [[ "$action" == apply ]]; then
   "$routing" apply
   echo 'Политика прямых RU-портов применена.'
+{% if runtime_secrets_enabled | default(false) | bool %}
+  if [[ -e "$seal_pending" ]]; then
+    persist_lists || exit 1
+  fi
+{% endif %}
   exit 0
 fi
 
@@ -62,7 +88,16 @@ esac
 sort -nu -o "$new_file" "$new_file"
 
 if cmp --silent "$new_file" "$file"; then
-  echo 'Политика прямых RU-портов уже соответствует запросу.'
+  case "$action" in
+    add) echo "TCP-порт $port уже есть в прямом RU-маршруте." ;;
+    del) echo "TCP-порт $port не найден в прямом RU-маршруте." ;;
+    clear) echo 'Политика прямых RU-портов уже пуста.' ;;
+  esac
+{% if runtime_secrets_enabled | default(false) | bool %}
+  if [[ "$defer" == false && -e "$seal_pending" ]]; then
+    persist_lists || exit 1
+  fi
+{% endif %}
   exit 0
 fi
 
@@ -70,6 +105,10 @@ install -d -m 0700 "$backup_dir"
 install -m 0600 "$file" "$backup_dir/ru-direct-ports.$(date -u +%Y%m%dT%H%M%SZ)"
 install -m 0644 "$new_file" "$file"
 if [[ "$defer" == true ]]; then
+{% if runtime_secrets_enabled | default(false) | bool %}
+  # Пакет обновит команда, которая применит отложенные изменения.
+  : >"$seal_pending"
+{% endif %}
   echo 'Изменение прямых RU-портов подготовлено; применение отложено.'
   exit 0
 fi
@@ -85,3 +124,6 @@ case "$action" in
   add) echo "TCP-порт $port добавлен в прямой RU-маршрут." ;;
   del) echo "TCP-порт $port удалён из прямого RU-маршрута." ;;
 esac
+{% if runtime_secrets_enabled | default(false) | bool %}
+persist_lists || exit 1
+{% endif %}

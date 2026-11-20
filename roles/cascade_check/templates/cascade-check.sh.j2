@@ -282,7 +282,7 @@ tcp_row() {
     local label="$1" host="$2" port="$3" ms
     if ms="$(tcp_ms "$host" "$port")"; then
         if (( ms > 300 )); then
-            emit_row LINK WARN "$label" "TCP $ms мс: высокая задержка" 'проверьте загрузку сервера и хостинг; awg-health --strict на нём' "$ms"
+            emit_row LINK WARN "$label" "TCP $ms мс: высокая задержка" 'если проверки самого сервера в отчёте пройдены, медленный маршрут между хостингами: повторите проверку позже; иначе - загрузка сервера: awg-health --strict на нём' "$ms"
         else
             emit_row LINK OK "$label" "TCP $ms мс" '' "$ms"
         fi

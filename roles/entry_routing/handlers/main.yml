@@ -4,8 +4,13 @@
     daemon_reload: true
   listen: Перезагрузить systemd
 
-- name: "Перезапуск: маршрутизация ENTRY сервера - этап 2"
+# reloaded, а не restarted: перезапуск службы сначала снимал все правила (ExecStop),
+# и до повторного применения трафик клиентов AmneziaWG не шёл. Вместе с ней
+# перезапускался backend FRONT (Requires=), то есть рвались соединения клиентов
+# VLESS. Повторное применение ставит недостающие правила и подменяет цепочку и
+# наборы без остановки. Неактивную службу reloaded запускает.
+- name: "Повторное применение: маршрутизация ENTRY сервера - этап 2"
   ansible.builtin.systemd_service:
     name: "{{ entry_routing_service_name }}"
-    state: restarted
+    state: reloaded
   listen: Перезапустить маршрутизацию ENTRY сервера

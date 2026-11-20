@@ -112,3 +112,13 @@
         argv: [/usr/local/sbin/awg-health, --strict]
       changed_when: false
       when: awg_health_script.stat.exists
+
+    # Конфигурация AWG лежит в tmpfs runtime-секретов, который при загрузке
+    # собирается из зашифрованного пакета. Без seal после перезагрузки вернулась бы
+    # конфигурация, от которой только что откатились.
+    - name: Сохранение восстановленной конфигурации в зашифрованном пакете
+      ansible.builtin.command:
+        argv: ["{{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') }}", seal]
+      changed_when: false
+      no_log: true
+      when: runtime_secrets_enabled | default(false) | bool

@@ -71,6 +71,9 @@ send_message() {
 }
 
 node="${NODE_ROLE^^}"
+# Перевод строки в тексте уведомления. В двойных кавычках запись \n остаётся двумя
+# символами, и Telegram показывал её буквально.
+readonly newline=$'\n'
 
 if [[ "$test_mode" == true ]]; then
     send_message "AWG ${node}: тестовое уведомление получено; мониторинг доступен"
@@ -94,7 +97,7 @@ else
         awk '/^WARN root authorized_keys / {print; exit}')"
     if [[ -n "$security_warning" ]]; then
         current=security
-        reason="${security_warning}\nПроверьте fingerprint: ssh-key-audit status"
+        reason="${security_warning}${newline}Проверьте fingerprint: ssh-key-audit status"
     elif [[ "$PROXY_MONITORED" == true &&
             -e "$PROXY_DISABLED_FLAG" && ! -e "$PROXY_MANUAL_FLAG" ]]; then
         current=degraded
@@ -118,25 +121,25 @@ if [[ "$boot_changed" == true ]]; then
             message="AWG ${node}: сервер перезапущен; состояние исправно"
             ;;
         degraded)
-            message="AWG ${node}: сервер перезапущен\n${reason}"
+            message="AWG ${node}: сервер перезапущен${newline}${reason}"
             ;;
         security)
-            message="AWG ${node}: сервер перезапущен; обнаружен посторонний root SSH-ключ\n${reason}"
+            message="AWG ${node}: сервер перезапущен; обнаружен посторонний root SSH-ключ${newline}${reason}"
             ;;
         failed)
-            message="AWG ${node}: сервер перезапущен; проверка состояния не пройдена\n${reason}"
+            message="AWG ${node}: сервер перезапущен; проверка состояния не пройдена${newline}${reason}"
             ;;
     esac
 elif [[ "$current" != "$previous" ]]; then
     case "$current" in
         failed)
-            message="AWG ${node}: проверка состояния не пройдена\n${reason}"
+            message="AWG ${node}: проверка состояния не пройдена${newline}${reason}"
             ;;
         degraded)
-            message="AWG ${node}: работа в резервном режиме\n${reason}"
+            message="AWG ${node}: работа в резервном режиме${newline}${reason}"
             ;;
         security)
-            message="AWG ${node}: обнаружен посторонний root SSH-ключ\n${reason}"
+            message="AWG ${node}: обнаружен посторонний root SSH-ключ${newline}${reason}"
             ;;
         healthy)
             if [[ "$previous" == degraded ]]; then

@@ -679,13 +679,17 @@ def main() -> int:
                 print_export(record, settings)
                 return 0
 
-            if len(users) == 1:
-                fail("Нельзя удалить последнего VLESS-пользователя", 2)
-            if not args.yes:
-                fail("Для удаления повторите команду с --yes", 2)
+            # Сначала - есть ли такой пользователь. Раньше несуществующее имя при
+            # единственном пользователе давало "нельзя удалить последнего", а без
+            # --yes - просьбу повторить команду, которая всё равно закончилась бы
+            # сообщением "не найден".
             remaining = [record for record in users if record["name"] != args.name]
             if len(remaining) == len(users):
                 fail(f"Пользователь {args.name} не найден", 2)
+            if not remaining:
+                fail("Нельзя удалить последнего VLESS-пользователя", 2)
+            if not args.yes:
+                fail("Для удаления повторите команду с --yes", 2)
             state["users"] = remaining
             save_state(state)
             sync_config(validate_state(state, settings))
