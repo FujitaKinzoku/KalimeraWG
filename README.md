@@ -183,10 +183,10 @@ sudo rm /etc/ssh/sshd_config.d/01-bootstrap.conf && sudo systemctl restart ssh
 На ENTRY от root (`sudo -i`, если вы вошли обычным пользователем):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.5.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.5.2/install.sh | bash
 ```
 
-Команда устанавливает закреплённый выпуск `v3.5.1`, а не текущее состояние
+Команда устанавливает закреплённый выпуск `v3.5.2`, а не текущее состояние
 ветки `main`. Установщик спросит адреса и SSH-порты серверов, ваш публичный
 SSH-ключ, режим маршрута для российского трафика, DNS, а также нужны ли SOCKS5,
 Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, а не DNS-имена.
@@ -198,7 +198,7 @@ Telegram и FRONT. Адреса EXIT и FRONT указывайте как IPv4, 
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.5.1 --depth 1 \
+git clone --branch v3.5.2 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -362,7 +362,7 @@ kalimera-deploy --resume
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.5.1
+sudo git -C /root/KalimeraWG switch --detach v3.5.2
 kalimera-deploy --resume
 ```
 
@@ -389,6 +389,7 @@ AmneziaWG 3.1 (потери на канале 0,85% вместо 6–8%), доб
 резервным входом через CDN и сделала структуру профилей случайной для каждой
 установки.
 
+- **v3.5.2:** выпуск исправлений по итогам проверки всего кода. Изменения списков доменов, адресов и портов сохраняются после перезагрузки ENTRY. Ежедневный аудит и Telegram-мониторинг проходят по расписанию. Правила маршрутизации применяются без окон, а обновление каскада не перезапускает службу маршрутизации. Сообщения команд соответствуют результату.
 - **v3.5.1:** браузеры клиентов остаются на резолвере ENTRY: служебные имена шифрованного DNS (DoH) не разрешаются, поэтому списки доменов действуют и на браузер, который сам переходил на DoH. В области `selected` имена `proxy-domain` разрешает российский DoT с ENTRY, с кэшем.
 - **v3.5.0:** через российский прокси можно направлять только выбранные сайты: списки `proxy-domain` и `proxy-address`, остальной российский трафик выходит напрямую с ENTRY. Прокси и Telegram-уведомления включаются на работающем каскаде: `kalimera-deploy --resume --enable-ru-proxy`, `--enable-telegram`; ключи и клиентские конфиги не меняются.
 - **v3.4.1:** `dot-switch` сам обновляет контрольные суммы управляемых файлов: после смены серверов DoT аудит больше не показывает ошибку целостности до следующего deploy.
