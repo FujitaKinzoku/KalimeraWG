@@ -4668,6 +4668,31 @@ def main() -> None:
                 "переключите CDN origin и выполните "
                 "'kalimera-deploy --resume --commit-front-replacement'."
             )
+        elif (
+            args.enable_ru_proxy
+            or args.disable_ru_proxy
+            or args.enable_telegram
+            or args.disable_telegram
+        ):
+            # Итог называет то, что изменилось: общее "повторно применена" не говорило,
+            # включилась ли функция.
+            if args.enable_ru_proxy:
+                print(
+                    "RU-прокси включён, каскад проверен. Состояние: ru-proxy status; "
+                    "адреса для прокси: proxy-domain add ДОМЕН, proxy-address add АДРЕС."
+                )
+            if args.disable_ru_proxy:
+                print(
+                    "RU-прокси выключен, каскад проверен. Российский трафик выходит "
+                    "напрямую с ENTRY; списки proxy-domain и proxy-address сохранены."
+                )
+            if args.enable_telegram:
+                print(
+                    "Telegram-уведомления включены, каскад проверен. Проверка доставки "
+                    "на каждом сервере: telegram-test."
+                )
+            if args.disable_telegram:
+                print("Telegram-уведомления выключены, каскад проверен.")
         else:
             print("Существующая конфигурация повторно применена и успешно проверена.")
         show_deployment_summary(production)

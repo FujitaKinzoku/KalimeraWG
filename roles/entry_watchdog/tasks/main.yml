@@ -63,9 +63,15 @@
   failed_when: false
   when: not entry_ru_proxy_enabled | bool
 
+# Вместе с отметкой fail-open снимается и отметка ручного отключения (ru-proxy off).
+# Без прокси она ничего не значит, а оставшись, после следующего
+# kalimera-deploy --resume --enable-ru-proxy держала бы прокси выключенным.
 - name: "Удаление: watchdog RU-прокси - этап 9"
   ansible.builtin.file:
-    path: "{{ entry_ru_proxy_disabled_flag }}"
+    path: "{{ item }}"
     state: absent
+  loop:
+    - "{{ entry_ru_proxy_disabled_flag }}"
+    - "{{ entry_ru_proxy_manual_disabled_flag }}"
   when: not entry_ru_proxy_enabled | bool
   notify: Повторно применить маршрутизацию ENTRY после изменения watchdog
