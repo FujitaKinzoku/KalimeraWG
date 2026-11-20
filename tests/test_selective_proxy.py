@@ -67,8 +67,10 @@ case "$name" in
         fi
         ;;
     iptables)
-        # Правил ещё нет: проверка -C всегда отвечает "не найдено".
-        [[ " $* " != *" -C "* ]] || exit 1
+        # Проверка -C отвечает "не найдено", пока тест не создал файл rules-exist.
+        if [[ " $* " == *" -C "* ]]; then
+            [[ -e "$state/rules-exist" ]] || exit 1
+        fi
         ;;
     iptables-restore) cat >"$state/restore.txt" ;;
     ipset)
@@ -280,18 +282,68 @@ class RoutingChainTests(ShellCase):
         )
         self.routing(enabled=True, scope="selected")
         restored = (self.dir / "ipset-restore.txt").read_text(encoding="utf-8").splitlines()
-        self.assertIn("flush force_proxy_net", restored)
-        self.assertIn("add force_proxy_net 203.0.113.7", restored)
-        self.assertIn("add force_proxy_net 198.51.100.0/24", restored)
-        self.assertEqual(len([line for line in restored if line.startswith("add force_proxy_net")]), 2)
+        self.assertIn("flush force_proxy_net_load", restored)
+        self.assertIn("add force_proxy_net_load 203.0.113.7", restored)
+        self.assertIn("add force_proxy_net_load 198.51.100.0/24", restored)
+        self.assertEqual(len([line for line in restored if line.startswith("add force_proxy_net_load")]), 2)
+        self.assertTrue(self.call_lines("ipset swap force_proxy_net_load force_proxy_net"))
+
+    def test_working_sets_are_replaced_without_being_emptied(self) -> None:
+        # Раньше наборы очищались и наполнялись заново при каждом применении: пока
+        # набор ru был пуст, российские назначения уходили на EXIT.
+        (self.policy / "proxy-address").write_text("203.0.113.7\n", encoding="utf-8")
+        (self.dir / "ru.zone").write_text("# база\n5.3.0.0/16\n95.24.0.0/13\nмусор\n", encoding="utf-8")
+        self.routing(enabled=True, scope="selected")
+        restored = (self.dir / "ipset-restore.txt").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            [line for line in restored if line.startswith("add ru_load")],
+            ["add ru_load 5.3.0.0/16", "add ru_load 95.24.0.0/13"],
+        )
+        self.assertTrue(self.call_lines("ipset swap ru_load ru"))
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        for working in ("ru", "force_proxy_net"):
+            self.assertNotIn(f"flush {working}", restored)
+            self.assertNotIn(f"ipset flush {working}", calls)
+
+    def test_damaged_network_cache_keeps_the_set_and_the_rules(self) -> None:
+        # Файл без единой корректной сети раньше прерывал применение до построения
+        # цепочки: трафик клиентов остался бы без меток маршрута.
+        (self.dir / "ru.zone").write_text("<html>ошибка</html>\n", encoding="utf-8")
+        rules = self.routing(enabled=True, scope="selected")
+        self.assertIn("-A AWG_RU_PROXY -j MARK --set-xmark 0x1/0xffffffff", rules)
+        self.assertFalse(self.call_lines("ipset swap ru_load ru"))
+
+    def test_existing_rules_are_left_in_place(self) -> None:
+        # Раньше каждое применение удаляло правила и ставило заново: между двумя
+        # командами пакеты клиентов шли без перехода в цепочку, то есть без метки.
+        self.flag("rules-exist")
+        self.routing(enabled=True, scope="selected", udp="direct")
+        calls = self.call_lines("iptables ")
+        self.assertTrue([line for line in calls if " -C PREROUTING -i awg0 " in line])
+        changed = [line for line in calls if any(flag in f" {line} " for flag in (" -D ", " -A ", " -I "))]
+        self.assertEqual(changed, [])
+
+    def test_missing_rules_are_added(self) -> None:
+        self.routing(enabled=True, scope="selected", udp="direct")
+        calls = self.call_lines("iptables ")
+        for fragment in (
+            "-t mangle -A PREROUTING -i awg0 -s 10.66.0.0/24 -j AWG_RU_PROXY",
+            "-t nat -A POSTROUTING -s 10.66.0.0/24 -o awg3 -j MASQUERADE",
+            "-I FORWARD 1 -i awg0 -s 10.66.0.0/24 -p tcp --dport 853 -j REJECT --reject-with tcp-reset",
+            "-t nat -I PREROUTING 1 -i awg0 -s 10.66.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.66.0.1:53",
+            "-t mangle -A FORWARD -i awg0 -s 10.66.0.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu",
+            "-I FORWARD 1 -i awg0 -o awg0 -j DROP",
+        ):
+            self.assertTrue([line for line in calls if fragment in line], fragment)
+        self.assertFalse([line for line in calls if " -D " in f" {line} "])
 
     def test_sets_exist_even_without_the_proxy(self) -> None:
         self.flag("missing-sb-ru")
         self.routing(enabled=False)
-        created = self.call_lines("ipset create force_proxy")
-        self.assertEqual(len(created), 2)
-        self.assertIn("hash:ip", created[0])
-        self.assertIn("hash:net", created[1])
+        created = {line.split()[2]: line for line in self.call_lines("ipset create force_proxy")}
+        self.assertIn("hash:ip", created["force_proxy"])
+        self.assertIn("hash:net", created["force_proxy_net"])
+        self.assertIn("hash:net", created["force_proxy_net_load"])
 
     def test_rendered_script_passes_shellcheck(self) -> None:
         shellcheck = shutil.which("shellcheck")

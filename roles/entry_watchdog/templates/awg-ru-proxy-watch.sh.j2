@@ -65,10 +65,16 @@ if [[ "$probe_ok" == true ]]; then
         logger -t awg-ru-proxy-watch "Российский прокси восстановился после ${successes} успешных проверок"
     elif [[ ! -e "$DISABLED_FLAG" ]]; then
         routing_ok=true
-        ip -4 rule show | grep -Eq "^${EXIT_PRIORITY}:.*fwmark ${EXIT_MARK}.*lookup ${EXIT_TABLE}" || routing_ok=false
-        ip -4 route show table "$EXIT_TABLE" | grep -Eq "^default .*dev ${EXIT_IF}( |$)" || routing_ok=false
-        ip -4 rule show | grep -Eq "^${RU_PRIORITY}:.*fwmark ${RU_MARK}.*lookup ${RU_TABLE}" || routing_ok=false
-        ip -4 route show table "$RU_TABLE" | grep -Eq "^default .*dev ${PROXY_IF}( |$)" || routing_ok=false
+        # Вывод ip читается целиком. В конвейере grep -q закрывает канал после первой
+        # подходящей строки; при pipefail это выглядело бы как отсутствие правила, и
+        # сторож заново применял бы маршрутизацию на исправной системе.
+        policy_rules="$(ip -4 rule show 2>/dev/null || true)"
+        exit_routes="$(ip -4 route show table "$EXIT_TABLE" 2>/dev/null || true)"
+        proxy_routes="$(ip -4 route show table "$RU_TABLE" 2>/dev/null || true)"
+        grep -Eq "^${EXIT_PRIORITY}:.*fwmark ${EXIT_MARK}.*lookup ${EXIT_TABLE}" <<<"$policy_rules" || routing_ok=false
+        grep -Eq "^default .*dev ${EXIT_IF}( |$)" <<<"$exit_routes" || routing_ok=false
+        grep -Eq "^${RU_PRIORITY}:.*fwmark ${RU_MARK}.*lookup ${RU_TABLE}" <<<"$policy_rules" || routing_ok=false
+        grep -Eq "^default .*dev ${PROXY_IF}( |$)" <<<"$proxy_routes" || routing_ok=false
         iptables -w 10 -t mangle -S AWG_RU_PROXY >/dev/null 2>&1 || routing_ok=false
         if [[ "$routing_ok" == false ]]; then
             "$ROUTING_SCRIPT" apply

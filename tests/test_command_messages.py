@@ -213,5 +213,82 @@ class ProxySetResetTests(CommandCase):
         self.assertFalse(self.override.exists())
 
 
+class TelegramMessageTests(CommandCase):
+    def monitor(self, audit_output: str, audit_code: int) -> str:
+        """Запустить мониторинг и вернуть текст, переданный в Telegram."""
+        env_file = self.dir / "telegram.env"
+        env_file.write_text("TELEGRAM_BOT_TOKEN=123456:test-token-value\nTELEGRAM_CHAT_ID=1\n", encoding="utf-8")
+        audit = self.dir / "server-audit"
+        audit.write_text(
+            "#!/usr/bin/env bash\n" f"cat {shlex.quote(str(self.dir / 'audit.txt'))}\nexit {audit_code}\n",
+            encoding="utf-8",
+        )
+        audit.chmod(0o755)
+        (self.dir / "audit.txt").write_text(audit_output, encoding="utf-8")
+        curl = self.fakebin / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            'for argument in "$@"; do\n'
+            f'    [[ "$argument" != text=* ]] || printf \'%s\' "${{argument#text=}}" >{shlex.quote(str(self.dir / "sent.txt"))}\n'
+            "done\n",
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+        text = render(
+            "telegram-monitor.sh.j2",
+            awg_telegram_monitor_env_path=str(env_file),
+            awg_telegram_monitor_state_dir=str(self.dir / "state"),
+            awg_node_role="entry",
+            entry_ru_proxy_enabled=False,
+            awg_server_audit_path=str(audit),
+        )
+        result = self.execute(self.install("awg-telegram-monitor", text))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return (self.dir / "sent.txt").read_text(encoding="utf-8")
+
+    def test_reason_starts_on_its_own_line(self) -> None:
+        # В двойных кавычках запись \n остаётся двумя символами: Telegram показывал
+        # "не пройдена\nFAIL ..." одной строкой с обратной косой чертой.
+        sent = self.monitor("OK   UFW активен\nFAIL служба dnsmasq\nFAIL служба Unbound\n", 1)
+        self.assertEqual(
+            sent.splitlines(),
+            ["AWG ENTRY: проверка состояния не пройдена", "FAIL служба dnsmasq", "FAIL служба Unbound"],
+        )
+        self.assertNotIn("\\n", sent)
+
+    def test_template_has_no_literal_backslash_n_in_messages(self) -> None:
+        text = (TEMPLATES / "telegram-monitor.sh.j2").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.lstrip().startswith(("message=", "reason=\"${", "reason='")):
+                self.assertNotIn("\\n", line, line)
+
+
+class PipelineTests(unittest.TestCase):
+    """Проверки не обрывают чтение конвейера: при pipefail это давало ложный отказ."""
+
+    def test_status_and_watchdog_read_the_whole_output(self) -> None:
+        watchdog = ROOT / "roles" / "entry_watchdog" / "templates" / "awg-ru-proxy-watch.sh.j2"
+        for path in (TEMPLATES / "dns-status.sh.j2", watchdog):
+            code = "\n".join(
+                line for line in path.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
+            )
+            self.assertNotRegex(code, r"\|\s*\n?\s*grep -[A-Za-z]*q", path.name)
+
+
+class KernelGuardTests(CommandCase):
+    def test_kernel_list_is_separated_by_comma_and_space(self) -> None:
+        text = (TEMPLATES / "awg-kernel-guard.sh.j2").read_text(encoding="utf-8")
+        tail = text[text.index('kernel_list="$('):]
+        script = self.dir / "list.sh"
+        script.write_text(
+            "#!/usr/bin/env bash\nset -Eeuo pipefail\nkernels=(6.8.0-87-generic 6.8.0-88-generic)\n" + tail,
+            encoding="utf-8",
+        )
+        result = self.execute(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "AmneziaWG готов для ядер: 6.8.0-87-generic, 6.8.0-88-generic.\n")
+
+
 if __name__ == "__main__":
     unittest.main()

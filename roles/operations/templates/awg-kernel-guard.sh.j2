@@ -81,4 +81,7 @@ for kernel_release in "${kernels[@]}"; do
 done
 
 modprobe amneziawg
-printf 'AmneziaWG готов для ядер: %s.\n' "$(IFS=', '; echo "${kernels[*]}")"
+# Соединение через IFS берёт только первый символ разделителя: список печатался
+# слитно, через запятую без пробела.
+kernel_list="$(printf '%s, ' "${kernels[@]}")"
+printf 'AmneziaWG готов для ядер: %s.\n' "${kernel_list%, }"
