@@ -266,6 +266,46 @@ class CascadeRebootRunTests(unittest.TestCase):
         self.assertEqual(scheduled, ["front", "exit"])
         entry.assert_called_once()
 
+    def run_with_pending_list_changes(self, seal_code: int) -> tuple[list[list[str]], mock.Mock, mock.Mock]:
+        """Запуск с отметкой о несохранённых списках; seal отвечает кодом seal_code."""
+        commands: list[list[str]] = []
+
+        def fake_run(argv, **_kwargs):
+            commands.append([str(part) for part in argv])
+            return completed(seal_code if argv[-1] == "seal" else 3)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            production = self.make_production(root)
+            marker = root / "kalimera-lists.seal-pending"
+            marker.write_text("", encoding="utf-8")
+            with mock.patch.object(MODULE, "LIST_SEAL_PENDING", marker), mock.patch.object(
+                MODULE.subprocess, "run", side_effect=fake_run
+            ), mock.patch.object(MODULE, "read_boot_id", return_value=BOOT_A), mock.patch.object(
+                MODULE, "schedule_host_reboot", return_value=True
+            ) as schedule, mock.patch.object(
+                MODULE, "wait_for_host_reboot", return_value=True
+            ), mock.patch.object(
+                MODULE, "wait_for_cascade", return_value=True
+            ), mock.patch.object(MODULE, "schedule_entry_reboot") as entry, mock.patch(
+                "builtins.print"
+            ):
+                MODULE.run_cascade_reboot(root, production, root / "vault.pass", confirmed=True)
+        return commands, schedule, entry
+
+    def test_unsaved_list_changes_are_saved_before_the_reboot(self) -> None:
+        # Списки доменов лежат в tmpfs: изменение, не попавшее в зашифрованный пакет,
+        # после перезагрузки ENTRY пропало бы.
+        commands, schedule, entry = self.run_with_pending_list_changes(seal_code=0)
+        self.assertIn(["/usr/local/sbin/kalimera-secretctl", "seal"], commands)
+        self.assertEqual(schedule.call_count, 2)
+        entry.assert_called_once()
+
+    def test_unsaved_list_changes_stop_the_reboot_when_they_cannot_be_saved(self) -> None:
+        with self.assertRaises(SystemExit) as error:
+            self.run_with_pending_list_changes(seal_code=1)
+        self.assertIn("sudo kalimera-secretctl seal", str(error.exception))
+
     def test_check_errors_stop_the_next_reboot_unless_forced(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

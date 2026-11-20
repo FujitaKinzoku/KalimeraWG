@@ -83,16 +83,45 @@ class CommandCase(unittest.TestCase):
 
 
 class DirectPortsTests(CommandCase):
-    def script(self) -> Path:
+    def script(self, *, secrets: bool = False) -> Path:
         self.ports = self.dir / "ports.list"
         self.ports.write_text("", encoding="utf-8")
+        self.seal_pending = self.run_dir / "kalimera-lists.seal-pending"
         routing = self.fake(self.dir / "awg-entry-routing")
         text = render(
             "ru-direct-ports.sh.j2",
             entry_ru_direct_tcp_ports_file=str(self.ports),
             entry_routing_script_path=str(routing),
+            runtime_secrets_enabled=secrets,
+            runtime_secrets_ctl_path=str(self.fake(self.dir / "kalimera-secretctl")),
         ).replace("/root/config-backups/entry/routing", str(self.dir / "backups"))
         return self.install("ru-direct-ports", text)
+
+    def test_port_change_is_saved_into_the_encrypted_bundle(self) -> None:
+        # Список лежит в tmpfs runtime-секретов: без seal порт пропадал после
+        # перезагрузки ENTRY.
+        script = self.script(secrets=True)
+        self.assertEqual(self.execute(script, "add", "443").returncode, 0)
+        self.assertEqual(self.called("kalimera-secretctl"), ["kalimera-secretctl seal"])
+        self.execute(script, "add", "443")
+        self.execute(script, "list")
+        self.execute(script, "apply")
+        self.assertEqual(len(self.called("kalimera-secretctl")), 1)
+
+    def test_deferred_port_change_is_saved_when_it_is_applied(self) -> None:
+        script = self.script(secrets=True)
+        self.assertEqual(self.execute(script, "add", "443", "--defer").returncode, 0)
+        self.assertEqual(self.called("kalimera-secretctl"), [])
+        self.assertTrue(self.seal_pending.exists())
+        self.assertEqual(self.execute(script, "apply").returncode, 0)
+        self.assertEqual(self.called("kalimera-secretctl"), ["kalimera-secretctl seal"])
+        self.assertFalse(self.seal_pending.exists())
+
+    def test_without_runtime_secrets_nothing_is_sealed(self) -> None:
+        script = self.script()
+        self.assertNotIn("secretctl", script.read_text(encoding="utf-8"))
+        self.assertEqual(self.execute(script, "add", "443").returncode, 0)
+        self.assertEqual(self.called("kalimera-secretctl"), [])
 
     def test_messages_say_what_actually_happened(self) -> None:
         script = self.script()

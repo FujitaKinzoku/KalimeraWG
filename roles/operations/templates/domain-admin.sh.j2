@@ -14,6 +14,28 @@ readonly -a policy_sets=(force_ru force_exit force_entry_bank force_proxy)
 # proxy-address, поэтому ru-domain разрешается и выходит как без прокси.
 readonly PROXY_ENABLED={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
 readonly PROXY_SCOPE={{ 'selected' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'all' }}
+{% if runtime_secrets_enabled | default(false) | bool %}
+# Списки лежат в каталоге runtime-секретов. Это tmpfs: при загрузке сервера он
+# восстанавливается из зашифрованного пакета, и без seal изменение действовало бы
+# только до перезагрузки ENTRY. Отметка остаётся, пока пакет не обновлён: его
+# обновит следующая команда управления списками. Сторож прокси запускает sync в
+# изолированном окружении, где пакет недоступен для записи, и seal пропускает.
+readonly SECRETCTL={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
+readonly SEAL_PENDING=/run/kalimera-lists.seal-pending
+persist_lists() {
+    : >"$SEAL_PENDING"
+    [[ "${KALIMERA_LISTS_NO_SEAL:-}" != 1 ]] || return 0
+    if "$SECRETCTL" seal >/dev/null; then
+        rm -f "$SEAL_PENDING"
+        return 0
+    fi
+    printf '%s\n' \
+        'ВНИМАНИЕ: изменение применено, но не сохранено в зашифрованном пакете.' \
+        'После перезагрузки ENTRY списки вернутся к прежнему состоянию.' \
+        'Проверьте связь с EXIT и FRONT (cascade-check) и выполните: sudo kalimera-secretctl seal' >&2
+    return 1
+}
+{% endif %}
 
 case "$command_name" in
     ru-domain|se-domain|entry-domain|proxy-domain) file="$DIR/$command_name" ;;
@@ -49,7 +71,9 @@ if [[ "$action" =~ ^(add|del)$ ]]; then
     }
 fi
 
-install -d -m 0755 "$DIR"
+# mkdir -p не меняет права существующего каталога: их задаёт deploy (0700). Раньше
+# каждая команда выставляла 0755, и каждый deploy возвращал 0700 обратно.
+mkdir -p "$DIR"
 for policy_name in "${policy_names[@]}"; do
     [[ -e "$DIR/$policy_name" ]] || install -m 0644 /dev/null "$DIR/$policy_name"
 done
@@ -142,8 +166,19 @@ for policy_name in "${policy_names[@]}"; do
     sort -u -o "$DIR/$policy_name" "$DIR/$policy_name"
 done
 
+{% if runtime_secrets_enabled | default(false) | bool %}
+lists_changed=false
+for policy_name in "${policy_names[@]}"; do
+    cmp --silent "$snapshot/$policy_name" "$DIR/$policy_name" || lists_changed=true
+done
+
+{% endif %}
 if [[ "$defer" == true ]]; then
     completed=true
+{% if runtime_secrets_enabled | default(false) | bool %}
+    # Пакет обновит команда, которая применит отложенные изменения.
+    [[ "$lists_changed" == false ]] || : >"$SEAL_PENDING"
+{% endif %}
     echo "Изменение $command_name подготовлено; применение отложено."
     exit 0
 fi
@@ -323,3 +358,8 @@ if [[ "$command_name" == proxy-domain && "$action" == add && "$was_listed" == fa
         echo 'Чтобы не ждать, сбросьте DNS на устройстве (на телефоне - авиарежим на несколько секунд). Клиенты VLESS переходят сразу.'
     fi
 fi
+{% if runtime_secrets_enabled | default(false) | bool %}
+if [[ "$lists_changed" == true || -e "$SEAL_PENDING" ]]; then
+    persist_lists || exit 1
+fi
+{% endif %}

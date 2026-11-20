@@ -277,6 +277,16 @@ class InteractiveDeployTests(unittest.TestCase):
             }
             for name, content in expected.items():
                 (backup / name).write_bytes(content)
+            # Откат запускается только на существующем inventory: файлы нового FRONT
+            # уже лежат на месте. Раньше тест их не создавал, и запись с запретом
+            # перезаписи проходила, а на рабочем каскаде откат падал с FileExistsError.
+            for target in (
+                production / "hosts.yml",
+                group_vars / "entry.yml",
+                group_vars / "front.yml",
+                group_vars / "all" / "vault.yml",
+            ):
+                target.write_bytes(b"prepared replacement\n")
             marker_root = root / "state"
             marker_root.mkdir()
             (marker_root / "current.json").write_text(

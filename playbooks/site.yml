@@ -247,10 +247,16 @@
             low=1000
             high=$((route_mtu - 28))
             discovered=1280
-            if ping -4 -c 1 -W 2 -M do -s "$low" "$peer" >/dev/null 2>&1; then
+            # Размер считается проходящим, если ответил хотя бы один пакет из трёх.
+            # С одним пакетом единственная потеря на линии занижала результат, и
+            # deploy в такой момент понижал MTU всего каскада до следующего запуска.
+            fits() {
+              ping -4 -c 3 -i 0.2 -W 1 -M do -s "$1" "$peer" >/dev/null 2>&1
+            }
+            if fits "$low"; then
               while (( low < high )); do
                 mid=$(((low + high + 1) / 2))
-                if ping -4 -c 1 -W 2 -M do -s "$mid" "$peer" >/dev/null 2>&1; then
+                if fits "$mid"; then
                   low="$mid"
                 else
                   high=$((mid - 1))

@@ -19,6 +19,10 @@ readonly EXIT_PRIORITY={{ entry_exit_rule_priority }}
 readonly RU_MARK={{ entry_ru_mark | quote }}
 readonly RU_TABLE={{ entry_ru_table }}
 readonly RU_PRIORITY={{ entry_ru_rule_priority }}
+# Сторож работает в изолированном окружении: зашифрованный пакет runtime-секретов
+# ему недоступен для записи. ru-domain sync, который запускает awg-dns-policy, не
+# должен пытаться его обновить; это сделает следующая команда управления списками.
+export KALIMERA_LISTS_NO_SEAL=1
 
 install -d -m 0755 "$STATE_DIR"
 exec 9>"$STATE_DIR/lock"
