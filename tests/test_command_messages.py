@@ -429,6 +429,41 @@ class AuditEnvironmentTests(unittest.TestCase):
         self.assertNotRegex(source, r"\|\s*\n?\s*grep")
 
 
+class DeployDisruptionTests(unittest.TestCase):
+    def test_routing_is_reapplied_not_restarted(self) -> None:
+        # Перезапуск службы маршрутизации снимал все правила и вместе с ней
+        # перезапускал backend FRONT (Requires=): обновление рвало соединения клиентов.
+        for role in ("entry_routing", "entry_watchdog"):
+            with self.subTest(role=role):
+                handlers = (ROOT / "roles" / role / "handlers" / "main.yml").read_text(encoding="utf-8")
+                code = "\n".join(line for line in handlers.splitlines() if not line.lstrip().startswith("#"))
+                self.assertIn("state: reloaded", code)
+                self.assertNotIn("state: restarted", code)
+        backend = (ROOT / "roles" / "front_backend" / "templates" / "front-backend.service.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Requires=awg-entry-routing.service", backend)
+        unit = (ROOT / "roles" / "entry_routing" / "templates" / "awg-entry-routing.service.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ExecReload={{ entry_routing_script_path }} apply", unit)
+
+
+class UfwFingerprintTests(unittest.TestCase):
+    def test_awg_old_writes_the_fingerprint_that_health_and_deploy_compare(self) -> None:
+        # awg-old считал отпечаток по "ufw status numbered": он не совпадал с тем, что
+        # сверяют awg-health и роль security, и следующий deploy пересобирал все правила.
+        fail2ban_filter = "'/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'"
+        awg_old = (TEMPLATES / "awg-old.sh.j2").read_text(encoding="utf-8")
+        health = HEALTH.read_text(encoding="utf-8")
+        security = (ROOT / "roles" / "security" / "tasks" / "main.yml").read_text(encoding="utf-8")
+        for name, text in (("awg-old", awg_old), ("awg-health", health), ("security", security)):
+            with self.subTest(source=name):
+                self.assertIn(fail2ban_filter, text)
+                self.assertRegex(text, r"LC_ALL=C (/usr/sbin/)?ufw status \|")
+        self.assertNotIn("ufw status numbered", awg_old)
+
+
 class KernelGuardTests(CommandCase):
     def test_kernel_list_is_separated_by_comma_and_space(self) -> None:
         text = (TEMPLATES / "awg-kernel-guard.sh.j2").read_text(encoding="utf-8")

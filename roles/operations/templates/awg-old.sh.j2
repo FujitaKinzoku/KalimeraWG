@@ -33,7 +33,14 @@ refresh_ufw_marker() {
     local fingerprint status rules_hash
     [[ -r "$ufw_marker" ]] || return 0
     fingerprint="$(cut -d '|' -f 1 "$ufw_marker")"
-    status="$(ufw status numbered)"
+    # Тот же отпечаток, что считают deploy (роль security) и awg-health: вывод
+    # "ufw status" в локали C без временных правил Fail2Ban. Раньше здесь брался
+    # "ufw status numbered": отпечаток не совпадал, awg-health показывал расхождение
+    # политики UFW, а следующий deploy пересобирал все правила.
+    status="$(
+        LC_ALL=C ufw status |
+            sed -E '/#[[:space:]]+by Fail2Ban after [0-9]+ attempts against sshd[[:space:]]*$/d'
+    )"
     rules_hash="$(printf '%s' "$status" | sha256sum | awk '{print $1}')"
     printf '%s|%s\n' "$fingerprint" "$rules_hash" >"$ufw_marker"
     chmod 0600 "$ufw_marker"
