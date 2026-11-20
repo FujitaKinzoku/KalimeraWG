@@ -28,8 +28,14 @@ try:
 except ValueError as error:
     raise SystemExit(f"Некорректный IP-адрес: {error}")
 PY
-        fail2ban-client set sshd unbanip "$1"
-        echo "Адрес $1 удалён из блокировок jail sshd."
+        # fail2ban-client печатает число снятых блокировок: 0, если адрес не был
+        # заблокирован. Раньше команда сообщала об удалении в любом случае.
+        unbanned="$(fail2ban-client set sshd unbanip "$1")"
+        if [[ "$unbanned" =~ ^[0-9]+$ ]] && (( unbanned == 0 )); then
+            echo "Адрес $1 не был заблокирован в jail sshd."
+        else
+            echo "Адрес $1 удалён из блокировок jail sshd."
+        fi
         ;;
 esac
 fail2ban-client status sshd

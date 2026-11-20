@@ -103,13 +103,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Что было до изменения: от этого зависит итоговое сообщение. Раньше команда
+# сообщала "удалён" и "добавлен" всегда, даже если домена в списке не было или он
+# уже там стоял, а del убирал домен и из чужих списков.
+was_listed=false
+other_list=''
+was_empty=false
+if [[ "$action" =~ ^(add|del)$ ]]; then
+    if grep -Fxq -- "$domain" "$file"; then
+        was_listed=true
+    fi
+    for policy_name in "${policy_names[@]}"; do
+        if [[ "$policy_name" != "$command_name" ]] && grep -Fxq -- "$domain" "$DIR/$policy_name"; then
+            other_list="$policy_name"
+            break
+        fi
+    done
+elif [[ "$action" == clear ]]; then
+    if ! grep -Eq '^[[:space:]]*[^#[:space:]]' "$file"; then
+        was_empty=true
+    fi
+fi
+
 if [[ "$action" == clear ]]; then
     : >"$file"
-elif [[ "$action" =~ ^(add|del)$ ]]; then
+elif [[ "$action" == add ]]; then
+    # Домен может стоять только в одном списке: из остальных он убирается.
     for policy_name in "${policy_names[@]}"; do
         sed -i "/^${domain//./\.}$/d" "$DIR/$policy_name"
     done
-    [[ "$action" == del ]] || printf '%s\n' "$domain" >>"$file"
+    printf '%s\n' "$domain" >>"$file"
+elif [[ "$action" == del ]]; then
+    # Только свой список: команда proxy-domain del не должна менять ru-domain.
+    sed -i "/^${domain//./\.}$/d" "$file"
 fi
 
 for policy_name in "${policy_names[@]}"; do
@@ -268,13 +294,27 @@ completed=true
 if [[ "$action" == sync ]]; then
     [[ "$changed" == false ]] || echo 'Локальная доменная политика синхронизирована.'
 elif [[ "$action" == clear ]]; then
-    echo "Список $command_name очищен."
+    if [[ "$was_empty" == true ]]; then
+        echo "Список $command_name уже пуст."
+    else
+        echo "Список $command_name очищен."
+    fi
 elif [[ "$action" == add ]]; then
-    echo "$domain добавлен в $command_name."
-else
+    if [[ "$was_listed" == true ]]; then
+        echo "$domain уже есть в $command_name."
+    elif [[ -n "$other_list" ]]; then
+        echo "$domain перенесён из $other_list в $command_name."
+    else
+        echo "$domain добавлен в $command_name."
+    fi
+elif [[ "$was_listed" == true ]]; then
     echo "$domain удалён из $command_name."
+elif [[ -n "$other_list" ]]; then
+    echo "$domain не найден в $command_name: он в списке $other_list. Удалить оттуда: $other_list del $domain"
+else
+    echo "$domain не найден в $command_name."
 fi
-if [[ "$command_name" == proxy-domain && "$action" == add ]]; then
+if [[ "$command_name" == proxy-domain && "$action" == add && "$was_listed" == false ]]; then
     if [[ "$PROXY_ENABLED" == false ]]; then
         echo 'RU-прокси не включён: список начнёт действовать после kalimera-deploy --resume --enable-ru-proxy.'
     else

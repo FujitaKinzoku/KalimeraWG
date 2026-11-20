@@ -466,6 +466,47 @@ class ProxyDomainTests(ShellCase):
         self.assertNotIn("DNS-запроса", self.run_command("ru-domain", "add", "vk.com").stdout)
         self.assertNotIn("DNS-запроса", self.run_command("proxy-domain", "del", "kinopoisk.ru").stdout)
 
+    def test_removing_an_absent_domain_says_so(self) -> None:
+        # Найдено на рабочем каскаде: "vk.ru удалён из proxy-domain" выводилось и
+        # тогда, когда домена в списке не было.
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("proxy-domain", "add", "kinopoisk.ru")
+        self.flushed_sets()
+        result = self.run_command("proxy-domain", "del", "vk.ru")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "vk.ru не найден в proxy-domain.\n")
+        self.assertEqual(self.flushed_sets(), [])
+        self.assertEqual(self.run_command("proxy-domain", "list").stdout, "kinopoisk.ru\n")
+
+    def test_removal_touches_only_its_own_list(self) -> None:
+        # Раньше del убирал домен из всех списков: proxy-domain del молча менял ru-domain.
+        self.domain_admin(enabled=True, scope="selected")
+        self.run_command("ru-domain", "add", "vk.ru")
+        result = self.run_command("proxy-domain", "del", "vk.ru")
+        self.assertEqual(
+            result.stdout,
+            "vk.ru не найден в proxy-domain: он в списке ru-domain. Удалить оттуда: ru-domain del vk.ru\n",
+        )
+        self.assertEqual(self.run_command("ru-domain", "list").stdout, "vk.ru\n")
+        self.assertIn("ipset=/vk.ru/force_ru\n", self.policy_file())
+        self.assertEqual(self.run_command("ru-domain", "del", "vk.ru").stdout, "vk.ru удалён из ru-domain.\n")
+
+    def test_adding_reports_repeat_and_move(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.assertIn("vk.ru добавлен в ru-domain.", self.run_command("ru-domain", "add", "vk.ru").stdout)
+        self.assertEqual(self.run_command("ru-domain", "add", "vk.ru").stdout, "vk.ru уже есть в ru-domain.\n")
+        moved = self.run_command("proxy-domain", "add", "vk.ru")
+        self.assertIn("vk.ru перенесён из ru-domain в proxy-domain.", moved.stdout)
+        self.assertIn("после нового DNS-запроса имени", moved.stdout)
+        # Повтор ничего не меняет: подсказка о DNS не нужна.
+        self.assertEqual(self.run_command("proxy-domain", "add", "vk.ru").stdout, "vk.ru уже есть в proxy-domain.\n")
+
+    def test_clearing_an_empty_list_says_so(self) -> None:
+        self.domain_admin(enabled=True, scope="selected")
+        self.assertEqual(self.run_command("se-domain", "clear").stdout, "Список se-domain уже пуст.\n")
+        self.run_command("se-domain", "add", "example.org")
+        self.assertEqual(self.run_command("se-domain", "clear").stdout, "Список se-domain очищен.\n")
+
     def test_messages_name_the_domain(self) -> None:
         # Раньше циклы чтения списков затирали имя, и сообщение выходило без домена.
         self.domain_admin(enabled=False)
@@ -538,8 +579,19 @@ class ProxyAddressTests(ShellCase):
         self.assertEqual(self.execute(script, "add", "203.0.113.7").returncode, 0)
         result = self.execute(script, "add", "203.0.113.7")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("уже соответствует запросу", result.stdout)
+        self.assertEqual(result.stdout, "203.0.113.7 уже есть в proxy-address.\n")
         self.assertEqual(len(self.call_lines("awg-entry-routing apply")), 1)
+
+    def test_messages_say_what_actually_happened(self) -> None:
+        # Раньше ответ был один на все случаи: "уже соответствует запросу".
+        script = self.proxy_address()
+        self.assertEqual(self.execute(script, "clear").stdout, "Список proxy-address уже пуст.\n")
+        missing = self.execute(script, "del", "203.0.113.7")
+        self.assertEqual(missing.returncode, 0)
+        self.assertEqual(missing.stdout, "203.0.113.7 не найден в proxy-address.\n")
+        self.assertFalse(self.call_lines("awg-entry-routing"))
+        self.execute(script, "add", "203.0.113.7")
+        self.assertIn("203.0.113.7 удалён из proxy-address.", self.execute(script, "del", "203.0.113.7").stdout)
 
     def test_delete_and_clear(self) -> None:
         script = self.proxy_address()

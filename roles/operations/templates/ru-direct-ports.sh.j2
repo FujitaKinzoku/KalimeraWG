@@ -62,7 +62,11 @@ esac
 sort -nu -o "$new_file" "$new_file"
 
 if cmp --silent "$new_file" "$file"; then
-  echo 'Политика прямых RU-портов уже соответствует запросу.'
+  case "$action" in
+    add) echo "TCP-порт $port уже есть в прямом RU-маршруте." ;;
+    del) echo "TCP-порт $port не найден в прямом RU-маршруте." ;;
+    clear) echo 'Политика прямых RU-портов уже пуста.' ;;
+  esac
   exit 0
 fi
 

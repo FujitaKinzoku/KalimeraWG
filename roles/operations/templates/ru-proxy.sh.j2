@@ -56,13 +56,31 @@ case "${1:-status}" in
     ;;
   off)
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }
+{% if not entry_ru_proxy_enabled | bool %}
+    # Прокси не выбран при установке: выключать нечего, и сообщение о смене
+    # маршрута было бы неправдой.
+    echo 'RU-прокси не настроен: российский трафик и так выходит напрямую через ENTRY.'
+    exit 0
+{% else %}
+    was_off=false
+    [[ ! -e "$manual_flag" ]] || was_off=true
     systemctl disable --now {{ entry_ru_proxy_watch_timer_name | quote }} >/dev/null
     install -d -m 0755 "$(dirname "$manual_flag")"
     install -m 0644 /dev/null "$manual_flag"
     systemctl disable --now sing-box.service
     "$routing" apply
     {{ awg_dns_policy_path | quote }}
-    echo 'RU-трафик теперь выходит напрямую через ENTRY.'
+    if [[ "$was_off" == true ]]; then
+        echo 'RU-прокси уже был выключен вручную; состояние применено повторно.'
+{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
+    else
+        echo 'RU-прокси выключен: адреса из proxy-domain и proxy-address теперь выходят напрямую через ENTRY.'
+{% else %}
+    else
+        echo 'RU-трафик теперь выходит напрямую через ENTRY.'
+{% endif %}
+    fi
+{% endif %}
     ;;
   on)
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy {on|off|status}' >&2; exit 2; }

@@ -96,7 +96,11 @@ write_rule_set() {
 }
 
 if [[ "$changed" == false && "$action" != sync ]]; then
-    echo 'Список proxy-address уже соответствует запросу.'
+    case "$action" in
+        add) echo "$address уже есть в proxy-address." ;;
+        del) echo "$address не найден в proxy-address." ;;
+        clear) echo 'Список proxy-address уже пуст.' ;;
+    esac
     exit 0
 fi
 

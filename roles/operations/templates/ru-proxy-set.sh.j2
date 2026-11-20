@@ -24,6 +24,10 @@ if [[ "${1:-}" =~ ^(--help|-h)$ ]]; then
 fi
 if [[ "${1:-}" == reset ]]; then
     [[ $# -eq 1 ]] || { echo 'Использование: ru-proxy-set [reset]' >&2; exit 2; }
+    [[ -e "$override" ]] || {
+        echo 'Локального переопределения нет: параметры прокси уже берутся из inventory.'
+        exit 0
+    }
     rm -f "$override"
 {% if runtime_secrets_enabled | default(false) | bool %}
     "$secretctl" seal
