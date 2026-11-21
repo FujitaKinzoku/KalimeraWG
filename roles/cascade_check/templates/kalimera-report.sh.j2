@@ -21,6 +21,12 @@ readonly front_entry_host={{ (front_entry_address | default('')) | quote }}
 readonly front_entry_port={{ (front_entry_reality_port | default(0)) | int }}
 readonly maintenance_state={{ (awg_maintenance_state_path | default('/run/awg-maintenance.state')) | quote }}
 readonly self_heal={{ (awg_self_heal_path | default('/usr/local/sbin/self-heal')) | quote }}
+readonly auto_reboot={{ 'true' if (awg_auto_reboot_enabled | default(true) | bool) else 'false' }}
+readonly auto_reboot_block={{ ((awg_auto_reboot_state_dir | default('/var/lib/kalimera/cascade-reboot')) ~ '/auto-blocked') | quote }}
+readonly reboot_overdue_days={{ (awg_auto_reboot_overdue_days | default(21)) | int }}
+readonly updates_state={{ ((kalimera_updates_state_dir | default('/run/kalimera-updates')) ~ '/state') | quote }}
+readonly telegram_enabled={{ 'true' if (awg_telegram_monitor_enabled | default(false) | bool) else 'false' }}
+readonly telegram_monitor={{ (awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor')) | quote }}
 
 {% raw %}
 usage() { echo 'Использование: kalimera-report --tsv'; }
@@ -107,7 +113,7 @@ check_services() {
     fi
 }
 
-# Итог самовосстановления за сутки: сколько было сбоев, сколько восстановлено и
+# Итог самовосстановления за неделю: сколько было сбоев, сколько восстановлено и
 # какие ошибки не устранены. Строку собирает сама служба: счёт ведётся в одном
 # месте. Поля разделены символом US (0x1f), а не табуляцией: read склеивает
 # соседние табуляции, и пустое значение сдвинуло бы рекомендацию на его место.
@@ -122,11 +128,56 @@ check_self_heal() {
     esac
 }
 
+# Перезагрузка после обновления. При включённой автоматической перезагрузке
+# ожидание еженедельного окна - обычное состояние, а не замечание: иначе отчёт
+# почти всегда показывал бы WARN. Замечание появляется, когда автоматика
+# остановлена после неудачи или перезагрузка ждёт дольше положенного.
 check_reboot() {
-    if [[ -e /var/run/reboot-required ]]; then
-        add WARN 'требуется перезагрузка после обновления системы' 'файл /var/run/reboot-required' 'перезагрузите сервер: sudo systemctl reboot; серверы каскада перезагружайте по одному'
-    else
+    local marker=/var/run/reboot-required age_days=0
+    if [[ "$segment" == ENTRY && -e "$auto_reboot_block" ]]; then
+        add WARN 'автоматическая перезагрузка каскада остановлена' "$(head -n 1 "$auto_reboot_block" 2>/dev/null || true)" \
+            'подробности: cascade-reboot status; возобновить после устранения причины: cascade-reboot auto on'
+    fi
+    if [[ ! -e "$marker" ]]; then
         add OK 'перезагрузка не требуется'
+        return 0
+    fi
+    if [[ "$auto_reboot" != true ]]; then
+        add WARN 'требуется перезагрузка после обновления системы' 'файл /var/run/reboot-required' \
+            'на ENTRY: cascade-reboot --yes перезагрузит серверы каскада по одному с проверкой'
+        return 0
+    fi
+    age_days=$(( ($(date +%s) - $(stat -c %Y "$marker" 2>/dev/null || date +%s)) / 86400 ))
+    if (( age_days > reboot_overdue_days )); then
+        add WARN 'требуется перезагрузка после обновления системы' "ждёт $age_days дн., автоматическая не выполнена" \
+            'причина: на ENTRY cascade-reboot status; вручную: cascade-reboot --yes'
+    else
+        add OK 'перезагрузка после обновления выполнится автоматически' 'ожидает еженедельного окна'
+    fi
+}
+
+# Новые версии AmneziaWG и Xray из последней проверки kalimera-updates. Это не
+# ошибка: строка идёт со статусом OK и попадает в группу «ОБНОВЛЕНИЯ» сводки.
+# Новое ядро сюда не входит: его ставит ночное обслуживание.
+check_updates() {
+    local level component message action
+    [[ -r "$updates_state" ]] || return 0
+    while IFS=$'\t' read -r level component message action; do
+        [[ "$level" == UPD ]] || continue
+        case "$component" in
+            amneziawg|xray) add OK "обновление компонента: $message" "${action:-}" ;;
+        esac
+    done <"$updates_state"
+}
+
+# Доставка уведомлений: без неё молчание Telegram не отличить от исправной работы.
+check_telegram() {
+    [[ "$telegram_enabled" == true && -x "$telegram_monitor" ]] || return 0
+    if "$telegram_monitor" --check >/dev/null 2>&1; then
+        add OK 'Telegram-уведомления: API доступен с этого сервера'
+    else
+        add WARN 'Telegram-уведомления не доставляются' 'API Telegram не отвечает или токен отклонён' \
+            'проверка: telegram-test; заменить бота: на ENTRY kalimera-deploy --resume --enable-telegram'
     fi
 }
 
@@ -303,6 +354,8 @@ main() {
     check_services
     check_reboot
     check_self_heal
+    check_updates
+    check_telegram
     check_health
     check_audit
     case "$segment" in

@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -286,6 +287,89 @@ class CascadeCheckTests(unittest.TestCase):
         # От FRONT строки нет: служба выключена в настройках либо отчёт не получен.
         self.assertIn("FRONT: сведений нет", text)
 
+    def total_block(self, rows: str) -> str:
+        """Группа «ИТОГ» сводки."""
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = result.stdout.index("\nИТОГ\n")
+        return result.stdout[start:]
+
+    def test_total_adds_up_recoveries_of_the_whole_cascade(self) -> None:
+        # Счёт по каскаду стоит рядом с остальными итогами, а не только в строках серверов.
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев 3, восстановлено 2, прошло без действия службы 1")
+            + row("EXIT", "OK", "самовосстановление: за 7 дней сбоев не было")
+            + row("FRONT", "OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 1", "служба Xray-core (перезапуск)")
+        )
+        self.assertIn("ИТОГ: OK 3 · WARN 0 · FAIL 0\n", text)
+        self.assertIn(
+            "самовосстановление за 7 дней: сбоев 4, восстановлено 3, прошло без действия службы 1 · статус OK\n",
+            text,
+        )
+
+    def test_total_counts_what_was_not_repaired(self) -> None:
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев 2, восстановлено 2")
+            + row(
+                "EXIT", "WARN", "самовосстановление: за 7 дней сбоев 2, восстановлено 1, не восстановлено 1",
+                "служба Unbound - попытки исчерпаны", "подробности: self-heal status",
+            )
+        )
+        self.assertIn(
+            "самовосстановление за 7 дней: сбоев 4, восстановлено 3, не восстановлено 1 · статус WARN\n", text
+        )
+
+    def test_total_without_failures_and_without_data(self) -> None:
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев не было")
+            + row("EXIT", "OK", "самовосстановление: за 7 дней сбоев не было")
+        )
+        self.assertIn("самовосстановление за 7 дней: сбоев не было · статус OK\n", text)
+        # Служба выключена на всех серверах: счёта нет, и это видно.
+        text = self.total_block(row("ENTRY", "OK", "самовосстановление выключено администратором"))
+        self.assertIn("самовосстановление: сведений нет\n", text)
+
+    def updates_block(self, rows: str) -> str:
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = result.stdout.index("\nОБНОВЛЕНИЯ\n")
+        return result.stdout[start:result.stdout.index("\nИТОГ\n", start)]
+
+    def test_available_component_updates_are_listed_once(self) -> None:
+        amnezia = "обновление компонента: доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1"
+        command = "на ENTRY: kalimera-deploy --resume --update-amneziawg"
+        text = self.updates_block(
+            row("ENTRY", "OK", amnezia, command)
+            + row("EXIT", "OK", amnezia, command)
+            + row(
+                "FRONT", "OK", "обновление компонента: доступен Xray 26.11.9, работает 26.10.31",
+                "на ENTRY: kalimera-deploy --resume --update-xray",
+            )
+        )
+        self.assertEqual(text.count("доступен AmneziaWG"), 1, text)
+        self.assertIn("доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1 → " + command, text)
+        self.assertIn("доступен Xray 26.11.9, работает 26.10.31 → на ENTRY: kalimera-deploy --resume --update-xray", text)
+        # Найденное обновление - не замечание: итог отчёта остаётся OK.
+        self.assertIn("GOOD:", self.run_body("render\n").stdout)
+
+    def test_no_component_updates_is_said_plainly(self) -> None:
+        self.assertIn("новых версий AmneziaWG и Xray нет", self.updates_block(row("ENTRY", "OK", "служба")))
+
+    def test_tsv_mode_prints_rows_and_keeps_the_exit_code(self) -> None:
+        cases = (
+            (row("ENTRY", "OK", "служба"), 0),
+            (row("ENTRY", "OK", "служба") + row("EXIT", "WARN", "замечание", "", "сделать"), 3),
+            (row("EXIT", "WARN", "замечание") + row("FRONT", "FAIL", "ошибка", "нет ответа"), 1),
+        )
+        for text, code in cases:
+            with self.subTest(code=code):
+                self.rows.write_text(text, encoding="utf-8")
+                result = self.run_body('print_rows\nexit "$exit_code"\n')
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout, text)
+
     def test_summary_wraps_a_long_error_inside_the_box(self) -> None:
         text = self.summary(
             row(
@@ -532,6 +616,99 @@ class KalimeraReportTests(unittest.TestCase):
     def test_no_failed_units_is_ok(self) -> None:
         result = self.run_body("systemctl() { :; }\ncheck_services\n")
         self.assertEqual(result.stdout, row("ENTRY", "OK", "неисправные модули systemd отсутствуют"))
+
+    def report(self, **variables) -> Path:
+        """kalimera-report с путями состояния во временном каталоге."""
+        values = {
+            "awg_node_role": "entry",
+            "awg_auto_reboot_state_dir": str(self.dir / "reboot"),
+            "kalimera_updates_state_dir": str(self.dir / "updates"),
+            "awg_telegram_monitor_path": str(self.dir / "telegram"),
+            **variables,
+        }
+        script = self.dir / "kalimera-report-custom"
+        text = render(REPORT, **values).replace("/var/run/reboot-required", str(self.dir / "reboot-required"))
+        script.write_text(text, encoding="utf-8")
+        return script
+
+    def run_report(self, body: str, **variables):
+        result = subprocess.run(
+            [bash_path(), "-c", f"source {shlex.quote(str(self.report(**variables)))}\n" + body],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_pending_reboot_waits_for_the_automatic_window(self) -> None:
+        marker = self.dir / "reboot-required"
+        self.assertEqual(self.run_report("check_reboot\n"), row("ENTRY", "OK", "перезагрузка не требуется"))
+        marker.write_text("", encoding="utf-8")
+        # Ожидание еженедельного окна - обычное состояние, а не замечание.
+        self.assertEqual(
+            self.run_report("check_reboot\n"),
+            row("ENTRY", "OK", "перезагрузка после обновления выполнится автоматически", "ожидает еженедельного окна"),
+        )
+        # Автоматика выключена в настройках: перезагрузка остаётся за человеком.
+        output = self.run_report("check_reboot\n", awg_auto_reboot_enabled=False)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tтребуется перезагрузка после обновления системы\t"), output)
+        self.assertIn("cascade-reboot --yes", output)
+
+    def test_overdue_reboot_is_a_warning(self) -> None:
+        marker = self.dir / "reboot-required"
+        marker.write_text("", encoding="utf-8")
+        old = time.time() - 30 * 86400
+        os.utime(marker, (old, old))
+        output = self.run_report("check_reboot\n")
+        self.assertTrue(output.startswith("ENTRY\tWARN\tтребуется перезагрузка после обновления системы\t"), output)
+        self.assertRegex(output, r"ждёт (29|30) дн\., автоматическая не выполнена")
+
+    def test_stopped_automatic_reboot_is_reported_on_entry_only(self) -> None:
+        state = self.dir / "reboot"
+        state.mkdir()
+        (state / "auto-blocked").write_text("2026-11-22 03:50 UTC: exit не вернулся после перезагрузки\n", encoding="utf-8")
+        output = self.run_report("check_reboot\n")
+        self.assertIn(
+            "ENTRY\tWARN\tавтоматическая перезагрузка каскада остановлена\t"
+            "2026-11-22 03:50 UTC: exit не вернулся после перезагрузки\t",
+            output,
+        )
+        self.assertIn("cascade-reboot auto on", output)
+        output = self.run_report("check_reboot\n", awg_node_role="exit")
+        self.assertEqual(output, row("EXIT", "OK", "перезагрузка не требуется"))
+
+    def test_component_updates_become_rows_without_a_warning(self) -> None:
+        updates = self.dir / "updates"
+        updates.mkdir()
+        (updates / "state").write_text(
+            "#checked\t2026-11-21 06:10 UTC\n"
+            "UPD\tkernel\tядро 6.8.0-99 установлено, работает 6.8.0-90\tsudo reboot\n"
+            "UPD\tamneziawg\tдоступен AmneziaWG: amneziawg-dkms 1.0 → 1.1\tна ENTRY: kalimera-deploy --resume --update-amneziawg\n"
+            "OK\txray\tXray 26.10.31 актуален\t\n",
+            encoding="utf-8",
+        )
+        # Ядро ставит ночное обслуживание: в напоминание оно не входит.
+        self.assertEqual(
+            self.run_report("check_updates\n"),
+            row(
+                "ENTRY", "OK", "обновление компонента: доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1",
+                "на ENTRY: kalimera-deploy --resume --update-amneziawg",
+            ),
+        )
+
+    def test_telegram_delivery_is_checked_only_when_enabled(self) -> None:
+        tool = self.dir / "telegram"
+        tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        tool.chmod(0o755)
+        self.assertEqual(self.run_report("check_telegram\n"), "")
+        output = self.run_report("check_telegram\n", awg_telegram_monitor_enabled=True)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tTelegram-уведомления не доставляются\t"), output)
+        tool.write_text('#!/bin/sh\n[ "$1" = --check ]\n', encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_telegram\n", awg_telegram_monitor_enabled=True),
+            row("ENTRY", "OK", "Telegram-уведомления: API доступен с этого сервера"),
+        )
 
     def run_body(self, body: str):
         return subprocess.run(
