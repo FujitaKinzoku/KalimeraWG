@@ -221,25 +221,34 @@ check_ru_proxy() {
 }
 
 # Ответ A-запроса: "адрес миллисекунды" или ошибка. Время берётся из dig +stats.
+# До трёх попыток с паузой: на рабочем каскаде единственный потерянный ответ DoH
+# через прокси давал «работа каскада нарушена», а повторный запуск проходил.
 dns_probe() {
-    local server="$1" port="$2" name="$3" output ip ms
-    output="$(dig +time=3 +tries=1 +stats "@$server" -p "$port" "$name" A 2>/dev/null || true)"
-    ip="$(awk '$4 == "A" { print $5; exit }' <<<"$output")"
-    ms="$(awk '/Query time:/ { print $4; exit }' <<<"$output")"
-    [[ -n "$ip" ]] || return 1
-    printf '%s %s\n' "$ip" "${ms:-0}"
+    local server="$1" port="$2" name="$3" output ip ms attempt
+    for attempt in 1 2 3; do
+        output="$(dig +time=3 +tries=1 +stats "@$server" -p "$port" "$name" A 2>/dev/null || true)"
+        ip="$(awk '$4 == "A" { print $5; exit }' <<<"$output")"
+        ms="$(awk '/Query time:/ { print $4; exit }' <<<"$output")"
+        if [[ -n "$ip" ]]; then
+            printf '%s %s\n' "$ip" "${ms:-0}"
+            return 0
+        fi
+        (( attempt == 3 )) || sleep 2
+    done
+    return 1
 }
 
 # Одна строка DNS: $1 - проверка, $2 - резолвер, $3 - порт, $4 - имя,
-# $5 - маршрут для успешного ответа, $6 - рекомендация при ошибке.
+# $5 - маршрут для успешного ответа, $6 - рекомендация при ошибке,
+# $7 - статус при ошибке (по умолчанию FAIL).
 # Строка идёт в сегмент DNS: в сводке она попадает в свою группу.
 dns_row() {
-    local label="$1" server="$2" port="$3" name="$4" route="$5" hint="$6" answer ip ms
+    local label="$1" server="$2" port="$3" name="$4" route="$5" hint="$6" failed="${7:-FAIL}" answer ip ms
     if answer="$(dns_probe "$server" "$port" "$name")"; then
         read -r ip ms <<<"$answer"
         emit DNS OK "$label" "$ip за $ms мс; $route" '' "$ms"
     else
-        emit DNS FAIL "$label" 'нет ответа' "$hint"
+        emit DNS "$failed" "$label" 'нет ответа' "$hint"
     fi
 }
 
@@ -258,7 +267,15 @@ check_dns() {
     dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или EXIT по политике ENTRY)' "$dns_hint"
     dns_row 'DNS: example.com напрямую через Unbound' 127.0.0.1 "$entry_dns_port" example.com 'маршрут: Unbound на 127.0.0.1' "$dns_hint"
     if [[ "$ru_state" == active ]]; then
-        dns_row 'DNS: yandex.ru напрямую через RU DoH' 127.0.0.1 "$entry_dns_ru_port" yandex.ru 'маршрут: RU DoH на 127.0.0.1' 'ru-proxy status; если SOCKS5 недоступен - ru-proxy-set или ru-proxy off'
+        # RU DoH отвечает через внешний SOCKS5-прокси. В области selected через
+        # него идут только выбранные домены и адреса: его сбой - замечание, а не
+        # отказ каскада, и при длительном сбое сторож сам переводит их напрямую.
+        if [[ "$ru_proxy_selected" == true ]]; then
+            dns_row 'DNS: yandex.ru напрямую через RU DoH' 127.0.0.1 "$entry_dns_ru_port" yandex.ru 'маршрут: RU DoH на 127.0.0.1' \
+                'затронуты только домены и адреса из proxy-domain и proxy-address; ru-proxy status; если SOCKS5 недоступен - ru-proxy-set или ru-proxy off' WARN
+        else
+            dns_row 'DNS: yandex.ru напрямую через RU DoH' 127.0.0.1 "$entry_dns_ru_port" yandex.ru 'маршрут: RU DoH на 127.0.0.1' 'ru-proxy status; если SOCKS5 недоступен - ru-proxy-set или ru-proxy off'
+        fi
     fi
 }
 

@@ -1078,6 +1078,102 @@ class AutoSwitchTests(AutoRebootCase):
         self.assertIn("cascade-reboot auto on", lines[0])
 
 
+class StatusOutputTests(AutoRebootCase):
+    def test_window_is_shown_with_its_schedule(self) -> None:
+        # Найдено на рабочем каскаде: окно «воскресенье 03:50 Asia/Manila» показано
+        # как «Sat 19:50 UTC» - без расписания это выглядело ошибкой дня недели.
+        answers = {
+            "NextElapseUSecRealtime": "Sat 2026-11-21 19:50:00 UTC\n",
+            "TimersCalendar": "{ OnCalendar=Sun *-*-* 03:50:00 Asia/Manila ; next_elapse=Sat 2026-11-21 19:50:00 UTC }\n",
+        }
+        production = self.root / "production"
+        (production / "group_vars" / "all").mkdir(parents=True)
+        with mock.patch.object(
+            MODULE.subprocess, "run", side_effect=lambda argv, **_kwargs: completed(0, answers[argv[4]])
+        ):
+            lines = MODULE.auto_reboot_status_lines(production)
+        self.assertEqual(
+            lines[-1],
+            "Следующее еженедельное окно: Sat 2026-11-21 19:50:00 UTC (расписание: Sun *-*-* 03:50:00 Asia/Manila)",
+        )
+
+    def test_last_check_is_a_summary_not_the_whole_report(self) -> None:
+        # Раньше печатался весь отчёт cascade-check: сотни строк, за которыми не
+        # было видно состояния автоматики.
+        report = self.state / "last-verify.txt"
+        body = "".join(f"OK   проверка {index}\n" for index in range(250))
+        report.write_text(body + "GOOD: все проверки пройдены (250)\nrc=0\n", encoding="utf-8")
+        lines = MODULE.last_verify_lines(report)
+        self.assertEqual(len(lines), 2, lines)
+        self.assertRegex(
+            lines[0],
+            r"^Проверка после последней перезагрузки ENTRY \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\): каскад исправен$",
+        )
+        self.assertEqual(lines[1], f"Полный отчёт: sudo cat {report}")
+
+    def test_last_check_lists_what_failed(self) -> None:
+        report = self.state / "last-verify.txt"
+        report.write_text(
+            "OK   служба dnsmasq\nFAIL туннель ENTRY–EXIT: TCP через туннель: ни одного подключения за 10 с\n"
+            "WARN неисправные модули systemd: certbot.service\nrc=1\n",
+            encoding="utf-8",
+        )
+        lines = MODULE.last_verify_lines(report)
+        self.assertTrue(lines[0].endswith(": каскад не прошёл проверку"), lines[0])
+        self.assertEqual(
+            lines[1:3],
+            [
+                "  FAIL туннель ENTRY–EXIT: TCP через туннель: ни одного подключения за 10 с",
+                "  WARN неисправные модули systemd: certbot.service",
+            ],
+        )
+        report.write_text("WARN замечание\nrc=3\n", encoding="utf-8")
+        self.assertTrue(MODULE.last_verify_lines(report)[0].endswith(": каскад работает, есть замечания"))
+
+    def test_status_without_a_report_tells_running_from_never(self) -> None:
+        with mock.patch.object(MODULE.subprocess, "run", return_value=completed(0)), mock.patch(
+            "builtins.print"
+        ) as printed:
+            MODULE.cascade_reboot_status()
+        self.assertIn("ещё идёт", printed.call_args.args[0])
+        with mock.patch.object(MODULE.subprocess, "run", return_value=completed(1)), mock.patch(
+            "builtins.print"
+        ) as printed:
+            MODULE.cascade_reboot_status()
+        self.assertIn("ещё не перезагружался", printed.call_args.args[0])
+
+
+class CascadeConfirmTests(AutoRebootCase):
+    OK_ROWS = [("ENTRY", "OK", "служба dnsmasq", "", "", "")]
+    FAIL_ROWS = [("DNS", "FAIL", "DNS: yandex.ru напрямую через RU DoH", "нет ответа", "", "")]
+
+    def confirmed(self, *answers):
+        results = list(answers)
+        with mock.patch.object(MODULE, "read_cascade_rows", side_effect=lambda: results.pop(0)) as read:
+            code, rows = MODULE.read_confirmed_cascade_rows()
+        return code, rows, read.call_count
+
+    def test_one_off_failure_is_not_taken_for_a_broken_cascade(self) -> None:
+        # Найдено на рабочем каскаде: первый cascade-check дал FAIL из-за одного
+        # потерянного ответа DNS, второй прошёл. По единственному запуску автоматика
+        # отложила бы перезагрузку на неделю.
+        code, rows, calls = self.confirmed((1, self.FAIL_ROWS), (0, self.OK_ROWS))
+        self.assertEqual((code, rows, calls), (0, self.OK_ROWS, 2))
+        self.assertEqual(self.sleep.call_count, 1)
+
+    def test_healthy_report_is_read_once(self) -> None:
+        self.assertEqual(self.confirmed((0, self.OK_ROWS))[2], 1)
+        self.sleep.assert_not_called()
+
+    def test_lasting_failure_is_reported_after_three_runs(self) -> None:
+        code, rows, calls = self.confirmed((1, self.FAIL_ROWS), (1, self.FAIL_ROWS), (1, self.FAIL_ROWS))
+        self.assertEqual((code, rows, calls), (1, self.FAIL_ROWS, 3))
+
+    def test_missing_report_is_asked_for_again(self) -> None:
+        code, rows, calls = self.confirmed((1, []), (0, self.OK_ROWS))
+        self.assertEqual((rows, calls), (self.OK_ROWS, 2))
+
+
 class CommandWiringTests(unittest.TestCase):
     def test_automation_commands_are_exposed_on_entry(self) -> None:
         gateway = (ROOT / "roles" / "security" / "templates" / "kalimera-admin-command.sh.j2").read_text(

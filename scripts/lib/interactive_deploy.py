@@ -4361,6 +4361,26 @@ def cascade_failures(rows: list[tuple[str, ...]]) -> list[str]:
     ]
 
 
+CASCADE_CONFIRM_ATTEMPTS = 3
+CASCADE_CONFIRM_SECONDS = 90
+
+
+def read_confirmed_cascade_rows() -> tuple[int, list[tuple[str, ...]]]:
+    """Отчёт cascade-check, в котором ошибка подтверждена повторными запусками.
+
+    Одна проверка может не пройти разово (потерянный ответ DNS через прокси). По
+    единственному запуску автоматика отложила бы перезагрузку на неделю, а
+    сводка сообщила бы «работа каскада нарушена» при исправном каскаде.
+    """
+    code, rows = read_cascade_rows()
+    for _ in range(CASCADE_CONFIRM_ATTEMPTS - 1):
+        if rows and not cascade_failures(rows):
+            break
+        time.sleep(CASCADE_CONFIRM_SECONDS)
+        code, rows = read_cascade_rows()
+    return code, rows
+
+
 def write_auto_state(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
@@ -4557,7 +4577,7 @@ def run_cascade_weekly(repo: Path, production: Path, vault_password: Path) -> No
         fail("Не найден production inventory или внешний пароль Ansible Vault")
     plan = cascade_reboot_plan(load_yaml(hosts_path))
     settings = auto_reboot_settings(production)
-    _code, rows = read_cascade_rows()
+    _code, rows = read_confirmed_cascade_rows()
     try:
         decision = decide_auto_reboot(repo, hosts_path, vault_password, plan, settings, rows)
     except SystemExit as error:
@@ -4602,17 +4622,50 @@ def auto_reboot_status_lines(production: Path) -> list[str]:
     lines = [f"Автоматическая перезагрузка: {state}"]
     if AUTO_STATUS_FILE.is_file():
         lines.append(f"Последнее решение: {AUTO_STATUS_FILE.read_text(encoding='utf-8').strip()}")
+    window = timer_property("NextElapseUSecRealtime")
+    if window:
+        # Время показано в часовом поясе сервера, расписание - в поясе ночного
+        # обслуживания: «воскресенье 03:50 Asia/Manila» - это ещё суббота по UTC.
+        schedule = re.search(r"OnCalendar=(.*?)\s*;", timer_property("TimersCalendar"))
+        lines.append(
+            f"Следующее еженедельное окно: {window}"
+            + (f" (расписание: {schedule.group(1)})" if schedule else "")
+        )
+    return lines
+
+
+def timer_property(name: str) -> str:
     try:
-        window = subprocess.run(
-            ["systemctl", "show", WEEKLY_TIMER, "-p", "NextElapseUSecRealtime", "--value"],
+        return subprocess.run(
+            ["systemctl", "show", WEEKLY_TIMER, "-p", name, "--value"],
             capture_output=True,
             text=True,
             check=False,
         ).stdout.strip()
     except OSError:
-        window = ""
-    if window:
-        lines.append(f"Следующее еженедельное окно: {window}")
+        return ""
+
+
+def last_verify_lines(report: Path) -> list[str]:
+    """Итог проверки после последней перезагрузки ENTRY в несколько строк.
+
+    Раньше команда печатала отчёт cascade-check целиком: сотни строк, за которыми
+    не было видно состояния автоматики.
+    """
+    text = report.read_text(encoding="utf-8")
+    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(report.stat().st_mtime))
+    code = re.search(r"^rc=(\d+)\s*$", text, flags=re.MULTILINE)
+    if code is None:
+        verdict = "итог не записан"
+    elif code.group(1) == "0":
+        verdict = "каскад исправен"
+    elif code.group(1) == "3":
+        verdict = "каскад работает, есть замечания"
+    else:
+        verdict = "каскад не прошёл проверку"
+    lines = [f"Проверка после последней перезагрузки ENTRY ({when}): {verdict}"]
+    lines += [f"  {problem}" for problem in cascade_problems(text)[:12]]
+    lines.append(f"Полный отчёт: sudo cat {report}")
     return lines
 
 
@@ -4622,14 +4675,17 @@ def cascade_reboot_status(production: Path | None = None) -> None:
             print(line)
     report = CASCADE_VERIFY_DIR / "last-verify.txt"
     if not report.is_file():
-        print("Результата проверки после перезагрузки ENTRY пока нет. Журнал проверки:")
-        subprocess.run(
-            ["journalctl", "-u", f"{CASCADE_VERIFY_UNIT}.service", "--no-pager", "-n", "40"],
-            check=False,
+        # Модуль проверки включён от перезагрузки ENTRY до записи результата.
+        pending = subprocess.run(
+            ["systemctl", "is-enabled", "--quiet", f"{CASCADE_VERIFY_UNIT}.service"], check=False
         )
+        if pending.returncode == 0:
+            print("Проверка после перезагрузки ENTRY ещё идёт: повторите cascade-reboot status через несколько минут.")
+        else:
+            print("Проверки после перезагрузки ENTRY нет: каскад ещё не перезагружался командой cascade-reboot.")
         return
-    print("Проверка после последней перезагрузки ENTRY:")
-    print(report.read_text(encoding="utf-8"))
+    for line in last_verify_lines(report):
+        print(line)
 
 
 def main() -> None:

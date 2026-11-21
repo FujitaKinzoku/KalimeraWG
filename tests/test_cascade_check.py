@@ -704,6 +704,57 @@ class KalimeraReportTests(unittest.TestCase):
             ),
         )
 
+    # Подставной dig: отвечает адресом, начиная с вызова номер $ANSWER_FROM.
+    FAKE_DIG = (
+        "sleep() { :; }\n"
+        "dig() {\n"
+        '    count=$(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 )); echo "$count" >"$COUNT"\n'
+        '    (( count >= ANSWER_FROM )) || return 0\n'
+        "    printf 'yandex.ru. 60 IN A 77.88.44.55\\n;; Query time: 131 msec\\n'\n"
+        "}\n"
+    )
+
+    def dns(self, body: str, answer_from: int, **variables) -> tuple[str, int]:
+        count = self.dir / "dig-count"
+        count.unlink(missing_ok=True)
+        output = self.run_report(
+            f"COUNT={shlex.quote(str(count))}\nANSWER_FROM={answer_from}\n" + self.FAKE_DIG + body, **variables
+        )
+        return output, int(count.read_text(encoding="utf-8"))
+
+    def test_one_lost_dns_answer_is_not_a_failure(self) -> None:
+        # Найдено на рабочем каскаде: единственный потерянный ответ DoH через прокси
+        # давал «FAIL: работа каскада нарушена», а повторный запуск проходил.
+        output, calls = self.dns("dns_row 'DNS: проверка' 127.0.0.1 5354 yandex.ru 'маршрут' 'подсказка'\n", 2)
+        self.assertEqual(output, row("DNS", "OK", "DNS: проверка", "77.88.44.55 за 131 мс; маршрут", "", "131"))
+        self.assertEqual(calls, 2)
+
+    def test_dns_that_stays_silent_fails_after_three_attempts(self) -> None:
+        output, calls = self.dns("dns_row 'DNS: проверка' 127.0.0.1 5354 yandex.ru 'маршрут' 'подсказка'\n", 99)
+        self.assertEqual(output, row("DNS", "FAIL", "DNS: проверка", "нет ответа", "подсказка"))
+        self.assertEqual(calls, 3)
+
+    def test_proxy_dns_failure_is_a_warning_when_only_selected_traffic_uses_the_proxy(self) -> None:
+        # Через прокси идут только выбранные домены: каскад при его сбое работает.
+        body = "ru_state=active\ncheck_dns\n"
+        output, _calls = self.dns(body, 99, entry_ru_proxy_enabled=True, entry_ru_proxy_scope="selected")
+        doh = [line for line in output.splitlines() if "через RU DoH" in line]
+        self.assertEqual(len(doh), 1, output)
+        self.assertTrue(doh[0].startswith("DNS\tWARN\tDNS: yandex.ru напрямую через RU DoH\tнет ответа\t"), doh[0])
+        self.assertIn("затронуты только домены и адреса из proxy-domain и proxy-address", doh[0])
+        # Клиентский резолвер и Unbound - по-прежнему ошибка: через них идёт весь DNS.
+        self.assertEqual(output.count("DNS\tFAIL\t"), 3, output)
+        # Весь российский трафик идёт через прокси: его сбой - ошибка.
+        output, _calls = self.dns(body, 99, entry_ru_proxy_enabled=True, entry_ru_proxy_scope="all")
+        self.assertIn("DNS\tFAIL\tDNS: yandex.ru напрямую через RU DoH\tнет ответа\t", output)
+
+    def test_health_follows_the_same_rule_for_the_proxy_dns(self) -> None:
+        text = AWG_HEALTH.read_text(encoding="utf-8")
+        start = text.index("check_minor 'прослушивание российского DoH' dns_resolves_a ")
+        block = text[text.rindex("{% if", 0, start):text.index("{% endif %}", start)]
+        self.assertIn("(entry_ru_proxy_scope | default('all')) == 'selected'", block)
+        self.assertIn("{% else %}\n    check 'прослушивание российского DoH' dns_resolves_a ", block)
+
     def test_telegram_delivery_is_checked_only_when_enabled(self) -> None:
         tool = self.dir / "telegram"
         tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
@@ -759,7 +810,9 @@ class KalimeraReportTests(unittest.TestCase):
     def test_dns_rows_belong_to_the_dns_segment(self) -> None:
         text = REPORT.read_text(encoding="utf-8")
         self.assertIn("emit DNS OK", text)
-        self.assertIn("emit DNS FAIL", text)
+        # Статус неответившей проверки - FAIL, если строка не задаёт иной.
+        self.assertIn('failed="${7:-FAIL}"', text)
+        self.assertIn('emit DNS "$failed"', text)
 
     def test_link_rows_are_measured_in_milliseconds(self) -> None:
         text = REPORT.read_text(encoding="utf-8")
