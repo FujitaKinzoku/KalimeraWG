@@ -801,6 +801,13 @@ check 'пороговое хранилище 2-of-N открыто и аутен
 check 'защищённые службы получают конфигурацию через systemd credentials' runtime_secret_dependencies_are_loaded
 {% endif %}
 check_minor 'таймер аудита сервера' systemctl is-active --quiet awg-server-audit.timer
+{% if awg_self_heal_enabled | default(true) | bool %}
+if [[ -e {{ awg_self_heal_manual_off_flag | default('/var/lib/awg-self-heal.manual-off') | quote }} ]]; then
+    check_passed 'самовосстановление выключено администратором'
+else
+    check_minor 'таймер самовосстановления' systemctl is-active --quiet {{ awg_self_heal_timer_name | default('awg-self-heal.timer') | quote }}
+fi
+{% endif %}
 {% if awg_telegram_monitor_enabled | default(false) | bool %}
 if [[ -e {{ awg_telegram_monitor_deferred_flag | quote }} ]]; then
     check_passed 'запуск мониторинга Telegram отложен до финальной проверки'

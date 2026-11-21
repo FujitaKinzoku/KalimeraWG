@@ -1,0 +1,11 @@
+[Unit]
+Description=Периодическое самовосстановление сервера KalimeraWG
+
+[Timer]
+OnBootSec={{ awg_self_heal_boot_delay }}
+OnUnitInactiveSec={{ awg_self_heal_interval }}
+AccuracySec=10s
+Unit=awg-self-heal.service
+
+[Install]
+WantedBy=timers.target

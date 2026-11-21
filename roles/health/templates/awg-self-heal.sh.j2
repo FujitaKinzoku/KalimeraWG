@@ -1,0 +1,665 @@
+#!/usr/bin/env bash
+# Самовосстановление сервера KalimeraWG. Раз в несколько минут запускает
+# awg-health и для каждой непройденной проверки выполняет действие именно для
+# неё. Правила:
+#   - действие выполняется, только если проверка не прошла дважды подряд:
+#     разовый сбой не должен приводить к перезапуску служб;
+#   - после действий проверка повторяется, результат записывается;
+#   - на одно действие не больше нескольких попыток в час: при внешней причине
+#     служба останавливается и сообщает о ней, а не перезапускает всё по кругу;
+#   - расхождение настроек с выпуском чинит только kalimera-deploy --resume, а
+#     признаки вмешательства не исправляются вовсе: о них только сообщается.
+# Состояние хранится в RAM (/run), постоянных журналов не появляется.
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly role={{ awg_node_role | default('') | quote }}
+readonly health={{ awg_health_script_path | default('/usr/local/sbin/awg-health') | quote }}
+readonly state_dir={{ awg_self_heal_state_dir | default('/run/awg-self-heal') | quote }}
+readonly state_file="$state_dir/state"
+readonly history_file="$state_dir/history"
+readonly attempts_file="$state_dir/attempts"
+readonly notified_file="$state_dir/notified"
+readonly manual_off_flag={{ awg_self_heal_manual_off_flag | default('/var/lib/awg-self-heal.manual-off') | quote }}
+readonly deploy_marker={{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') | quote }}
+readonly deploy_marker_ttl=10800
+readonly timer={{ awg_self_heal_timer_name | default('awg-self-heal.timer') | quote }}
+readonly confirm_delay={{ awg_self_heal_confirm_delay | default(20) | int }}
+readonly settle_delay={{ awg_self_heal_settle_delay | default(10) | int }}
+readonly max_attempts={{ awg_self_heal_max_attempts | default(3) | int }}
+readonly attempts_window={{ awg_self_heal_attempts_window | default(3600) | int }}
+readonly notifier={{ awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor') | quote }}
+readonly unit_prefix='модуль systemd '
+
+usage() { echo 'Использование: self-heal [status|run|on|off]'; }
+mode=status
+case "${1:-status}" in
+    status|run|on|off) [[ $# -le 1 ]] || { usage >&2; exit 2; }; mode="${1:-status}" ;;
+    --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; mode=scheduled ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+# Таблица «проверка awg-health → восстановление». Каждое название проверки
+# относится ровно к одному классу; полноту таблицы проверяет
+# tests/test_self_heal.py. Результат: plan_action - действие, либо plan_reason:
+#   deploy   - расхождение настроек с выпуском;
+#   external - причина вне сервера, текст после двоеточия - что проверить;
+#   manual   - намеренно не исправляется автоматически.
+classify() {
+    plan_action=''
+    plan_reason=''
+    case "$1" in
+        'запуск от root'|'Ubuntu 24.04')
+            plan_reason='manual:условие запуска, а не неисправность' ;;
+        'модуль AmneziaWG')
+            plan_action=kernel_module ;;
+        'пересылка IPv4'|'rp_filter all'|'ответы на ICMP echo отключены')
+            plan_action=sysctl ;;
+        'UFW активен')
+            plan_action=ufw_enable ;;
+        'журналирование UFW отключено')
+            plan_action=ufw_logging_off ;;
+        'Fail2Ban активен'|'строгая политика Fail2Ban применяется')
+            plan_action=fail2ban ;;
+        'SSH активен')
+            plan_action=ssh ;;
+        'пороговое хранилище 2-of-N открыто и аутентифицировано')
+            plan_action=secrets_unlock ;;
+        'таймер аудита сервера')
+            plan_action=timer_audit ;;
+        'таймер мониторинга Telegram')
+            plan_action=timer_telegram ;;
+        'таймер самовосстановления')
+            plan_action=timer_self ;;
+        'таймер watchdog российского прокси')
+            plan_action=timer_proxy_watch ;;
+        'служба клиентского AWG'|'клиентский интерфейс AWG'|'состояние клиентского AWG доступно')
+            plan_action=awg_client ;;
+        'служба совместимого клиентского AWG'|'совместимый клиентский интерфейс AWG'|'состояние совместимого AWG доступно'|'служба совместимого AWG не завершилась с ошибкой')
+            plan_action=awg_legacy ;;
+        'служба mobile/AWG3+'|'мобильный интерфейс AWG 3.1'|'состояние mobile/AWG3+ доступно'|'служба мобильного AWG не завершилась с ошибкой')
+            plan_action=awg_mobile ;;
+        'внешний UDP/8443 мобильного AWG открыт напрямую')
+            plan_action=mobile_firewall_apply ;;
+        'внешний UDP/8443 неактивного мобильного AWG закрыт')
+            plan_action=mobile_firewall_remove ;;
+        'служба AWG 3+ до EXIT сервера'|'служба AWG до EXIT сервера'|'интерфейс AWG до EXIT сервера'|'состояние AWG 3+ до EXIT сервера доступно'|'состояние AWG до EXIT сервера доступно'|'свежий handshake ENTRY–EXIT')
+            plan_action=transit ;;
+        'служба AWG 3+ EXIT сервера'|'служба AWG EXIT сервера'|'интерфейс AWG EXIT сервера'|'состояние AWG 3+ EXIT сервера доступно'|'состояние AWG EXIT сервера доступно'|'свежий handshake EXIT–ENTRY')
+            plan_action=transit ;;
+        'ограниченный NAT EXIT сервера'|'изоляция клиентов EXIT сервера'|'исходящий TCP MSS EXIT сервера'|'входящий TCP MSS EXIT сервера')
+            # Эти правила ставит запуск межсерверного интерфейса EXIT.
+            plan_action=transit ;;
+        'согласование локальных VPN-пиров')
+            plan_action=local_peers ;;
+        'ipset российских сетей'|'rule-set REALITY для российских подсетей корректен')
+            plan_action=ru_zone ;;
+        'служба маршрутизации'|'правило policy routing для mark '*|'маршрут по умолчанию в таблице '*|'mark 0x'*' направляется через '*|'ipset force_'*|'цепочка маршрутизации '*|'принудительный DNS мобильного интерфейса'|'принудительное перенаправление DNS UDP'|'политика прямых российских портов пуста'|'почтовый порт 25 не обходится'|'исходящий TCP MSS clamp ENTRY сервера'|'входящий TCP MSS clamp ENTRY сервера'|'списки proxy-domain и proxy-address направляются в RU-прокси'|'UDP списков proxy-* не выходит мимо прокси'|'российские сети выходят напрямую с ENTRY, область selected'|'RU UDP направляется через SOCKS5'|'force_ru UDP обходит несовместимый SOCKS5'|'российский UDP обходит несовместимый SOCKS5'|'российские назначения идут напрямую через ENTRY сервер')
+            plan_action=routing ;;
+        'служба dnsmasq'|'клиентский DNS по UDP'|'DNS совместимых клиентов по UDP'|'DNS мобильных клиентов по UDP'|'AAAA подавляются для предотвращения обхода IPv4-каскада'|'служебные имена DoH не разрешаются: браузеры клиентов остаются на DNS ENTRY'|'backend FRONT разрешает российские домены через dnsmasq')
+            plan_action=dnsmasq ;;
+        'служба Unbound'|'рекурсивный DNS EXIT сервера активен')
+            plan_action=unbound ;;
+        'основной DNS по UDP'|'системное разрешение имён'|'рекурсивный DNS EXIT сервера отвечает')
+            # Служба работает, но не отвечает: чаще всего Unbound после сбоя связи
+            # считает вышестоящие серверы недоступными. Перезапуск стёр бы кэш и
+            # при настоящем отказе этих серверов только ухудшил бы положение.
+            plan_action=unbound_infra ;;
+        'российские имена разрешает российский DoT с ENTRY')
+            plan_action=ru_dns_sync ;;
+        'rule-set REALITY для ru-domain/se-domain корректен')
+            plan_action=domain_sync ;;
+        'служба sing-box'|'российский TUN-интерфейс'|'запасной транспорт REALITY прослушивает порт')
+            plan_action=sing_box ;;
+        'отдельная служба backend FRONT активна'|'backend FRONT прослушивает служебный порт')
+            plan_action=front_backend ;;
+        'служба Xray-core FRONT-релея'|'аплинк packet-up без тела доходит до Xray нового FRONT (напрямую, до commit замены)'|'аплинк packet-up через CDN доходит до Xray (GET без тела)')
+            plan_action=xray ;;
+        'служба Nginx FRONT-релея'|'прямой TLS endpoint FRONT доступен')
+            plan_action=nginx ;;
+        'реестр VLESS-пользователей согласован с Xray')
+            plan_action=vless_sync ;;
+        'TLS-сертификат FRONT origin-домена не близок к истечению')
+            plan_action=certbot ;;
+        'прослушивание российского DoH')
+            plan_reason='external:SOCKS5-прокси; режим переключает сторож прокси, состояние: ru-proxy status' ;;
+        'dest-сайт REALITY поддерживает TLS 1.3')
+            plan_reason='external:сайт маскировки; заменить: reality-dest-switch list, затем reality-dest-switch set ДОМЕН' ;;
+        'TLS endpoint CDN доступен')
+            plan_reason='external:ресурс CDN или его DNS-запись' ;;
+        'REALITY-порт ENTRY доступен с FRONT')
+            plan_reason='external:ENTRY; выполните на нём awg-health --strict' ;;
+        'sing-box вручную отключён'|'watchdog российского прокси вручную отключён')
+            plan_reason='manual:состояние задано командой ru-proxy off; вернуть его: ru-proxy off' ;;
+        'UFW соответствует последней управляемой политике'|'systemd journal хранится только в RAM'|'постоянный rsyslog отключён'|'coredump не сохраняются'|'учёт входов хранится только в RAM'|'состояние Fail2Ban хранится только в RAM'|'рабочий администратор kalimera и ограниченный sudo'|'защищённые службы получают конфигурацию через systemd credentials')
+            plan_reason=deploy ;;
+        'UFW ограничивает '*|'UFW не разрешает '*|'прежний FRONT сохранён до подтверждения замены')
+            plan_reason=deploy ;;
+        'MTU '*|'полный профиль '*|'внешний UDP/53 не перехватывается мобильным AWG'|'systemd-networkd не удаляет правила policy routing')
+            plan_reason=deploy ;;
+        *'изолированы'*)
+            plan_reason=deploy ;;
+        'системный резолвер использует локальный Unbound'|'синтаксис '*|'DNS-запросы не журналируются и промежуточные кэши отключены'|'sing-box не журналирует активность и не кэширует DNS')
+            plan_reason=deploy ;;
+        'sing-box намеренно отключён'|'watchdog российского прокси намеренно отключён')
+            plan_reason=deploy ;;
+        'backend FRONT содержит только служебный peer'|'REALITY-инбаунд содержит uuid FRONT-релея'|'REALITY RU-маршрут синхронизирован с состоянием SOAX')
+            plan_reason=deploy ;;
+        'VLESS Encryption ML-KEM-768 включён на FRONT и в клиентских JSON'|'Xray не может изменять каталог конфигурации'|'Nginx не сохраняет журналы активности')
+            plan_reason=deploy ;;
+        "$unit_prefix"*)
+            classify_unit "${1#"$unit_prefix"}" ;;
+        *)
+            plan_reason='manual:для этой проверки действие не задано' ;;
+    esac
+}
+
+# Неисправный модуль systemd. Повторно запускаются только периодические задания:
+# это то же, что сделал бы их таймер. Службы, через которые идёт трафик, чинятся
+# по своим проверкам awg-health.
+classify_unit() {
+    case "$1" in
+        awg-maintenance.service)
+            plan_action=unit_maintenance ;;
+        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|certbot.service|awg-local-peer-apply.service)
+            plan_action="unit_rerun:$1" ;;
+        *)
+            plan_reason='manual:причина: sudo journalctl -u ИМЯ -b --no-pager' ;;
+    esac
+}
+
+# Порядок выполнения: сначала то, от чего зависят остальные.
+readonly -a action_order=(
+    secrets_unlock kernel_module sysctl ufw_enable ufw_logging_off ssh fail2ban
+    awg_client awg_legacy awg_mobile transit local_peers ru_zone sing_box routing
+    mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
+    domain_sync dnsmasq
+    front_backend xray vless_sync nginx certbot
+    timer_audit timer_telegram timer_self timer_proxy_watch unit_maintenance
+)
+
+action_title() {
+    case "$1" in
+        secrets_unlock) echo 'открытие хранилища секретов' ;;
+        kernel_module) echo 'сборка модуля AmneziaWG под установленные ядра' ;;
+        sysctl) echo 'повторное применение параметров ядра' ;;
+        ufw_enable) echo 'включение UFW' ;;
+        ufw_logging_off) echo 'отключение журналирования UFW' ;;
+        ssh) echo 'запуск SSH' ;;
+        fail2ban) echo 'перезапуск Fail2Ban' ;;
+        awg_client) echo 'перезапуск клиентского интерфейса AWG' ;;
+        awg_legacy) echo 'перезапуск совместимого интерфейса AWG' ;;
+        awg_mobile) echo 'перезапуск интерфейса mobile/AWG3+' ;;
+        transit) echo 'перезапуск межсерверного интерфейса AWG' ;;
+        local_peers) echo 'повторное применение локальных VPN-пиров' ;;
+        ru_zone) echo 'загрузка набора российских сетей' ;;
+        sing_box) echo 'перезапуск sing-box' ;;
+        routing) echo 'повторное применение маршрутизации' ;;
+        mobile_firewall_apply) echo 'открытие UDP-порта mobile/AWG3+' ;;
+        mobile_firewall_remove) echo 'закрытие UDP-порта mobile/AWG3+' ;;
+        unbound) echo 'перезапуск Unbound' ;;
+        unbound_infra) echo 'сброс состояния вышестоящих DNS-серверов в Unbound' ;;
+        ru_dns_sync) echo 'пересборка российских зон DNS' ;;
+        domain_sync) echo 'пересборка списков доменов для VLESS' ;;
+        dnsmasq) echo 'перезапуск dnsmasq' ;;
+        front_backend) echo 'перезапуск backend FRONT' ;;
+        xray) echo 'перезапуск Xray-core' ;;
+        vless_sync) echo 'синхронизация пользователей VLESS с Xray' ;;
+        nginx) echo 'перезапуск Nginx' ;;
+        certbot) echo 'продление TLS-сертификата' ;;
+        timer_audit|timer_telegram|timer_self|timer_proxy_watch) echo 'включение таймера' ;;
+        unit_maintenance) echo 'повторный запуск ночного обслуживания' ;;
+        unit_rerun:*) echo "повторный запуск ${1#unit_rerun:}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+restart_unit() {
+    systemctl reset-failed "$1" 2>/dev/null || true
+    systemctl restart "$1"
+}
+
+run_action() {
+    case "$1" in
+        sysctl) sysctl --system >/dev/null ;;
+        ufw_enable) ufw --force enable >/dev/null ;;
+        ufw_logging_off) ufw logging off >/dev/null ;;
+        ssh) systemctl start ssh.service ;;
+        fail2ban) restart_unit fail2ban.service ;;
+        timer_audit) systemctl enable --now {{ awg_server_audit_timer_name | default('awg-server-audit.timer') | quote }} ;;
+        timer_telegram) systemctl enable --now {{ awg_telegram_monitor_timer_name | default('awg-telegram-monitor.timer') | quote }} ;;
+        timer_self) systemctl enable --now "$timer" ;;
+        unit_rerun:*)
+            systemctl reset-failed "${1#unit_rerun:}" 2>/dev/null || true
+            systemctl start --no-block "${1#unit_rerun:}"
+            ;;
+        unit_maintenance)
+            # Обслуживание идёт минуты и само повторяет аудит: результат виден в
+            # следующем цикле, поэтому запуск без ожидания.
+            systemctl reset-failed awg-maintenance.service 2>/dev/null || true
+            systemctl start --no-block awg-maintenance.service
+            ;;
+{% if runtime_secrets_enabled | default(false) | bool %}
+        secrets_unlock)
+            # Только если служба открытия не работает: её перезапуск остановил бы
+            # все зависящие от неё службы каскада.
+            if ! systemctl is-active --quiet {{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') | quote }}; then
+                systemctl reset-failed {{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') | quote }} 2>/dev/null || true
+                systemctl start {{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') | quote }}
+            else
+                # Хранилище открыто, но проверку не проходит: это не сбой запуска.
+                return 2
+            fi
+            ;;
+{% endif %}
+{% if awg_node_role | default('') in ['entry', 'exit'] %}
+        kernel_module) /usr/local/sbin/awg-kernel-guard >/dev/null ;;
+        unbound) restart_unit unbound.service ;;
+        unbound_infra) unbound-control flush_infra all >/dev/null 2>&1 || restart_unit unbound.service ;;
+{% endif %}
+{% if awg_node_role | default('') == 'entry' %}
+        awg_client) restart_unit awg-quick@{{ entry_client_interface | default('awg0') }}.service ;;
+{% if entry_legacy_client_available | default(false) | bool %}
+        awg_legacy) restart_unit awg-quick@{{ entry_legacy_client_interface | default('awg-old') }}.service ;;
+{% endif %}
+{% if entry_mobile_client_available | default(false) | bool %}
+        awg_mobile) restart_unit {{ awg3_mobile_service_name | default('awg-quick@awg-mobile.service') | quote }} ;;
+        mobile_firewall_apply) {{ entry_mobile_firewall_path | default('/usr/local/sbin/awg-mobile-firewall') | quote }} apply ;;
+        mobile_firewall_remove) {{ entry_mobile_firewall_path | default('/usr/local/sbin/awg-mobile-firewall') | quote }} remove ;;
+{% endif %}
+{% if awg3_transit_enabled | default(false) | bool %}
+        transit) restart_unit {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} ;;
+{% else %}
+        transit) restart_unit awg-quick@{{ entry_exit_interface | default('awg3') }}.service ;;
+{% endif %}
+        local_peers) restart_unit awg-local-peer-apply.service ;;
+        ru_zone) {{ entry_ru_zone_update_script_path | default('/usr/local/sbin/awg-ru-zone-update') | quote }} >/dev/null ;;
+        routing)
+            systemctl reload {{ entry_routing_service_name | default('awg-entry-routing.service') | quote }} ||
+                restart_unit {{ entry_routing_service_name | default('awg-entry-routing.service') | quote }}
+            ;;
+        dnsmasq) restart_unit dnsmasq.service ;;
+        domain_sync)
+            # Пакет секретов не обновляется: списки не меняются, пересобирается
+            # только производное от них.
+            KALIMERA_LISTS_NO_SEAL=1 /usr/local/sbin/ru-domain sync >/dev/null
+            ;;
+        ru_dns_sync)
+            KALIMERA_LISTS_NO_SEAL=1 /usr/local/sbin/ru-domain sync >/dev/null || return 1
+            # Зоны не загружены - Unbound перезапускается. Загружены, но российский
+            # DoT не отвечает - сбрасывается только состояние его серверов: кэш
+            # остальных имён остаётся.
+            local forwards
+            forwards="$(unbound-control list_forwards 2>/dev/null || true)"
+            if grep -Eq '^ru\. ' <<<"$forwards"; then
+                unbound-control flush_infra all >/dev/null
+            else
+                restart_unit unbound.service
+            fi
+            ;;
+        sing_box) restart_unit {{ sing_box_service_name | default('sing-box.service') | quote }} ;;
+        front_backend) restart_unit {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} ;;
+        timer_proxy_watch) systemctl enable --now {{ entry_ru_proxy_watch_timer_name | default('awg-ru-proxy-watch.timer') | quote }} ;;
+{% endif %}
+{% if awg_node_role | default('') == 'exit' %}
+{% if awg3_transit_enabled | default(false) | bool %}
+        transit) restart_unit {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} ;;
+{% else %}
+        transit) restart_unit awg-quick@{{ exit_awg_interface | default('awg3') }}.service ;;
+{% endif %}
+{% endif %}
+{% if awg_node_role | default('') == 'front' %}
+        xray) restart_unit {{ front_xray_service_name | default('xray.service') | quote }} ;;
+        nginx) restart_unit nginx.service ;;
+        vless_sync) {{ front_vless_user_command_path | default('/usr/local/sbin/vless-user') | quote }} sync >/dev/null ;;
+        certbot) systemctl start certbot.service ;;
+{% endif %}
+        *)
+            # Действие не относится к роли этого сервера.
+            return 2
+            ;;
+    esac
+}
+
+{# Ниже нет подстановок Ansible: запись длины массива bash начинается теми же
+   символами, что комментарий Jinja, поэтому остаток шаблона не разбирается. #}
+{% raw %}
+# После перезапуска интерфейса или sing-box правила и маршруты ENTRY
+# применяются заново, а локальные VPN-пиры возвращаются на интерфейс.
+follow_up_actions() {
+    case "$1" in
+        awg_client|awg_legacy|awg_mobile) [[ "$role" != entry ]] || echo 'local_peers routing' ;;
+        transit|sing_box|ru_zone) [[ "$role" != entry ]] || echo routing ;;
+    esac
+}
+
+now_text() { date -u '+%Y-%m-%d %H:%M UTC'; }
+
+# Ночное обслуживание повторяется не чаще раза в шесть часов: оно ставит пакеты и
+# идёт минуты, а повторять его каждый час незачем.
+attempts_window_for() {
+    case "$1" in
+        unit_maintenance) echo 21600 ;;
+        *) echo "$attempts_window" ;;
+    esac
+}
+
+attempts_used() {
+    local since
+    [[ -r "$attempts_file" ]] || { echo 0; return 0; }
+    since=$(( $(date +%s) - $(attempts_window_for "$1") ))
+    awk -F '\t' -v since="$since" -v action="$1" '$1 >= since && $2 == action { count++ } END { print count + 0 }' "$attempts_file"
+}
+
+# Открытие хранилища повторяется в каждом цикле: оно ничего не перезапускает и
+# срабатывает, как только второй сервер снова отдаёт свою долю ключа.
+attempts_allowed() {
+    case "$1" in
+        unit_maintenance) echo 1 ;;
+        secrets_unlock) echo 1000 ;;
+        *) echo "$max_attempts" ;;
+    esac
+}
+
+record_attempt() {
+    printf '%s\t%s\n' "$(date +%s)" "$1" >>"$attempts_file"
+}
+
+history_add() {
+    printf '%s\t%s\n' "$(now_text)" "$1" >>"$history_file"
+    tail -n 50 "$history_file" >"$history_file.tmp" && mv -f "$history_file.tmp" "$history_file"
+}
+
+# Состояние последнего запуска: "СТАТУС<TAB>время<TAB>восстановлено<TAB>не устранено".
+write_state() {
+    local temporary
+    temporary="$(mktemp "$state_file.XXXXXX")"
+    printf '%s\t%s\t%s\t%s\n' "$1" "$(now_text)" "${2:-}" "${3:-}" >"$temporary"
+    chmod 0644 "$temporary"
+    mv -f "$temporary" "$state_file"
+}
+
+join_items() {
+    local joined='' item
+    for item in "$@"; do
+        joined+="${joined:+; }$item"
+    done
+    printf '%s' "$joined"
+}
+
+# Уведомление уходит один раз на каждое новое содержание: постоянная ошибка не
+# должна повторяться в Telegram каждые несколько минут.
+notify_once() {
+    local text="$1" digest
+    [[ -x "$notifier" ]] || return 0
+    digest="$(printf '%s' "$text" | sha256sum | cut -d ' ' -f 1)"
+    [[ "$(cat "$notified_file" 2>/dev/null || true)" != "$digest" ]] || return 0
+    if "$notifier" --notify "$text" >/dev/null 2>&1; then
+        printf '%s\n' "$digest" >"$notified_file"
+    fi
+}
+
+# Непройденные проверки: строки awg-health со статусом FAIL или WARN и
+# неисправные модули systemd.
+collect_failures() {
+    local rows status label _hint unit
+    failures=()
+    rows="$(mktemp "$state_dir/health.XXXXXX")"
+    KALIMERA_REPORT_STYLE=plain KALIMERA_REPORT_RESULTS="$rows" "$health" --strict >/dev/null 2>&1 || true
+    while IFS=$'\t' read -r status label _hint; do
+        [[ "$status" == FAIL || "$status" == WARN ]] || continue
+        [[ -n "$label" ]] || continue
+        failures+=("$label")
+    done <"$rows"
+    rm -f "$rows"
+    while read -r unit _; do
+        [[ -n "$unit" ]] || continue
+        case "$unit" in
+            awg-server-audit.service|awg-self-heal.service) continue ;;
+        esac
+        failures+=("$unit_prefix$unit")
+    done < <(systemctl --failed --no-legend --plain --no-pager 2>/dev/null || true)
+}
+
+contains() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [[ "$item" != "$needle" ]] || return 0
+    done
+    return 1
+}
+
+deploy_in_progress() {
+    local age
+    [[ -e "$deploy_marker" ]] || return 1
+    age=$(( $(date +%s) - $(stat -c %Y "$deploy_marker" 2>/dev/null || echo 0) ))
+    (( age >= 0 && age < deploy_marker_ttl ))
+}
+
+reason_text() {
+    case "$1" in
+        deploy) echo 'расхождение настроек с выпуском: на ENTRY kalimera-deploy --resume' ;;
+        external:*) echo "причина вне сервера: ${1#external:}" ;;
+        manual:*) echo "не исправляется автоматически: ${1#manual:}" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+show_status() {
+    local status when repaired unresolved
+    if [[ -e "$manual_off_flag" ]]; then
+        echo 'Самовосстановление: выключено вручную. Включить: self-heal on'
+    elif systemctl is-active --quiet "$timer"; then
+        echo 'Самовосстановление: включено.'
+    else
+        echo 'Самовосстановление: таймер не активен. Включить: self-heal on'
+    fi
+    if [[ ! -r "$state_file" ]]; then
+        echo 'Запусков после загрузки сервера ещё не было.'
+    else
+        IFS=$'\t' read -r status when repaired unresolved <"$state_file" || true
+        case "$status" in
+            OK) echo "Последний запуск $when: все проверки пройдены, вмешательство не требовалось." ;;
+            REPAIRED) echo "Последний запуск $when: восстановлено." ;;
+            UNRESOLVED) echo "Последний запуск $when: есть неустранённые ошибки." ;;
+            SKIPPED) echo "Последний запуск $when: пропущен: $unresolved." ;;
+        esac
+        [[ "$status" == SKIPPED || -z "$repaired" ]] || echo "  восстановлено: $repaired"
+        [[ "$status" == SKIPPED || -z "$unresolved" ]] || echo "  не устранено: $unresolved"
+    fi
+    if [[ -s "$history_file" ]]; then
+        echo 'Последние события:'
+        tail -n 10 "$history_file" | sed 's/\t/  /; s/^/  /'
+    fi
+}
+
+case "$mode" in
+    status)
+        show_status
+        exit 0
+        ;;
+    on)
+        rm -f "$manual_off_flag"
+        systemctl enable --now "$timer" >/dev/null
+        echo 'Самовосстановление включено.'
+        exit 0
+        ;;
+    off)
+        install -m 0644 /dev/null "$manual_off_flag"
+        systemctl disable --now "$timer" >/dev/null
+        echo 'Самовосстановление выключено. Включить: self-heal on'
+        exit 0
+        ;;
+esac
+
+install -d -m 0755 "$state_dir"
+exec 9>"$state_dir/lock"
+flock -n 9 || { [[ "$mode" == scheduled ]] || echo 'Самовосстановление уже выполняется.'; exit 0; }
+
+if [[ "$mode" == scheduled && -e "$manual_off_flag" ]]; then
+    exit 0
+fi
+if deploy_in_progress; then
+    write_state SKIPPED '' 'идёт kalimera-deploy'
+    [[ "$mode" == scheduled ]] || echo 'Идёт kalimera-deploy: самовосстановление ничего не меняет.'
+    exit 0
+fi
+if systemctl is-active --quiet awg-maintenance.service 2>/dev/null ||
+        [[ "$(systemctl is-active awg-maintenance.service 2>/dev/null || true)" == activating ]]; then
+    write_state SKIPPED '' 'идёт ночное обслуживание'
+    [[ "$mode" == scheduled ]] || echo 'Идёт обслуживание пакетов: самовосстановление ничего не меняет.'
+    exit 0
+fi
+
+declare -a failures=()
+collect_failures
+if (( ${#failures[@]} == 0 )); then
+    write_state OK
+    rm -f "$notified_file"
+    [[ "$mode" == scheduled ]] || echo 'Все проверки пройдены, вмешательство не требуется.'
+    exit 0
+fi
+
+# Подтверждение: действие выполняется только для проверки, не прошедшей дважды.
+declare -a first=("${failures[@]}")
+sleep "$confirm_delay"
+collect_failures
+declare -a confirmed=()
+for label in "${first[@]}"; do
+    if contains "$label" "${failures[@]}"; then
+        confirmed+=("$label")
+    fi
+done
+if (( ${#confirmed[@]} == 0 )); then
+    write_state OK
+    history_add "разовый сбой, прошёл сам: $(join_items "${first[@]}")"
+    [[ "$mode" == scheduled ]] || echo 'Сбой был разовым и прошёл сам; вмешательство не потребовалось.'
+    exit 0
+fi
+
+# План: действие для каждой подтверждённой проверки либо причина, по которой
+# действия нет.
+declare -A label_action=()
+declare -A label_reason=()
+declare -a wanted=()
+for label in "${confirmed[@]}"; do
+    classify "$label"
+    if [[ -n "$plan_action" ]]; then
+        label_action[$label]="$plan_action"
+        contains "$plan_action" "${wanted[@]}" || wanted+=("$plan_action")
+    else
+        label_reason[$label]="$(reason_text "$plan_reason")"
+    fi
+done
+for action in "${wanted[@]}"; do
+    for extra in $(follow_up_actions "$action"); do
+        contains "$extra" "${wanted[@]}" || wanted+=("$extra")
+    done
+done
+
+# Выполнение в заданном порядке; повторные задания модулей идут последними.
+declare -a ordered=()
+for action in "${action_order[@]}"; do
+    ! contains "$action" "${wanted[@]}" || ordered+=("$action")
+done
+for action in "${wanted[@]}"; do
+    contains "$action" "${ordered[@]}" || ordered+=("$action")
+done
+
+declare -A action_result=()
+executed=0
+blocked=false
+for action in "${ordered[@]}"; do
+    if [[ "$blocked" == true ]]; then
+        # Пока хранилище секретов закрыто, зависящие от него службы не запустятся:
+        # их попытки не расходуются.
+        action_result[$action]=blocked
+        continue
+    fi
+    if (( $(attempts_used "$action") >= $(attempts_allowed "$action") )); then
+        action_result[$action]=exhausted
+        continue
+    fi
+    action_rc=0
+    run_action "$action" >/dev/null 2>&1 || action_rc=$?
+    if (( action_rc == 2 )); then
+        action_result[$action]=inapplicable
+        continue
+    fi
+    record_attempt "$action"
+    if (( action_rc == 0 )); then
+        action_result[$action]=completed
+        history_add "выполнено: $(action_title "$action")"
+    else
+        action_result[$action]=failed
+        history_add "не удалось: $(action_title "$action")"
+        [[ "$action" != secrets_unlock ]] || blocked=true
+    fi
+    executed=$((executed + 1))
+done
+
+if (( executed > 0 )); then
+    sleep "$settle_delay"
+    collect_failures
+fi
+
+declare -a repaired=()
+declare -a unresolved=()
+for label in "${confirmed[@]}"; do
+    action="${label_action[$label]:-}"
+    if ! contains "$label" "${failures[@]}"; then
+        if [[ -n "$action" && "${action_result[$action]:-}" == completed ]]; then
+            repaired+=("$label ($(action_title "$action"))")
+        else
+            repaired+=("$label (прошло без действия)")
+        fi
+        continue
+    fi
+    if [[ -z "$action" ]]; then
+        unresolved+=("$label - ${label_reason[$label]}")
+        continue
+    fi
+    case "${action_result[$action]:-}" in
+        exhausted)
+            unresolved+=("$label - действие «$(action_title "$action")» не помогло, попытки на этот час исчерпаны") ;;
+        failed)
+            unresolved+=("$label - действие «$(action_title "$action")» завершилось ошибкой") ;;
+        blocked)
+            unresolved+=("$label - ждёт открытия хранилища секретов") ;;
+        inapplicable)
+            unresolved+=("$label - не исправляется автоматически: действие к этому состоянию не применимо") ;;
+        *)
+            case "$action" in
+                unit_maintenance|unit_rerun:*)
+                    unresolved+=("$label - запущено повторно, результат будет в следующем цикле") ;;
+                *)
+                    unresolved+=("$label - действие «$(action_title "$action")» выполнено, проверка всё ещё не проходит") ;;
+            esac
+            ;;
+    esac
+done
+
+node="${role^^}"
+newline=$'\n'
+if (( ${#unresolved[@]} == 0 )); then
+    write_state REPAIRED "$(join_items "${repaired[@]}")"
+    history_add "восстановлено: $(join_items "${repaired[@]}")"
+    notify_once "AWG ${node}: самовосстановление${newline}Восстановлено: $(join_items "${repaired[@]}")"
+    [[ "$mode" == scheduled ]] || echo "Восстановлено: $(join_items "${repaired[@]}")"
+    exit 0
+fi
+
+repaired_text=''
+(( ${#repaired[@]} == 0 )) || repaired_text="$(join_items "${repaired[@]}")"
+write_state UNRESOLVED "$repaired_text" "$(join_items "${unresolved[@]}")"
+history_add "не устранено: $(join_items "${unresolved[@]}")"
+notify_once "AWG ${node}: самовосстановление не устранило ошибку${newline}$(join_items "${unresolved[@]}")${repaired_text:+${newline}Восстановлено: $repaired_text}"
+if [[ "$mode" != scheduled ]]; then
+    [[ -z "$repaired_text" ]] || echo "Восстановлено: $repaired_text"
+    echo "Не устранено: $(join_items "${unresolved[@]}")"
+    exit 1
+fi
+exit 0
+{% endraw %}

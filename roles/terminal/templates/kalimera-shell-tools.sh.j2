@@ -51,6 +51,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function maintenance-time { _kalimera_admin maintenance-time "$@"; }
 {% endif %}
     function server-audit { _kalimera_admin server-audit "$@"; }
+    function self-heal { _kalimera_admin self-heal "$@"; }
     function maintenance { _kalimera_admin maintenance "$@"; }
     function update-all { _kalimera_admin update-all "$@"; }
     function vpn-user { _kalimera_admin vpn-user "$@"; }

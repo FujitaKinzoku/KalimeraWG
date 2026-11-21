@@ -1,0 +1,16 @@
+[Unit]
+Description=Самовосстановление сервера KalimeraWG по результатам awg-health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ awg_self_heal_path }} --scheduled
+Nice=5
+UMask=0077
+# Цикл с подтверждением, действиями и повторной проверкой укладывается в минуты;
+# предел не даёт зависшей проверке держать службу бесконечно.
+TimeoutStartSec=15min
+ProtectClock=true
+RestrictRealtime=true
+SystemCallArchitectures=native

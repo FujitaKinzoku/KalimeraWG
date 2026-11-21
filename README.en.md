@@ -78,6 +78,10 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
   disabled, a non-standard port and Fail2Ban.
 - **Self-monitoring.** `awg-health` and `server-audit` check services,
   firewall, DNS and routes. Telegram reports reboots and failures.
+- **Self-healing.** Every few minutes each server checks itself and fixes a
+  local fault with the action for that exact fault: it restarts a stopped
+  service, restores routing rules, refills the network set. Configuration drift
+  and causes outside the server are not fixed, they are named.
 - **Updates under control.** Every server checks daily for a new kernel,
   AmneziaWG and Xray-core and shows `UPD` with the command that applies it.
   An update is one command, verified and rolled back on failure.
@@ -247,6 +251,7 @@ table at login. Full reference: `kalimera-help`.
 | Task | Commands |
 |---|---|
 | Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
+| Self-healing | `self-heal status`: what was fixed and what was not; `self-heal run`, `self-heal off`, `self-heal on` |
 | Full cascade check (on ENTRY) | `cascade-check`: ENTRY, EXIT, FRONT, links and DNS; summary OK / WARN / FAIL |
 | AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
 | VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete`; profile with a backup cascade: `vless-user auto NAME FILE` |

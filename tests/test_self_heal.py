@@ -1,0 +1,576 @@
+"""Самовосстановление: действие зависит от конкретной непройденной проверки.
+
+Программа self-heal рендерится для каждой роли и запускается целиком в bash с
+подставными awg-health, systemctl и остальными командами. Проверяется, что:
+действие выполняется только для подтверждённой ошибки, соответствует проверке,
+идёт в правильном порядке и ограничено числом попыток; расхождение настроек и
+внешние причины не «чинятся», а называются; во время deploy и обслуживания
+служба ничего не меняет; таблица охватывает каждую проверку awg-health.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+import jinja2
+import yaml
+
+ROOT = Path(__file__).parents[1]
+HEALTH_ROLE = ROOT / "roles" / "health"
+SELF_HEAL = HEALTH_ROLE / "templates" / "awg-self-heal.sh.j2"
+HEALTH = HEALTH_ROLE / "templates" / "awg-health.sh.j2"
+UNLOCK = "kalimera-secrets-unlock.service"
+
+FAKE_HEALTH = """#!/usr/bin/env bash
+# Подставной awg-health: строки результата берутся из файла очередного вызова.
+state={state}
+count="$(( $(cat "$state/health-count" 2>/dev/null || echo 0) + 1 ))"
+echo "$count" >"$state/health-count"
+file="$state/health-$count.tsv"
+[[ -e "$file" ]] || file="$state/health-last.tsv"
+[[ -z "${{KALIMERA_REPORT_RESULTS:-}}" ]] || cat "$file" >"$KALIMERA_REPORT_RESULTS"
+! grep -Eq '^(FAIL|WARN)' "$file"
+"""
+
+FAKE_SYSTEMCTL = """#!/usr/bin/env bash
+state={state}
+printf 'systemctl %s\\n' "$*" >>"$state/calls.log"
+if [[ "$1" == --failed ]]; then
+    cat "$state/failed-units.txt" 2>/dev/null
+    exit 0
+fi
+if [[ "$1" == is-active ]]; then
+    unit="${{@: -1}}"
+    case "$unit" in
+        awg-maintenance.service)
+            if [[ -e "$state/maintenance-running" ]]; then echo activating; else echo inactive; fi
+            exit 3
+            ;;
+        {unlock})
+            [[ -e "$state/secrets-open" ]] || exit 3
+            ;;
+        awg-self-heal.timer)
+            [[ -e "$state/timer-active" ]] || exit 3
+            ;;
+    esac
+    exit 0
+fi
+[[ ! -e "$state/systemctl-fails" ]] || exit 1
+"""
+
+# Вызов записывается одной строкой: текст уведомления содержит переводы строк.
+FAKE_TOOL = """#!/usr/bin/env bash
+arguments="$*"
+printf '%s %s\\n' "$(basename "$0")" "${{arguments//$'\\n'/ | }}" >>{state}/calls.log
+"""
+
+
+def bash_path() -> str:
+    executable = shutil.which("bash")
+    if executable is None or os.name == "nt":
+        raise unittest.SkipTest("нужен bash на Linux")
+    return executable
+
+
+def health_labels() -> list[str]:
+    """Названия всех проверок awg-health, которые могут не пройти."""
+    text = HEALTH.read_text(encoding="utf-8")
+    labels = re.findall(r"^\s*(?:check|check_minor|check_value) +'([^']+)'", text, flags=re.MULTILINE)
+    return sorted(set(labels))
+
+
+class SelfHealCase(unittest.TestCase):
+    role = "entry"
+
+    def setUp(self) -> None:
+        self.bash = bash_path()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.bin = self.dir / "bin"
+        self.state_dir = self.dir / "state"
+        self.bin.mkdir()
+        quoted = shlex.quote(str(self.dir))
+        self.write_tool("awg-health", FAKE_HEALTH.format(state=quoted))
+        self.write_tool("systemctl", FAKE_SYSTEMCTL.format(state=quoted, unlock=UNLOCK))
+        for name in (
+            "sleep", "sysctl", "ufw", "awg-kernel-guard", "ru-domain", "awg-ru-zone-update",
+            "awg-mobile-firewall", "vless-user", "awg-telegram-monitor",
+        ):
+            self.write_tool(name, FAKE_TOOL.format(state=quoted))
+        # unbound-control: list_forwards отвечает содержимым файла forwards.txt.
+        self.write_tool(
+            "unbound-control",
+            FAKE_TOOL.format(state=quoted)
+            + f'[[ "$1" != list_forwards ]] || cat {quoted}/forwards.txt 2>/dev/null\n',
+        )
+        (self.dir / "calls.log").write_text("", encoding="utf-8")
+        self.health("last")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def write_tool(self, name: str, text: str) -> None:
+        path = self.bin / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+
+    def health(self, call: int | str, *failed: str, status: str = "FAIL") -> None:
+        """Задать результат awg-health для вызова с номером call ("last" - для остальных)."""
+        rows = ["OK\tзапуск от root\t"] + [f"{status}\t{label}\tподсказка" for label in failed]
+        (self.dir / f"health-{call}.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def script(self, role: str | None = None, **variables) -> Path:
+        environment = jinja2.Environment(trim_blocks=True, keep_trailing_newline=True)
+        environment.filters["quote"] = lambda value: shlex.quote(str(value))
+        environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
+        context = {
+            "awg_node_role": role or self.role,
+            "awg_health_script_path": str(self.bin / "awg-health"),
+            "awg_self_heal_state_dir": str(self.state_dir),
+            "awg_self_heal_manual_off_flag": str(self.dir / "manual-off"),
+            "kalimera_deploy_marker_path": str(self.dir / "deploy.active"),
+            "awg_telegram_monitor_path": str(self.bin / "awg-telegram-monitor"),
+            "runtime_secrets_enabled": True,
+            "runtime_secrets_service_name": UNLOCK,
+            "entry_legacy_client_available": True,
+            "entry_mobile_client_available": True,
+            "entry_client_interface": "awg0",
+            "entry_exit_interface": "awg3",
+            "exit_awg_interface": "awg3",
+            **variables,
+        }
+        text = environment.from_string(SELF_HEAL.read_text(encoding="utf-8")).render(**context)
+        text = text.replace("[[ $EUID -eq 0 ]] ||", "true ||", 1)
+        text = text.replace("/usr/local/sbin/", f"{self.bin}/")
+        path = self.dir / "self-heal"
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def run_heal(self, *arguments: str, role: str | None = None, **variables):
+        env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        return subprocess.run(
+            [self.bash, str(self.script(role, **variables)), *arguments],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+    def calls(self, prefix: str = "") -> list[str]:
+        lines = (self.dir / "calls.log").read_text(encoding="utf-8").splitlines()
+        return [line for line in lines if line.startswith(prefix)]
+
+    def changes(self) -> list[str]:
+        """Вызовы, которые что-то меняют: без опросов состояния и пауз."""
+        return [
+            line
+            for line in self.calls()
+            if not line.startswith(("systemctl is-active", "systemctl --failed", "sleep ", "awg-telegram-monitor"))
+            and not line.startswith("systemctl reset-failed")
+        ]
+
+    def state(self) -> list[str]:
+        fields = (self.state_dir / "state").read_text(encoding="utf-8").rstrip("\n").split("\t")
+        return fields + [""] * (4 - len(fields))
+
+    def health_runs(self) -> int:
+        return int((self.dir / "health-count").read_text(encoding="utf-8"))
+
+
+class CycleTests(SelfHealCase):
+    def test_healthy_server_is_left_alone(self) -> None:
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state()[0], "OK")
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.calls("sleep"), [])
+
+    def test_single_failure_that_passes_by_itself_triggers_nothing(self) -> None:
+        # Действие выполняется только для проверки, не прошедшей дважды подряд.
+        self.health(1, "служба dnsmasq")
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.calls("sleep"), ["sleep 20"])
+        self.assertEqual(self.state()[0], "OK")
+        history = (self.state_dir / "history").read_text(encoding="utf-8")
+        self.assertIn("разовый сбой, прошёл сам: служба dnsmasq", history)
+
+    def test_confirmed_failure_gets_its_own_action_and_is_verified(self) -> None:
+        self.health(1, "служба dnsmasq")
+        self.health(2, "служба dnsmasq")
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.changes(), ["systemctl restart dnsmasq.service"])
+        self.assertEqual(self.health_runs(), 3)
+        status, _when, repaired, unresolved = self.state()
+        self.assertEqual(status, "REPAIRED")
+        self.assertEqual(repaired, "служба dnsmasq (перезапуск dnsmasq)")
+        self.assertEqual(unresolved, "")
+        notified = self.calls("awg-telegram-monitor")
+        self.assertEqual(len(notified), 1)
+        self.assertIn("--notify AWG ENTRY: самовосстановление", notified[0])
+
+    def test_actions_follow_the_dependency_order(self) -> None:
+        # Сначала хранилище секретов, затем интерфейс, затем пиры и маршрутизация.
+        failed = ("служба маршрутизации", "служба клиентского AWG", "пороговое хранилище 2-of-N открыто и аутентифицировано")
+        self.health(1, *failed)
+        self.health(2, *failed)
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.changes(),
+            [
+                f"systemctl start {UNLOCK}",
+                "systemctl restart awg-quick@awg0.service",
+                "systemctl restart awg-local-peer-apply.service",
+                "systemctl reload awg-entry-routing.service",
+            ],
+        )
+
+    def test_open_secret_store_is_never_restarted(self) -> None:
+        # Перезапуск службы открытия остановил бы все зависящие от неё службы.
+        (self.dir / "secrets-open").write_text("", encoding="utf-8")
+        self.health("last", "пороговое хранилище 2-of-N открыто и аутентифицировано")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.state()[0], "UNRESOLVED")
+        self.assertIn("действие к этому состоянию не применимо", self.state()[3])
+
+    def test_closed_secret_store_blocks_dependent_repairs_without_spending_attempts(self) -> None:
+        # После загрузки без второго сервера хранилище закрыто, и зависящие от него
+        # службы не запустятся. Их попытки не расходуются: когда хранилище
+        # откроется, службы должны запуститься в том же цикле, а не через час.
+        failed = ("пороговое хранилище 2-of-N открыто и аутентифицировано", "служба клиентского AWG")
+        self.health("last", *failed)
+        (self.dir / "systemctl-fails").write_text("", encoding="utf-8")
+        for _ in range(4):
+            self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [f"systemctl start {UNLOCK}"] * 4)
+        self.assertIn("служба клиентского AWG - ждёт открытия хранилища секретов", self.state()[3])
+        attempts = (self.state_dir / "attempts").read_text(encoding="utf-8")
+        self.assertNotIn("awg_client", attempts)
+        # Второй сервер вернулся: хранилище открывается, интерфейс запускается сразу.
+        (self.dir / "systemctl-fails").unlink()
+        (self.dir / "calls.log").write_text("", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.assertEqual(
+            self.changes()[:2], [f"systemctl start {UNLOCK}", "systemctl restart awg-quick@awg0.service"]
+        )
+
+    def test_interface_restart_reapplies_routing(self) -> None:
+        self.health(1, "свежий handshake ENTRY–EXIT")
+        self.health(2, "свежий handshake ENTRY–EXIT")
+        self.run_heal("--scheduled")
+        self.assertEqual(
+            self.changes(),
+            ["systemctl restart awg-quick@awg3.service", "systemctl reload awg-entry-routing.service"],
+        )
+
+    def test_empty_network_set_is_refilled(self) -> None:
+        self.health(1, "ipset российских сетей")
+        self.health(2, "ipset российских сетей")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["awg-ru-zone-update ", "systemctl reload awg-entry-routing.service"])
+
+    def test_unanswering_resolver_keeps_its_cache(self) -> None:
+        # Служба работает, но не отвечает: сбрасывается состояние вышестоящих
+        # серверов. Перезапуск стёр бы кэш и при их настоящем отказе навредил бы.
+        self.health(1, "основной DNS по UDP")
+        self.health(2, "основной DNS по UDP")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["unbound-control flush_infra all"])
+
+    def test_stopped_resolver_is_restarted(self) -> None:
+        self.health(1, "служба Unbound")
+        self.health(2, "служба Unbound")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["systemctl restart unbound.service"])
+
+    def test_russian_zones_are_reloaded_only_when_missing(self) -> None:
+        label = "российские имена разрешает российский DoT с ENTRY"
+        self.health(1, label)
+        self.health(2, label)
+        self.run_heal("--scheduled")
+        self.assertEqual(
+            self.changes(),
+            ["ru-domain sync", "unbound-control list_forwards", "systemctl restart unbound.service"],
+        )
+        # Зоны загружены, не отвечает сам российский DoT: кэш остальных имён остаётся.
+        (self.dir / "calls.log").write_text("", encoding="utf-8")
+        (self.dir / "health-count").unlink()
+        (self.dir / "forwards.txt").write_text(". IN forward 195.72.60.66\nru. IN forward 77.88.8.8\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.assertEqual(
+            self.changes(),
+            ["ru-domain sync", "unbound-control list_forwards", "unbound-control flush_infra all"],
+        )
+
+    def test_configuration_drift_is_named_not_fixed(self) -> None:
+        self.health("last", "UFW соответствует последней управляемой политике", status="WARN")
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.changes(), [])
+        status, _when, _repaired, unresolved = self.state()
+        self.assertEqual(status, "UNRESOLVED")
+        self.assertIn("расхождение настроек с выпуском: на ENTRY kalimera-deploy --resume", unresolved)
+
+    def test_external_cause_is_named_not_fixed(self) -> None:
+        self.health("last", "прослушивание российского DoH")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertIn("причина вне сервера: SOCKS5-прокси", self.state()[3])
+
+    def test_manual_run_reports_and_fails_on_unresolved(self) -> None:
+        self.health("last", "служба dnsmasq")
+        result = self.run_heal("run")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Не устранено: служба dnsmasq", result.stdout)
+        self.assertIn("проверка всё ещё не проходит", result.stdout)
+
+    def test_action_is_not_repeated_endlessly(self) -> None:
+        self.health("last", "служба dnsmasq")
+        for _ in range(4):
+            self.assertEqual(self.run_heal("--scheduled").returncode, 0)
+        self.assertEqual(self.changes(), ["systemctl restart dnsmasq.service"] * 3)
+        self.assertIn("попытки на этот час исчерпаны", self.state()[3])
+
+    def test_persistent_failure_is_announced_once(self) -> None:
+        self.health("last", "UFW соответствует последней управляемой политике", status="WARN")
+        self.run_heal("--scheduled")
+        self.run_heal("--scheduled")
+        self.assertEqual(len(self.calls("awg-telegram-monitor")), 1)
+
+    def test_failed_action_is_reported(self) -> None:
+        (self.dir / "systemctl-fails").write_text("", encoding="utf-8")
+        self.health("last", "служба dnsmasq")
+        self.run_heal("--scheduled")
+        self.assertIn("действие «перезапуск dnsmasq» завершилось ошибкой", self.state()[3])
+
+
+class GuardTests(SelfHealCase):
+    def test_nothing_changes_during_deploy(self) -> None:
+        (self.dir / "deploy.active").write_text("", encoding="utf-8")
+        self.health("last", "служба dnsmasq")
+        result = self.run_heal("--scheduled")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.dir / "health-count").exists())
+        self.assertEqual(self.state()[0], "SKIPPED")
+        self.assertEqual(self.state()[3], "идёт kalimera-deploy")
+
+    def test_forgotten_deploy_mark_expires(self) -> None:
+        marker = self.dir / "deploy.active"
+        marker.write_text("", encoding="utf-8")
+        old = time.time() - 4 * 3600
+        os.utime(marker, (old, old))
+        self.run_heal("--scheduled")
+        self.assertEqual(self.state()[0], "OK")
+
+    def test_nothing_changes_during_maintenance(self) -> None:
+        (self.dir / "maintenance-running").write_text("", encoding="utf-8")
+        self.health("last", "служба dnsmasq")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.state()[3], "идёт ночное обслуживание")
+
+    def test_switching_off_survives_the_timer(self) -> None:
+        result = self.run_heal("off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.dir / "manual-off").exists())
+        self.assertIn("systemctl disable --now awg-self-heal.timer", self.calls())
+        self.health("last", "служба dnsmasq")
+        self.run_heal("--scheduled")
+        self.assertFalse((self.dir / "health-count").exists())
+        self.assertIn("выключено вручную", self.run_heal("status").stdout)
+        self.assertEqual(self.run_heal("on").returncode, 0)
+        self.assertFalse((self.dir / "manual-off").exists())
+        self.assertIn("systemctl enable --now awg-self-heal.timer", self.calls())
+
+    def test_status_shows_the_last_result(self) -> None:
+        self.health(1, "служба dnsmasq")
+        self.health(2, "служба dnsmasq")
+        self.run_heal("--scheduled")
+        (self.dir / "timer-active").write_text("", encoding="utf-8")
+        output = self.run_heal("status").stdout
+        self.assertIn("Самовосстановление: включено.", output)
+        self.assertIn("восстановлено: служба dnsmasq (перезапуск dnsmasq)", output)
+        self.assertIn("выполнено: перезапуск dnsmasq", output)
+
+
+class FailedUnitTests(SelfHealCase):
+    def failed_units(self, *units: str) -> None:
+        (self.dir / "failed-units.txt").write_text(
+            "".join(f"{unit} loaded failed failed описание\n" for unit in units), encoding="utf-8"
+        )
+
+    def test_failed_maintenance_is_started_again_once(self) -> None:
+        self.failed_units("awg-maintenance.service")
+        self.run_heal("--scheduled")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["systemctl start --no-block awg-maintenance.service"])
+        self.assertIn("модуль systemd awg-maintenance.service", self.state()[3])
+
+    def test_periodic_job_is_started_again(self) -> None:
+        self.failed_units("awg-ru-zone-update.service")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["systemctl start --no-block awg-ru-zone-update.service"])
+
+    def test_unknown_failed_unit_is_only_reported(self) -> None:
+        self.failed_units("something-else.service")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertIn("не исправляется автоматически", self.state()[3])
+
+    def test_own_and_audit_units_are_ignored(self) -> None:
+        self.failed_units("awg-server-audit.service", "awg-self-heal.service")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.state()[0], "OK")
+
+
+class RoleTests(SelfHealCase):
+    def test_exit_restarts_its_tunnel_without_entry_follow_ups(self) -> None:
+        self.health(1, "ограниченный NAT EXIT сервера")
+        self.health(2, "ограниченный NAT EXIT сервера")
+        self.run_heal("--scheduled", role="exit")
+        self.assertEqual(self.changes(), ["systemctl restart awg-quick@awg3.service"])
+
+    def test_front_restarts_xray_and_resyncs_users(self) -> None:
+        failed = ("реестр VLESS-пользователей согласован с Xray", "служба Xray-core FRONT-релея")
+        self.health(1, *failed)
+        self.health(2, *failed)
+        self.run_heal("--scheduled", role="front")
+        self.assertEqual(self.changes(), ["systemctl restart xray.service", "vless-user sync"])
+
+    def test_action_of_another_role_is_not_executed(self) -> None:
+        self.health("last", "служба Xray-core FRONT-релея")
+        self.run_heal("--scheduled", role="exit")
+        self.assertEqual(self.changes(), [])
+
+    def test_userspace_transit_restarts_its_own_service(self) -> None:
+        self.health(1, "служба AWG 3+ до EXIT сервера")
+        self.health(2, "служба AWG 3+ до EXIT сервера")
+        self.run_heal("--scheduled", awg3_transit_enabled=True)
+        self.assertEqual(self.changes()[0], "systemctl restart awg3-transit.service")
+
+
+class TableTests(SelfHealCase):
+    def classify(self, labels: list[str]) -> dict[str, str]:
+        text = self.script().read_text(encoding="utf-8")
+        start = text.index("classify() {")
+        end = text.index("# Порядок выполнения")
+        titles = text[text.index("action_title() {"):text.index("restart_unit() {")]
+        order = text[text.index("readonly -a action_order=("):text.index("action_title() {")]
+        body = (
+            "set -Eeuo pipefail\nreadonly unit_prefix='модуль systemd '\n" + text[start:end] + order + titles
+            + 'while IFS= read -r label; do\n'
+            '    classify "$label"\n'
+            '    printf \'%s\\t%s\\t%s\\t%s\\n\' "$label" "$plan_action" "$plan_reason" '
+            '"$([[ -z "$plan_action" ]] || action_title "$plan_action")"\n'
+            "done\n"
+            'printf "ORDER\\t%s\\n" "${action_order[*]}"\n'
+        )
+        result = subprocess.run(
+            [self.bash, "-c", body], input="\n".join(labels) + "\n", capture_output=True, text=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines()]
+        self.order = next(row[1] for row in rows if row[0] == "ORDER").split()
+        return {row[0]: "\t".join(row[1:]) for row in rows if row[0] != "ORDER"}
+
+    def test_every_health_check_is_classified(self) -> None:
+        labels = health_labels()
+        self.assertGreater(len(labels), 120)
+        table = self.classify(labels)
+        unknown = [label for label, plan in table.items() if "действие не задано" in plan]
+        self.assertEqual(unknown, [], "проверки awg-health без строки в таблице self-heal")
+        for label, plan in table.items():
+            action, reason, title = plan.split("\t")
+            with self.subTest(label=label):
+                # Ровно одно из двух: действие либо причина, по которой его нет.
+                self.assertNotEqual(bool(action), bool(reason))
+                if action:
+                    self.assertIn(action, self.order)
+                    self.assertNotEqual(title, action, "у действия нет названия")
+                else:
+                    self.assertRegex(reason, r"^(deploy|external:.+|manual:.+)$")
+
+    def test_security_and_release_drift_have_no_automatic_action(self) -> None:
+        table = self.classify(
+            [
+                "UFW соответствует последней управляемой политике",
+                "клиенты AWG изолированы друг от друга",
+                "systemd journal хранится только в RAM",
+                "защищённые службы получают конфигурацию через systemd credentials",
+                "MTU клиентского интерфейса согласован с каскадом",
+            ]
+        )
+        for label, plan in table.items():
+            self.assertEqual(plan.split("\t")[:2], ["", "deploy"], label)
+
+    def test_rendered_scripts_pass_shellcheck(self) -> None:
+        shellcheck = shutil.which("shellcheck")
+        if shellcheck is None:
+            self.skipTest("нужен shellcheck")
+        for role, extra in (("entry", {}), ("entry", {"awg3_transit_enabled": True}), ("exit", {}), ("front", {})):
+            script = self.script(role, **extra)
+            result = subprocess.run([shellcheck, "--exclude=SC2317", str(script)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, f"{role}: {result.stdout}{result.stderr}")
+
+
+class WiringTests(unittest.TestCase):
+    def test_role_installs_and_enables_the_timer(self) -> None:
+        tasks = yaml.safe_load((HEALTH_ROLE / "tasks" / "main.yml").read_text(encoding="utf-8"))
+        names = [task["name"] for task in tasks]
+        timer = names.index("Включение: таймер самовосстановления")
+        # Таймер включается до строгой проверки: она требует его активности.
+        self.assertLess(timer, names.index("Настройка: проверка состояния - этап 4"))
+        defaults = yaml.safe_load((HEALTH_ROLE / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        self.assertIs(defaults["awg_self_heal_enabled"], True)
+        self.assertEqual(defaults["awg_self_heal_path"], "/usr/local/sbin/self-heal")
+
+    def test_command_is_exposed_and_tracked(self) -> None:
+        gateway = (ROOT / "roles/security/templates/kalimera-admin-command.sh.j2").read_text(encoding="utf-8")
+        self.assertIn("|self-heal|", gateway)
+        tools = (ROOT / "roles/terminal/templates/kalimera-shell-tools.sh.j2").read_text(encoding="utf-8")
+        self.assertIn('function self-heal { _kalimera_admin self-heal "$@"; }', tools)
+        manifest = (ROOT / "roles/operations/templates/awg-managed-integrity.sh.j2").read_text(encoding="utf-8")
+        self.assertIn("/etc/systemd/system/awg-self-heal.timer", manifest)
+        self.assertIn("awg_self_heal_path | default('/usr/local/sbin/self-heal')", manifest)
+
+    def test_deploy_marks_itself_and_cleans_up(self) -> None:
+        site = (ROOT / "playbooks" / "site.yml").read_text(encoding="utf-8")
+        self.assertLess(
+            site.index("Отметка идущего deploy для службы самовосстановления"),
+            site.index("Проверка системного DNS до изменения состояния серверов"),
+        )
+        self.assertGreater(
+            site.index("Снятие отметки идущего deploy"),
+            site.index("Создание манифеста после полного применения ролей"),
+        )
+        cleanup = (ROOT / "playbooks" / "cleanup.yml").read_text(encoding="utf-8")
+        self.assertIn("Снятие отметки идущего deploy", cleanup)
+
+    def test_health_checks_the_timer_unless_switched_off(self) -> None:
+        health = HEALTH.read_text(encoding="utf-8")
+        self.assertIn("check_minor 'таймер самовосстановления' systemctl is-active --quiet", health)
+        self.assertIn("check_passed 'самовосстановление выключено администратором'", health)
+
+    def test_telegram_accepts_a_ready_message(self) -> None:
+        monitor = (ROOT / "roles/operations/templates/telegram-monitor.sh.j2").read_text(encoding="utf-8")
+        notify = monitor.index('if [[ -n "$notify_text" ]]; then')
+        # Готовое сообщение уходит до общей блокировки и без запуска аудита.
+        self.assertLess(notify, monitor.index('exec 9>"$STATE_DIR/lock"'))
+        self.assertIn("[IP]", monitor[notify:monitor.index("install -d -m 0700", notify)])
+
+
+if __name__ == "__main__":
+    unittest.main()

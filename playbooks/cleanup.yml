@@ -4,6 +4,13 @@
   gather_facts: false
   any_errors_fatal: false
   tasks:
+    - name: Снятие отметки идущего deploy
+      ansible.builtin.file:
+        path: "{{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') }}"
+        state: absent
+      changed_when: false
+      failed_when: false
+
     - name: Запрет ответов ICMP echo после прерванного измерения MTU
       ansible.builtin.command:
         argv:
