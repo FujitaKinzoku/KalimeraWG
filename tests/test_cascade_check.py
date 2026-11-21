@@ -837,6 +837,49 @@ class CascadeRolePolicyTests(unittest.TestCase):
         )
         self.assertIn("exclusive: true", tasks)
 
+    def test_pager_run_through_sudo_leaves_no_history(self) -> None:
+        # Найдено на рабочем каскаде трижды: команда вида «sudo git log» или «sudo
+        # systemctl status» запускает less от root, и он заменяет ссылку
+        # /root/.lesshst -> /dev/null обычным файлом. Аудит после этого находит
+        # историю команд. Сеанс администратора задаёт LESSHISTFILE=-, а sudo
+        # должен пропускать эту переменную.
+        sudoers = (ROOT / "roles" / "security" / "templates" / "kalimera-admin.sudoers.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Defaults:{{ security_admin_user }} env_keep += "LESSHISTFILE"\n', sudoers)
+        tools = (ROOT / "roles" / "terminal" / "templates" / "kalimera-shell-tools.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("export LESSHISTFILE=-\n", tools)
+        audit = (ROOT / "roles" / "operations" / "templates" / "server-audit.sh.j2").read_text(encoding="utf-8")
+        self.assertIn("sudo ln -sf /dev/null /root/.lesshst", audit)
+
+    def test_less_keeps_the_history_link_only_with_the_variable(self) -> None:
+        if shutil.which("less") is None or shutil.which("script") is None or os.name == "nt":
+            self.skipTest("нужны less и script")
+
+        def link_survives(**variables: str) -> bool:
+            with tempfile.TemporaryDirectory() as temporary:
+                history = Path(temporary) / ".lesshst"
+                history.symlink_to("/dev/null")
+                environment = {**os.environ, "HOME": temporary, **variables}
+                environment.pop("LESSHISTFILE", None) if not variables else None
+                # script даёт less терминал; одна строка вывода, как у git log --oneline -1.
+                subprocess.run(
+                    ["script", "-qec", "echo строка | less -FRX", "/dev/null"],
+                    input="q",
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    timeout=30,
+                )
+                return history.is_symlink()
+
+        # Без переменной less 590 из Ubuntu 24.04 заменяет ссылку файлом в 20 байт
+        # даже при выводе в одну строку. Здесь это не утверждается: поведение
+        # зависит от версии less, а проверяется защита от него.
+        self.assertTrue(link_survives(LESSHISTFILE="-"))
+
     def test_report_user_is_a_system_account_without_password(self) -> None:
         tasks = (ROOT / "roles" / "cascade_check" / "tasks" / "main.yml").read_text(encoding="utf-8")
         self.assertIn("system: true", tasks)

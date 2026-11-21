@@ -1,5 +1,10 @@
 # Управляется Ansible. Полный sudo требует пароль пользователя.
 Defaults:{{ security_admin_user }} env_reset,use_pty,secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Сеанс администратора задаёт LESSHISTFILE=-, и эта переменная должна доходить до
+# команд sudo. Иначе less, запущенный от root как постраничный вывод (git log,
+# systemctl status), заменяет ссылку /root/.lesshst -> /dev/null обычным файлом,
+# и аудит находит на сервере историю команд.
+Defaults:{{ security_admin_user }} env_keep += "LESSHISTFILE"
 {{ security_admin_user }} ALL=(root) NOPASSWD: {{ security_admin_command_path }} *
 {% if runtime_secrets_enabled | default(false) | bool %}
 {{ security_admin_user }} ALL=(root) NOPASSWD: {{ security_runtime_secrets_export_path }} get-share {{ runtime_secrets_cluster_id }}

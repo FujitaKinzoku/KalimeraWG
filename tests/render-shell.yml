@@ -148,6 +148,8 @@
             grep -Fq '/usr/local/libexec/kalimera-admin-command *' "$sudoers_path"
             grep -Fq '/usr/local/libexec/kalimera-share-export get-share' "$sudoers_path"
             ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' "$sudoers_path"
+            grep -Fq 'env_keep += "LESSHISTFILE"' "$sudoers_path"
+            /usr/sbin/visudo -cf "$sudoers_path"
           args:
             executable: /bin/bash
           changed_when: false

@@ -271,7 +271,7 @@ audit_hint() {
         *'модулей systemd'*)
             hint='модули перечислены ниже; причина: sudo journalctl -u ИМЯ -b --no-pager; после исправления: sudo systemctl reset-failed ИМЯ' ;;
         *'постоянные журналы'*)
-            hint='на ENTRY: kalimera-deploy --resume; найденные журналы и истории команд удалите вручную' ;;
+            hint='чаще всего это история less после команды sudo с постраничным выводом: sudo ln -sf /dev/null /root/.lesshst; остальное восстановит на ENTRY kalimera-deploy --resume, найденные журналы удалите вручную' ;;
         *'только в RAM'*|*'журналирование UFW'*|*rsyslog*|*coredump*)
             hint='на ENTRY: kalimera-deploy --resume восстановит политику без журналов' ;;
         *Fail2Ban*)
