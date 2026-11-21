@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Еженедельное окно ENTRY: сводка в Telegram и автоматическая перезагрузка
+# каскада. Управляющая программа запускается из окружения, установленного
+# последним deploy, без обращения к PyPI и Ansible Galaxy: окно не должно
+# зависеть от их доступности.
+set -Eeuo pipefail
+
+readonly repo={{ security_controller_repo_path | default('/root/KalimeraWG') | quote }}
+readonly venv={{ kalimera_controller_venv_path | default('/root/.local/share/awg-iac/controller-venv') | quote }}
+export HOME="${HOME:-/root}"
+
+if [[ ! -f "$repo/scripts/lib/interactive_deploy.py" ]]; then
+    echo 'Управляющий репозиторий KalimeraWG не найден: еженедельное окно пропущено.' >&2
+    exit 0
+fi
+cd "$repo"
+if [[ -x "$venv/bin/python" && -x "$venv/bin/ansible" ]]; then
+    export PATH="$venv/bin:$PATH"
+    exec "$venv/bin/python" "$repo/scripts/lib/interactive_deploy.py" --repo-root "$repo" --cascade-weekly
+fi
+exec "$repo/deploy" --cascade-weekly

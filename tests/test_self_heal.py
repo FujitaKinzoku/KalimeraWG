@@ -116,6 +116,21 @@ class SelfHealCase(unittest.TestCase):
             FAKE_TOOL.format(state=quoted)
             + f'[[ "$1" != list_forwards ]] || cat {quoted}/forwards.txt 2>/dev/null\n',
         )
+        # Собственные проверки службы: занятое место и синхронизация часов берутся
+        # из файлов, очистка кэша пакетов освобождает место, если это задано.
+        self.write_tool(
+            "df",
+            f"#!/usr/bin/env bash\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n"
+            f"/dev/vda1 100 0 0 %s%% /\\n' \"$(cat {quoted}/disk.txt 2>/dev/null || echo 40)\"\n",
+        )
+        self.write_tool(
+            "timedatectl", f"#!/usr/bin/env bash\ncat {quoted}/clock.txt 2>/dev/null || echo yes\n"
+        )
+        self.write_tool(
+            "apt-get",
+            FAKE_TOOL.format(state=quoted)
+            + f"[[ ! -e {quoted}/clean-frees-space ]] || echo 40 >{quoted}/disk.txt\n",
+        )
         (self.dir / "calls.log").write_text("", encoding="utf-8")
         self.health("last")
 
@@ -192,7 +207,7 @@ class SelfHealCase(unittest.TestCase):
         self.assertNotIn("", fields)
         return ["" if field == "-" else field for field in fields]
 
-    def report_row(self) -> list[str]:
+    def report_row(self, **variables) -> list[str]:
         """Строка cascade-check о самовосстановлении.
 
         kalimera-report вызывает настоящую программу self-heal --report, поэтому
@@ -204,7 +219,7 @@ class SelfHealCase(unittest.TestCase):
         report = self.dir / "kalimera-report"
         report.write_text(
             environment.from_string(REPORT.read_text(encoding="utf-8")).render(
-                awg_node_role="entry", awg_self_heal_path=str(self.script())
+                awg_node_role="entry", awg_self_heal_path=str(self.script(**variables))
             ),
             encoding="utf-8",
         )
@@ -445,12 +460,12 @@ class GuardTests(SelfHealCase):
         output = self.run_heal("status").stdout
         self.assertIn("не устранено: UFW соответствует последней управляемой политике", output)
         self.assertNotIn("  восстановлено:", output)
-        self.assertNotIn("Восстановлено за сутки:", output)
-        self.assertIn("Итог: за сутки сбоев 1, восстановлено 0, не восстановлено 1.", output)
+        self.assertNotIn("Восстановлено за 7 дней:", output)
+        self.assertIn("Итог: за 7 дней сбоев 1, восстановлено 0, не восстановлено 1.", output)
         segment, status, label, value, hint, _ms = self.report_row()
         self.assertEqual(
             (segment, status, label),
-            ("ENTRY", "WARN", "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1"),
+            ("ENTRY", "WARN", "самовосстановление: за 7 дней сбоев 1, восстановлено 0, не восстановлено 1"),
         )
         # Неустранённая ошибка названа вместе с причиной.
         self.assertEqual(
@@ -475,7 +490,7 @@ class GuardTests(SelfHealCase):
         self.run_heal("--scheduled")
         marker.unlink()
         _segment, status, label, value, _hint, _ms = self.report_row()
-        self.assertEqual((status, label, value), ("OK", "самовосстановление: за сутки сбоев не было", ""))
+        self.assertEqual((status, label, value), ("OK", "самовосстановление: за 7 дней сбоев не было", ""))
 
     def test_report_counts_failures_and_repairs(self) -> None:
         # Пример из запроса: «сбоев 2, восстановлено 2, статус OK».
@@ -485,13 +500,13 @@ class GuardTests(SelfHealCase):
         self.run_heal("--scheduled")
         self.assertEqual(self.changes(), ["systemctl restart fail2ban.service"])
         _segment, status, label, value, hint, _ms = self.report_row()
-        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 2, восстановлено 2"))
+        self.assertEqual((status, label), ("OK", "самовосстановление: за 7 дней сбоев 2, восстановлено 2"))
         self.assertEqual(
             value,
             "Fail2Ban активен (перезапуск Fail2Ban); строгая политика Fail2Ban применяется (перезапуск Fail2Ban)",
         )
         self.assertEqual(hint, "")
-        self.assertIn("Итог: за сутки сбоев 2, восстановлено 2.", self.run_heal("status").stdout)
+        self.assertIn("Итог: за 7 дней сбоев 2, восстановлено 2.", self.run_heal("status").stdout)
 
     def test_lasting_error_is_one_failure_however_long_it_lasts(self) -> None:
         self.health("last", "UFW соответствует последней управляемой политике", status="WARN")
@@ -499,7 +514,7 @@ class GuardTests(SelfHealCase):
             self.run_heal("--scheduled")
         _segment, status, label, _value, _hint, _ms = self.report_row()
         self.assertEqual(
-            (status, label), ("WARN", "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1")
+            (status, label), ("WARN", "самовосстановление: за 7 дней сбоев 1, восстановлено 0, не восстановлено 1")
         )
 
     def test_partly_repaired_cycle_names_only_what_is_left(self) -> None:
@@ -510,7 +525,7 @@ class GuardTests(SelfHealCase):
         self.run_heal("--scheduled")
         _segment, status, label, value, _hint, _ms = self.report_row()
         self.assertEqual(
-            (status, label), ("WARN", "самовосстановление: за сутки сбоев 2, восстановлено 1, не восстановлено 1")
+            (status, label), ("WARN", "самовосстановление: за 7 дней сбоев 2, восстановлено 1, не восстановлено 1")
         )
         self.assertTrue(value.startswith("UFW соответствует последней управляемой политике - "), value)
         self.assertNotIn("dnsmasq", value)
@@ -522,10 +537,10 @@ class GuardTests(SelfHealCase):
         self.health(2, "служба dnsmasq")
         self.health(3, "служба dnsmasq")
         self.run_heal("--scheduled")
-        self.assertEqual(self.report_row()[2], "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1")
+        self.assertEqual(self.report_row()[2], "самовосстановление: за 7 дней сбоев 1, восстановлено 0, не восстановлено 1")
         self.run_heal("--scheduled")
         _segment, status, label, value, _hint, _ms = self.report_row()
-        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 1"))
+        self.assertEqual((status, label), ("OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 1"))
         self.assertEqual(value, "служба dnsmasq (перезапуск dnsmasq)")
 
     def test_error_gone_without_an_action_is_not_claimed_as_repaired(self) -> None:
@@ -537,16 +552,28 @@ class GuardTests(SelfHealCase):
         _segment, status, label, _value, _hint, _ms = self.report_row()
         self.assertEqual(
             (status, label),
-            ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 0, прошло без действия службы 1"),
+            ("OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 0, прошло без действия службы 1"),
         )
 
-    def test_report_covers_the_last_day_only(self) -> None:
+    def test_report_covers_the_last_week_only(self) -> None:
         self.run_heal("--scheduled")
-        old = int(time.time()) - 2 * 86400
+        now = int(time.time())
         (self.state_dir / "events").write_text(
-            f"{old}\x1fREPAIRED\x1fслужба dnsmasq\x1fперезапуск dnsmasq\n", encoding="utf-8"
+            f"{now - 9 * 86400}\x1fREPAIRED\x1fслужба dnsmasq\x1fперезапуск dnsmasq\n"
+            f"{now - 2 * 86400}\x1fREPAIRED\x1fслужба Unbound\x1fперезапуск Unbound\n",
+            encoding="utf-8",
         )
-        self.assertEqual(self.report_row()[2], "самовосстановление: за сутки сбоев не было")
+        _segment, _status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual(label, "самовосстановление: за 7 дней сбоев 1, восстановлено 1")
+        self.assertEqual(value, "служба Unbound (перезапуск Unbound)")
+
+    def test_period_is_named_in_correct_russian(self) -> None:
+        self.run_heal("--scheduled")
+        expected = {1: "за сутки", 3: "за 3 дня", 7: "за 7 дней", 21: "за 21 день", 30: "за 30 дней"}
+        for days, text in expected.items():
+            with self.subTest(days=days):
+                label = self.report_row(awg_self_heal_summary_days=days)[2]
+                self.assertEqual(label, f"самовосстановление: {text} сбоев не было")
 
     def test_report_before_the_first_cycle(self) -> None:
         self.assertEqual(
@@ -562,6 +589,70 @@ class GuardTests(SelfHealCase):
         self.assertIn("Самовосстановление: включено.", output)
         self.assertIn("восстановлено: служба dnsmasq (перезапуск dnsmasq)", output)
         self.assertIn("выполнено: перезапуск dnsmasq", output)
+
+
+class OwnProbeTests(SelfHealCase):
+    """Проверки самой службы: место на диске и часы. В awg-health их нет."""
+
+    def test_full_disk_gets_the_package_cache_cleaned(self) -> None:
+        (self.dir / "disk.txt").write_text("93\n", encoding="utf-8")
+        (self.dir / "clean-frees-space").write_text("", encoding="utf-8")
+        result = self.run_heal("run")
+        self.assertEqual(self.changes(), ["apt-get clean"])
+        self.assertIn("Восстановлено: свободное место на корневом разделе (очистка кэша пакетов)", result.stdout)
+
+    def test_disk_still_full_after_cleaning_is_named(self) -> None:
+        (self.dir / "disk.txt").write_text("96\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["apt-get clean"])
+        self.assertIn(
+            "свободное место на корневом разделе - действие «очистка кэша пакетов» выполнено, "
+            "проверка всё ещё не проходит",
+            self.state()[3],
+        )
+
+    def test_disk_below_the_limit_is_left_alone(self) -> None:
+        (self.dir / "disk.txt").write_text("89\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.state()[0], "OK")
+
+    def test_lost_clock_sync_restarts_the_time_service(self) -> None:
+        self.run_heal("--scheduled")  # часы синхронизированы: служба это запоминает
+        (self.dir / "clock.txt").write_text("no\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["systemctl restart systemd-timesyncd.service"])
+        (self.dir / "clock.txt").write_text("yes\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 1"))
+        self.assertEqual(value, "системные часы синхронизированы (перезапуск службы синхронизации времени)")
+
+    def test_clock_that_never_synced_is_not_an_error(self) -> None:
+        # NTP закрыт хостингом, время ведёт гипервизор: замечание висело бы всегда.
+        (self.dir / "clock.txt").write_text("no\n", encoding="utf-8")
+        self.run_heal("--scheduled")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+        self.assertEqual(self.state()[0], "OK")
+
+    def test_server_without_a_time_service_is_not_checked(self) -> None:
+        self.run_heal("--scheduled")
+        (self.dir / "clock.txt").write_text("no\n", encoding="utf-8")
+        (self.dir / "timer-disabled").write_text("", encoding="utf-8")  # is-enabled: ни одной службы
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), [])
+
+    def test_own_probes_are_not_awg_health_checks(self) -> None:
+        # Deploy требует awg-health --strict без замечаний: новая проверка там могла
+        # бы остановить обновление каскада ложным срабатыванием.
+        labels = health_labels()
+        self.assertNotIn("свободное место на корневом разделе", labels)
+        self.assertNotIn("системные часы синхронизированы", labels)
+        # Таблица действий и проверки используют одни и те же названия.
+        text = SELF_HEAL.read_text(encoding="utf-8")
+        for label in ("свободное место на корневом разделе", "системные часы синхронизированы"):
+            self.assertEqual(text.count(f"'{label}'"), 2, label)
 
 
 class FailedUnitTests(SelfHealCase):
@@ -599,7 +690,7 @@ class FailedUnitTests(SelfHealCase):
         self.failed_units()
         self.run_heal("--scheduled")
         _segment, status, label, value, _hint, _ms = self.report_row()
-        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 1"))
+        self.assertEqual((status, label), ("OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 1"))
         self.assertIn("модуль systemd awg-ru-zone-update.service (", value)
 
     def test_own_and_audit_units_are_ignored(self) -> None:

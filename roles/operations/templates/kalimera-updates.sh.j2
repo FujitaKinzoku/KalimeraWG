@@ -13,9 +13,20 @@ readonly STATE_DIR={{ kalimera_updates_state_dir | quote }}
 readonly STATE_FILE="$STATE_DIR/state"
 readonly ROLE={{ awg_node_role | quote }}
 readonly APT_LOCK={{ kalimera_updates_apt_lock_path | default('/run/awg-apt-maintenance.lock') | quote }}
+# Уведомления Telegram о найденном: программа отправки и каталог отметок «уже
+# сообщено». Отметки переживают перезагрузку, иначе одно и то же обновление
+# объявлялось бы заново после каждой загрузки сервера.
+readonly NOTIFIER={{ awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor') | quote }}
+readonly NOTIFIED_DIR={{ awg_telegram_monitor_state_dir | default('/var/lib/awg-telegram-monitor') | quote }}
 {% if awg_node_role == 'front' %}
 readonly XRAY_BINARY={{ front_xray_binary_path | default('/usr/local/bin/xray') | quote }}
 readonly XRAY_RELEASES_API={{ kalimera_updates_xray_releases_api | quote }}
+# Домены каскада: срок регистрации проверяется на FRONT, потому что его адрес и
+# так связан с доменом записью DNS; запрос с ENTRY раскрыл бы реестру его адрес.
+readonly ORIGIN_DOMAIN={{ front_origin_domain | default('') | quote }}
+readonly CDN_DOMAIN={{ front_cdn_domain | default('') | quote }}
+readonly DOMAIN_WARN_DAYS={{ kalimera_updates_domain_warn_days | default(30) | int }}
+readonly RDAP_BOOTSTRAP={{ kalimera_updates_rdap_bootstrap | default('https://data.iana.org/rdap/dns.json') | quote }}
 {% endif %}
 
 {% raw %}
@@ -334,7 +345,179 @@ check_xray() {
         record OK xray "Xray ${installed:-?} актуален"
     fi
 }
+
+# Адрес RDAP-сервера реестра зоны $1 из списка IANA (на входе - сам список).
+rdap_base() {
+    python3 -c '
+import json
+import sys
+
+try:
+    for zones, urls in json.load(sys.stdin).get("services", []):
+        if sys.argv[1] in zones:
+            for url in urls:
+                if str(url).startswith("https://"):
+                    print(url)
+                    raise SystemExit(0)
+except (ValueError, TypeError, AttributeError):
+    pass
+raise SystemExit(1)
+' "$1"
+}
+
+# Дата окончания регистрации из ответа RDAP о домене.
+rdap_expiry() {
+    python3 -c '
+import json
+import sys
+
+try:
+    for event in json.load(sys.stdin).get("events", []):
+        if event.get("eventAction") == "expiration":
+            print(str(event.get("eventDate", ""))[:10])
+            raise SystemExit(0)
+except (ValueError, TypeError, AttributeError):
+    pass
+raise SystemExit(1)
+'
+}
+
+# "зарегистрированный-домен дата" для имени $1. Запросы идут от короткого имени к
+# длинному (example.uk, затем origin.example.uk): реестр отвечает на имя самого
+# домена, а имя поддомена ему не раскрывается.
+domain_expiry() {
+    local name="$1" bootstrap="$2" base candidate answer expiry count index
+    local -a labels=()
+    base="$(rdap_base "${name##*.}" <<<"$bootstrap" 2>/dev/null || true)"
+    [[ -n "$base" ]] || return 1
+    IFS=. read -r -a labels <<<"$name"
+    count=0
+    for candidate in "${labels[@]}"; do
+        count=$((count + 1))
+    done
+    candidate="${labels[count - 1]}"
+    for (( index = count - 2; index >= 0; index-- )); do
+        candidate="${labels[index]}.$candidate"
+        answer="$(curl -fsS --max-time 15 -A KalimeraWG -H 'Accept: application/rdap+json' \
+            "${base%/}/domain/$candidate" 2>/dev/null || true)"
+        expiry="$(rdap_expiry <<<"$answer" 2>/dev/null || true)"
+        if [[ "$expiry" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            printf '%s %s\n' "$candidate" "$expiry"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Срок регистрации доменов каскада. Недоступный реестр или зона без RDAP - не
+# ошибка: срок просто не определён (INFO). Замечание появляется заранее, за
+# DOMAIN_WARN_DAYS дней: домен, не продлённый вовремя, каскад сам не вернёт.
+check_domains() {
+    local name result registered expiry expiry_epoch days now bootstrap='' seen=' '
+    now="$(date +%s)"
+    for name in "$ORIGIN_DOMAIN" "$CDN_DOMAIN"; do
+        [[ "$name" == *.* ]] || continue
+        if [[ -z "$bootstrap" ]]; then
+            bootstrap="$(curl -fsS --max-time 15 -A KalimeraWG "$RDAP_BOOTSTRAP" 2>/dev/null || true)"
+        fi
+        result="$(domain_expiry "$name" "$bootstrap" || true)"
+        if [[ -z "$result" ]]; then
+            [[ "$seen" == *" $name "* ]] ||
+                record INFO domain "срок регистрации домена $name не определён: реестр зоны не ответил или не публикует срок"
+            seen+="$name "
+            continue
+        fi
+        read -r registered expiry <<<"$result"
+        [[ "$seen" != *" $registered "* ]] || continue
+        seen+="$registered "
+        # Дата из ответа реестра может оказаться несуществующей: это тоже «срок не
+        # определён», а не причина оборвать всю проверку обновлений.
+        expiry_epoch="$(date -u -d "$expiry" +%s 2>/dev/null || true)"
+        if [[ ! "$expiry_epoch" =~ ^[0-9]+$ ]]; then
+            record INFO domain "срок регистрации домена $registered не определён: реестр вернул непонятную дату"
+            continue
+        fi
+        days=$(( (expiry_epoch - now) / 86400 ))
+        if (( days < 0 )); then
+            record WARN domain "регистрация домена $registered истекла $expiry" \
+                'продлите домен у регистратора: без него перестанут работать CDN и сертификат FRONT'
+        elif (( days <= DOMAIN_WARN_DAYS )); then
+            record WARN domain "регистрация домена $registered истекает $expiry (через $days дн.)" \
+                'продлите домен у регистратора: без него перестанут работать CDN и сертификат FRONT'
+        else
+            record OK domain "домен $registered зарегистрирован до $expiry"
+        fi
+    done
+}
 {% endif %}
+
+# Сообщение в Telegram уходит один раз на каждое новое содержание ($2); $1 - файл
+# отметки. Без настроенного Telegram отметка не ставится, и сообщение уйдёт,
+# когда уведомления включат.
+notify_once() {
+    local digest file="$NOTIFIED_DIR/$1"
+    [[ -x "$NOTIFIER" ]] || return 0
+    digest="$(printf '%s' "$2" | sha256sum | cut -d ' ' -f 1)"
+    [[ "$(cat "$file" 2>/dev/null || true)" != "$digest" ]] || return 0
+    if "$NOTIFIER" --notify "$3" >/dev/null 2>&1; then
+        install -d -m 0700 "$NOTIFIED_DIR"
+        printf '%s\n' "$digest" >"$file"
+        chmod 0600 "$file"
+    fi
+}
+
+# Порог напоминания о сроке домена: сообщение повторяется за 30, 14, 7, 3 дня и
+# за день, а не каждый день.
+domain_bucket() {
+    local days="$1" bucket
+    for bucket in 1 3 7 14; do
+        if (( days <= bucket )); then
+            echo "$bucket"
+            return 0
+        fi
+    done
+    echo 30
+}
+
+# Уведомления по итогам плановой проверки: новые версии AmneziaWG и Xray с
+# командой установки и срок регистрации домена. Новое ядро сюда не входит: его
+# ставит ночное обслуживание, а перезагрузку выполняет cascade-reboot.
+notify_news() {
+    local level component message action node updates='' domains='' key=''
+    local newline=$'\n' days_re='через ([0-9]+) дн'
+    node="${ROLE^^}"
+    while IFS=$'\t' read -r level component message action; do
+        case "$level:$component" in
+            UPD:amneziawg)
+                # AmneziaWG на ENTRY и EXIT ставится из одного репозитория и
+                # обновляется одной командой с ENTRY: сообщает только ENTRY.
+                [[ "$ROLE" == entry ]] || continue
+                updates+="${updates:+$newline}${message}${newline}→ ${action}"
+                ;;
+            UPD:xray)
+                updates+="${updates:+$newline}${message}${newline}→ ${action}"
+                ;;
+            WARN:domain)
+                domains+="${domains:+$newline}${message}${newline}→ ${action}"
+                if [[ "$message" =~ $days_re ]]; then
+                    key+="${message%% (через*} порог $(domain_bucket "${BASH_REMATCH[1]}")$newline"
+                else
+                    key+="$message$newline"
+                fi
+                ;;
+        esac
+    done <"$STATE_FILE"
+    if [[ -n "$updates" ]]; then
+        notify_once updates-notified "$updates" "AWG ${node}: доступно обновление компонентов${newline}${updates}"
+    else
+        rm -f "$NOTIFIED_DIR/updates-notified"
+    fi
+    if [[ -n "$domains" ]]; then
+        notify_once domain-notified "$key" "AWG ${node}: заканчивается регистрация домена${newline}${domains}"
+    else
+        rm -f "$NOTIFIED_DIR/domain-notified"
+    fi
+}
 
 run_checks() {
     local temporary refresh="${1:-refresh}"
@@ -349,6 +532,7 @@ run_checks() {
 {% endif %}
 {% if awg_node_role == 'front' %}
         check_xray
+        check_domains
 {% endif %}
     } >"$temporary"
     chmod 0600 "$temporary"
@@ -360,10 +544,16 @@ run_checks() {
 # проверка неполная. Критичного состояния у этой команды нет: найденное
 # обновление на работу каскада не влияет.
 show_state() {
-    local level component message action checked='' updates=0 stale=false
+    local level component message action checked='' updates=0 warnings=0 stale=false
     while IFS=$'\t' read -r level component message action; do
         case "$level" in
             '#checked') checked="$component" ;;
+            WARN)
+                warnings=$((warnings + 1))
+                report_line WARN "$message"
+                [[ -z "$action" ]] || printf '     → %s\n' "$action"
+                report_note WARN "$message" "$action"
+                ;;
             UPD)
                 updates=$((updates + 1))
                 report_line UPD "$message"
@@ -386,7 +576,9 @@ show_state() {
     fi
     report_note_lines
     report_box_lines+=("Проверено: ${checked:-?}")
-    if (( updates > 0 )); then
+    if (( warnings > 0 )); then
+        report_box WARN "kalimera-updates $ROLE: замечаний: $warnings; доступно обновлений: $updates" "${report_box_lines[@]}"
+    elif (( updates > 0 )); then
         report_box WARN "kalimera-updates $ROLE: доступно обновлений: $updates" "${report_box_lines[@]}"
     elif [[ "$stale" == true ]]; then
         report_box WARN "kalimera-updates $ROLE: обновлений не найдено, но проверка неполная" "${report_box_lines[@]}"
@@ -433,6 +625,8 @@ install_kernel() {
 case "${1:-}" in
     # check - прежнее имя той же команды; оставлено для совместимости.
     ''|check) [[ $# -le 1 ]] || { usage >&2; exit 2; }; run_checks; show_state ;;
+    # Запуск по таймеру: та же проверка и уведомление в Telegram о найденном.
+    --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; run_checks; show_state; notify_news ;;
     install)
         [[ $# -eq 2 && "$2" == kernel ]] || { usage >&2; exit 2; }
         install_kernel

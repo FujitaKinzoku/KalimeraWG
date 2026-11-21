@@ -148,6 +148,8 @@
             grep -Fq '/usr/local/libexec/kalimera-admin-command *' "$sudoers_path"
             grep -Fq '/usr/local/libexec/kalimera-share-export get-share' "$sudoers_path"
             ! grep -Eq 'NOPASSWD:[[:space:]]+ALL([[:space:]]|$)' "$sudoers_path"
+            grep -Fq 'env_keep += "LESSHISTFILE"' "$sudoers_path"
+            /usr/sbin/visudo -cf "$sudoers_path"
           args:
             executable: /bin/bash
           changed_when: false
@@ -448,6 +450,25 @@
             dest: "{{ rendered_shell_root }}/self-heal-entry"
             mode: "0700"
 
+        - name: Формирование предохранителей перезагрузки и еженедельного окна ENTRY
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/operations/templates/{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0700"
+          loop:
+            - {src: reboot-guard.sh.j2, dest: reboot-guard-entry}
+            - {src: kalimera-weekly.sh.j2, dest: kalimera-weekly}
+            - {src: kalimera-weekly.timer.j2, dest: kalimera-weekly.timer}
+
+        - name: Проверка расписания еженедельного окна
+          ansible.builtin.command:
+            argv:
+              - grep
+              - -Eq
+              - '^OnCalendar=(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* [0-2][0-9]:[0-5][0-9]:00( [A-Za-z_/+-]+)?$'
+              - "{{ rendered_shell_root }}/kalimera-weekly.timer"
+          changed_when: false
+
         # В примерном inventory RU-прокси включён, поэтому ветви режима без прокси
         # (российский DoT прямо с ENTRY) формируются отдельно. Значение из
         # include_vars перекрывает только set_fact, поэтому исходное сохраняется и
@@ -593,6 +614,12 @@
             dest: "{{ rendered_shell_root }}/self-heal-exit"
             mode: "0700"
 
+        - name: Формирование предохранителей перезагрузки EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/operations/templates/reboot-guard.sh.j2"
+            dest: "{{ rendered_shell_root }}/reboot-guard-exit"
+            mode: "0700"
+
         - name: Формирование полной проверки роли EXIT
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
@@ -659,6 +686,12 @@
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/health/templates/awg-self-heal.sh.j2"
             dest: "{{ rendered_shell_root }}/self-heal-front"
+            mode: "0700"
+
+        - name: Формирование предохранителей перезагрузки FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/operations/templates/reboot-guard.sh.j2"
+            dest: "{{ rendered_shell_root }}/reboot-guard-front"
             mode: "0700"
 
         - name: Проверка автономного формирования health FRONT без defaults common
@@ -750,6 +783,10 @@
               - "{{ rendered_shell_root }}/self-heal-entry"
               - "{{ rendered_shell_root }}/self-heal-exit"
               - "{{ rendered_shell_root }}/self-heal-front"
+              - "{{ rendered_shell_root }}/reboot-guard-entry"
+              - "{{ rendered_shell_root }}/reboot-guard-exit"
+              - "{{ rendered_shell_root }}/reboot-guard-front"
+              - "{{ rendered_shell_root }}/kalimera-weekly"
               - "{{ rendered_shell_root }}/kalimera-help"
               - "{{ rendered_shell_root }}/kalimera-test"
               - "{{ rendered_shell_root }}/kalimera-test-exit"

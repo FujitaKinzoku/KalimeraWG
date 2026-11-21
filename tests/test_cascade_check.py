@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -286,6 +287,89 @@ class CascadeCheckTests(unittest.TestCase):
         # От FRONT строки нет: служба выключена в настройках либо отчёт не получен.
         self.assertIn("FRONT: сведений нет", text)
 
+    def total_block(self, rows: str) -> str:
+        """Группа «ИТОГ» сводки."""
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = result.stdout.index("\nИТОГ\n")
+        return result.stdout[start:]
+
+    def test_total_adds_up_recoveries_of_the_whole_cascade(self) -> None:
+        # Счёт по каскаду стоит рядом с остальными итогами, а не только в строках серверов.
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев 3, восстановлено 2, прошло без действия службы 1")
+            + row("EXIT", "OK", "самовосстановление: за 7 дней сбоев не было")
+            + row("FRONT", "OK", "самовосстановление: за 7 дней сбоев 1, восстановлено 1", "служба Xray-core (перезапуск)")
+        )
+        self.assertIn("ИТОГ: OK 3 · WARN 0 · FAIL 0\n", text)
+        self.assertIn(
+            "самовосстановление за 7 дней: сбоев 4, восстановлено 3, прошло без действия службы 1 · статус OK\n",
+            text,
+        )
+
+    def test_total_counts_what_was_not_repaired(self) -> None:
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев 2, восстановлено 2")
+            + row(
+                "EXIT", "WARN", "самовосстановление: за 7 дней сбоев 2, восстановлено 1, не восстановлено 1",
+                "служба Unbound - попытки исчерпаны", "подробности: self-heal status",
+            )
+        )
+        self.assertIn(
+            "самовосстановление за 7 дней: сбоев 4, восстановлено 3, не восстановлено 1 · статус WARN\n", text
+        )
+
+    def test_total_without_failures_and_without_data(self) -> None:
+        text = self.total_block(
+            row("ENTRY", "OK", "самовосстановление: за 7 дней сбоев не было")
+            + row("EXIT", "OK", "самовосстановление: за 7 дней сбоев не было")
+        )
+        self.assertIn("самовосстановление за 7 дней: сбоев не было · статус OK\n", text)
+        # Служба выключена на всех серверах: счёта нет, и это видно.
+        text = self.total_block(row("ENTRY", "OK", "самовосстановление выключено администратором"))
+        self.assertIn("самовосстановление: сведений нет\n", text)
+
+    def updates_block(self, rows: str) -> str:
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        start = result.stdout.index("\nОБНОВЛЕНИЯ\n")
+        return result.stdout[start:result.stdout.index("\nИТОГ\n", start)]
+
+    def test_available_component_updates_are_listed_once(self) -> None:
+        amnezia = "обновление компонента: доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1"
+        command = "на ENTRY: kalimera-deploy --resume --update-amneziawg"
+        text = self.updates_block(
+            row("ENTRY", "OK", amnezia, command)
+            + row("EXIT", "OK", amnezia, command)
+            + row(
+                "FRONT", "OK", "обновление компонента: доступен Xray 26.11.9, работает 26.10.31",
+                "на ENTRY: kalimera-deploy --resume --update-xray",
+            )
+        )
+        self.assertEqual(text.count("доступен AmneziaWG"), 1, text)
+        self.assertIn("доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1 → " + command, text)
+        self.assertIn("доступен Xray 26.11.9, работает 26.10.31 → на ENTRY: kalimera-deploy --resume --update-xray", text)
+        # Найденное обновление - не замечание: итог отчёта остаётся OK.
+        self.assertIn("GOOD:", self.run_body("render\n").stdout)
+
+    def test_no_component_updates_is_said_plainly(self) -> None:
+        self.assertIn("новых версий AmneziaWG и Xray нет", self.updates_block(row("ENTRY", "OK", "служба")))
+
+    def test_tsv_mode_prints_rows_and_keeps_the_exit_code(self) -> None:
+        cases = (
+            (row("ENTRY", "OK", "служба"), 0),
+            (row("ENTRY", "OK", "служба") + row("EXIT", "WARN", "замечание", "", "сделать"), 3),
+            (row("EXIT", "WARN", "замечание") + row("FRONT", "FAIL", "ошибка", "нет ответа"), 1),
+        )
+        for text, code in cases:
+            with self.subTest(code=code):
+                self.rows.write_text(text, encoding="utf-8")
+                result = self.run_body('print_rows\nexit "$exit_code"\n')
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(result.stdout, text)
+
     def test_summary_wraps_a_long_error_inside_the_box(self) -> None:
         text = self.summary(
             row(
@@ -533,6 +617,157 @@ class KalimeraReportTests(unittest.TestCase):
         result = self.run_body("systemctl() { :; }\ncheck_services\n")
         self.assertEqual(result.stdout, row("ENTRY", "OK", "неисправные модули systemd отсутствуют"))
 
+    def report(self, **variables) -> Path:
+        """kalimera-report с путями состояния во временном каталоге."""
+        values = {
+            "awg_node_role": "entry",
+            "awg_auto_reboot_state_dir": str(self.dir / "reboot"),
+            "kalimera_updates_state_dir": str(self.dir / "updates"),
+            "awg_telegram_monitor_path": str(self.dir / "telegram"),
+            **variables,
+        }
+        script = self.dir / "kalimera-report-custom"
+        text = render(REPORT, **values).replace("/var/run/reboot-required", str(self.dir / "reboot-required"))
+        script.write_text(text, encoding="utf-8")
+        return script
+
+    def run_report(self, body: str, **variables):
+        result = subprocess.run(
+            [bash_path(), "-c", f"source {shlex.quote(str(self.report(**variables)))}\n" + body],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_pending_reboot_waits_for_the_automatic_window(self) -> None:
+        marker = self.dir / "reboot-required"
+        self.assertEqual(self.run_report("check_reboot\n"), row("ENTRY", "OK", "перезагрузка не требуется"))
+        marker.write_text("", encoding="utf-8")
+        # Ожидание еженедельного окна - обычное состояние, а не замечание.
+        self.assertEqual(
+            self.run_report("check_reboot\n"),
+            row("ENTRY", "OK", "перезагрузка после обновления выполнится автоматически", "ожидает еженедельного окна"),
+        )
+        # Автоматика выключена в настройках: перезагрузка остаётся за человеком.
+        output = self.run_report("check_reboot\n", awg_auto_reboot_enabled=False)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tтребуется перезагрузка после обновления системы\t"), output)
+        self.assertIn("cascade-reboot --yes", output)
+
+    def test_overdue_reboot_is_a_warning(self) -> None:
+        marker = self.dir / "reboot-required"
+        marker.write_text("", encoding="utf-8")
+        old = time.time() - 30 * 86400
+        os.utime(marker, (old, old))
+        output = self.run_report("check_reboot\n")
+        self.assertTrue(output.startswith("ENTRY\tWARN\tтребуется перезагрузка после обновления системы\t"), output)
+        self.assertRegex(output, r"ждёт (29|30) дн\., автоматическая не выполнена")
+
+    def test_stopped_automatic_reboot_is_reported_on_entry_only(self) -> None:
+        state = self.dir / "reboot"
+        state.mkdir()
+        (state / "auto-blocked").write_text("2026-11-22 03:50 UTC: exit не вернулся после перезагрузки\n", encoding="utf-8")
+        output = self.run_report("check_reboot\n")
+        self.assertIn(
+            "ENTRY\tWARN\tавтоматическая перезагрузка каскада остановлена\t"
+            "2026-11-22 03:50 UTC: exit не вернулся после перезагрузки\t",
+            output,
+        )
+        self.assertIn("cascade-reboot auto on", output)
+        output = self.run_report("check_reboot\n", awg_node_role="exit")
+        self.assertEqual(output, row("EXIT", "OK", "перезагрузка не требуется"))
+
+    def test_component_updates_become_rows_without_a_warning(self) -> None:
+        updates = self.dir / "updates"
+        updates.mkdir()
+        (updates / "state").write_text(
+            "#checked\t2026-11-21 06:10 UTC\n"
+            "UPD\tkernel\tядро 6.8.0-99 установлено, работает 6.8.0-90\tsudo reboot\n"
+            "UPD\tamneziawg\tдоступен AmneziaWG: amneziawg-dkms 1.0 → 1.1\tна ENTRY: kalimera-deploy --resume --update-amneziawg\n"
+            "OK\txray\tXray 26.10.31 актуален\t\n"
+            "WARN\tdomain\tрегистрация домена example.uk истекает 2026-12-11 (через 19 дн.)\tпродлите домен у регистратора\n"
+            "OK\tdomain\tдомен example.org зарегистрирован до 2027-05-01\t\n",
+            encoding="utf-8",
+        )
+        # Ядро ставит ночное обслуживание: в напоминание оно не входит. Срок
+        # домена - замечание: оно появляется заранее.
+        self.assertEqual(
+            self.run_report("check_updates\n"),
+            row(
+                "ENTRY", "OK", "обновление компонента: доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1",
+                "на ENTRY: kalimera-deploy --resume --update-amneziawg",
+            )
+            + row(
+                "ENTRY", "WARN", "регистрация домена example.uk истекает 2026-12-11 (через 19 дн.)", "",
+                "продлите домен у регистратора",
+            ),
+        )
+
+    # Подставной dig: отвечает адресом, начиная с вызова номер $ANSWER_FROM.
+    FAKE_DIG = (
+        "sleep() { :; }\n"
+        "dig() {\n"
+        '    count=$(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 )); echo "$count" >"$COUNT"\n'
+        '    (( count >= ANSWER_FROM )) || return 0\n'
+        "    printf 'yandex.ru. 60 IN A 77.88.44.55\\n;; Query time: 131 msec\\n'\n"
+        "}\n"
+    )
+
+    def dns(self, body: str, answer_from: int, **variables) -> tuple[str, int]:
+        count = self.dir / "dig-count"
+        count.unlink(missing_ok=True)
+        output = self.run_report(
+            f"COUNT={shlex.quote(str(count))}\nANSWER_FROM={answer_from}\n" + self.FAKE_DIG + body, **variables
+        )
+        return output, int(count.read_text(encoding="utf-8"))
+
+    def test_one_lost_dns_answer_is_not_a_failure(self) -> None:
+        # Найдено на рабочем каскаде: единственный потерянный ответ DoH через прокси
+        # давал «FAIL: работа каскада нарушена», а повторный запуск проходил.
+        output, calls = self.dns("dns_row 'DNS: проверка' 127.0.0.1 5354 yandex.ru 'маршрут' 'подсказка'\n", 2)
+        self.assertEqual(output, row("DNS", "OK", "DNS: проверка", "77.88.44.55 за 131 мс; маршрут", "", "131"))
+        self.assertEqual(calls, 2)
+
+    def test_dns_that_stays_silent_fails_after_three_attempts(self) -> None:
+        output, calls = self.dns("dns_row 'DNS: проверка' 127.0.0.1 5354 yandex.ru 'маршрут' 'подсказка'\n", 99)
+        self.assertEqual(output, row("DNS", "FAIL", "DNS: проверка", "нет ответа", "подсказка"))
+        self.assertEqual(calls, 3)
+
+    def test_proxy_dns_failure_is_a_warning_when_only_selected_traffic_uses_the_proxy(self) -> None:
+        # Через прокси идут только выбранные домены: каскад при его сбое работает.
+        body = "ru_state=active\ncheck_dns\n"
+        output, _calls = self.dns(body, 99, entry_ru_proxy_enabled=True, entry_ru_proxy_scope="selected")
+        doh = [line for line in output.splitlines() if "через RU DoH" in line]
+        self.assertEqual(len(doh), 1, output)
+        self.assertTrue(doh[0].startswith("DNS\tWARN\tDNS: yandex.ru напрямую через RU DoH\tнет ответа\t"), doh[0])
+        self.assertIn("затронуты только домены и адреса из proxy-domain и proxy-address", doh[0])
+        # Клиентский резолвер и Unbound - по-прежнему ошибка: через них идёт весь DNS.
+        self.assertEqual(output.count("DNS\tFAIL\t"), 3, output)
+        # Весь российский трафик идёт через прокси: его сбой - ошибка.
+        output, _calls = self.dns(body, 99, entry_ru_proxy_enabled=True, entry_ru_proxy_scope="all")
+        self.assertIn("DNS\tFAIL\tDNS: yandex.ru напрямую через RU DoH\tнет ответа\t", output)
+
+    def test_health_follows_the_same_rule_for_the_proxy_dns(self) -> None:
+        text = AWG_HEALTH.read_text(encoding="utf-8")
+        start = text.index("check_minor 'прослушивание российского DoH' dns_resolves_a ")
+        block = text[text.rindex("{% if", 0, start):text.index("{% endif %}", start)]
+        self.assertIn("(entry_ru_proxy_scope | default('all')) == 'selected'", block)
+        self.assertIn("{% else %}\n    check 'прослушивание российского DoH' dns_resolves_a ", block)
+
+    def test_telegram_delivery_is_checked_only_when_enabled(self) -> None:
+        tool = self.dir / "telegram"
+        tool.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        tool.chmod(0o755)
+        self.assertEqual(self.run_report("check_telegram\n"), "")
+        output = self.run_report("check_telegram\n", awg_telegram_monitor_enabled=True)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tTelegram-уведомления не доставляются\t"), output)
+        tool.write_text('#!/bin/sh\n[ "$1" = --check ]\n', encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_telegram\n", awg_telegram_monitor_enabled=True),
+            row("ENTRY", "OK", "Telegram-уведомления: API доступен с этого сервера"),
+        )
+
     def run_body(self, body: str):
         return subprocess.run(
             [
@@ -575,7 +810,9 @@ class KalimeraReportTests(unittest.TestCase):
     def test_dns_rows_belong_to_the_dns_segment(self) -> None:
         text = REPORT.read_text(encoding="utf-8")
         self.assertIn("emit DNS OK", text)
-        self.assertIn("emit DNS FAIL", text)
+        # Статус неответившей проверки - FAIL, если строка не задаёт иной.
+        self.assertIn('failed="${7:-FAIL}"', text)
+        self.assertIn('emit DNS "$failed"', text)
 
     def test_link_rows_are_measured_in_milliseconds(self) -> None:
         text = REPORT.read_text(encoding="utf-8")
@@ -599,6 +836,49 @@ class CascadeRolePolicyTests(unittest.TestCase):
             tasks,
         )
         self.assertIn("exclusive: true", tasks)
+
+    def test_pager_run_through_sudo_leaves_no_history(self) -> None:
+        # Найдено на рабочем каскаде трижды: команда вида «sudo git log» или «sudo
+        # systemctl status» запускает less от root, и он заменяет ссылку
+        # /root/.lesshst -> /dev/null обычным файлом. Аудит после этого находит
+        # историю команд. Сеанс администратора задаёт LESSHISTFILE=-, а sudo
+        # должен пропускать эту переменную.
+        sudoers = (ROOT / "roles" / "security" / "templates" / "kalimera-admin.sudoers.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('Defaults:{{ security_admin_user }} env_keep += "LESSHISTFILE"\n', sudoers)
+        tools = (ROOT / "roles" / "terminal" / "templates" / "kalimera-shell-tools.sh.j2").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("export LESSHISTFILE=-\n", tools)
+        audit = (ROOT / "roles" / "operations" / "templates" / "server-audit.sh.j2").read_text(encoding="utf-8")
+        self.assertIn("sudo ln -sf /dev/null /root/.lesshst", audit)
+
+    def test_less_keeps_the_history_link_only_with_the_variable(self) -> None:
+        if shutil.which("less") is None or shutil.which("script") is None or os.name == "nt":
+            self.skipTest("нужны less и script")
+
+        def link_survives(**variables: str) -> bool:
+            with tempfile.TemporaryDirectory() as temporary:
+                history = Path(temporary) / ".lesshst"
+                history.symlink_to("/dev/null")
+                environment = {**os.environ, "HOME": temporary, **variables}
+                environment.pop("LESSHISTFILE", None) if not variables else None
+                # script даёт less терминал; одна строка вывода, как у git log --oneline -1.
+                subprocess.run(
+                    ["script", "-qec", "echo строка | less -FRX", "/dev/null"],
+                    input="q",
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    timeout=30,
+                )
+                return history.is_symlink()
+
+        # Без переменной less 590 из Ubuntu 24.04 заменяет ссылку файлом в 20 байт
+        # даже при выводе в одну строку. Здесь это не утверждается: поведение
+        # зависит от версии less, а проверяется защита от него.
+        self.assertTrue(link_survives(LESSHISTFILE="-"))
 
     def test_report_user_is_a_system_account_without_password(self) -> None:
         tasks = (ROOT / "roles" / "cascade_check" / "tasks" / "main.yml").read_text(encoding="utf-8")

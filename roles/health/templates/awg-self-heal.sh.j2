@@ -25,7 +25,13 @@ readonly open_file="$state_dir/open"
 # Поля журнала восстановлений разделены символом US (0x1f): в отличие от
 # табуляции, read не склеивает соседние разделители при пустом поле.
 readonly sep=$'\x1f'
-readonly summary_window=86400
+# Итог считается за неделю: столько же охватывает еженедельная сводка в Telegram.
+readonly summary_days={{ awg_self_heal_summary_days | default(7) | int }}
+readonly summary_window=$(( summary_days * 86400 ))
+# Собственные проверки службы (см. collect_failures).
+readonly disk_label='свободное место на корневом разделе'
+readonly disk_limit={{ awg_self_heal_disk_limit_percent | default(90) | int }}
+readonly clock_label='системные часы синхронизированы'
 readonly manual_off_flag={{ awg_self_heal_manual_off_flag | default('/var/lib/awg-self-heal.manual-off') | quote }}
 readonly deploy_marker={{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') | quote }}
 readonly deploy_marker_ttl=10800
@@ -58,6 +64,11 @@ classify() {
     plan_action=''
     plan_reason=''
     case "$1" in
+        # Собственные проверки службы: названия совпадают с disk_label и clock_label.
+        'свободное место на корневом разделе')
+            plan_action=disk_cleanup ;;
+        'системные часы синхронизированы')
+            plan_action=time_sync ;;
         'запуск от root'|'Ubuntu 24.04')
             plan_reason='manual:условие запуска, а не неисправность' ;;
         'модуль AmneziaWG')
@@ -179,6 +190,7 @@ classify_unit() {
 
 # Порядок выполнения: сначала то, от чего зависят остальные.
 readonly -a action_order=(
+    disk_cleanup time_sync
     secrets_unlock kernel_module sysctl ufw_enable ufw_logging_off ssh fail2ban
     awg_client awg_legacy awg_mobile transit local_peers ru_zone sing_box routing
     mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
@@ -189,6 +201,8 @@ readonly -a action_order=(
 
 action_title() {
     case "$1" in
+        disk_cleanup) echo 'очистка кэша пакетов' ;;
+        time_sync) echo 'перезапуск службы синхронизации времени' ;;
         secrets_unlock) echo 'открытие хранилища секретов' ;;
         kernel_module) echo 'сборка модуля AmneziaWG под установленные ядра' ;;
         sysctl) echo 'повторное применение параметров ядра' ;;
@@ -228,8 +242,24 @@ restart_unit() {
     systemctl restart "$1"
 }
 
+# Служба синхронизации времени, включённая на сервере. Если её нет, часы ведёт
+# гипервизор, и проверять нечего.
+time_service() {
+    local unit
+    for unit in systemd-timesyncd.service chrony.service chronyd.service ntpsec.service ntp.service; do
+        if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+            echo "$unit"
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_action() {
     case "$1" in
+        # Скачанные пакеты уже установлены, apt скачает их заново при необходимости.
+        disk_cleanup) apt-get clean ;;
+        time_sync) restart_unit "$(time_service)" ;;
         sysctl) sysctl --system >/dev/null ;;
         ufw_enable) ufw --force enable >/dev/null ;;
         ufw_logging_off) ufw logging off >/dev/null ;;
@@ -430,6 +460,32 @@ collect_failures() {
         esac
         failures+=("$unit_prefix$unit")
     done < <(systemctl --failed --no-legend --plain --no-pager 2>/dev/null || true)
+    # Собственные проверки службы. В awg-health их нет намеренно: deploy требует,
+    # чтобы awg-health --strict проходил без единого замечания, и ложное
+    # срабатывание новой проверки остановило бы обновление каскада.
+    ! disk_is_full || failures+=("$disk_label")
+    ! clock_lost_sync || failures+=("$clock_label")
+}
+
+disk_is_full() {
+    local used
+    used="$(df -P / 2>/dev/null | awk 'NR == 2 { sub(/%/, "", $5); print $5 }')"
+    [[ "$used" =~ ^[0-9]+$ ]] && (( used >= disk_limit ))
+}
+
+# Часы считаются неисправными, только если синхронизация была и пропала. Сервер,
+# на котором она не устанавливалась с загрузки (NTP закрыт хостингом, время ведёт
+# гипервизор), ошибкой не считается: иначе замечание висело бы на нём всегда.
+clock_lost_sync() {
+    local synced
+    command -v timedatectl >/dev/null 2>&1 || return 1
+    time_service >/dev/null || return 1
+    synced="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+    if [[ "$synced" == yes ]]; then
+        : >"$state_dir/clock-was-synced"
+        return 1
+    fi
+    [[ "$synced" == no && -e "$state_dir/clock-was-synced" ]]
 }
 
 contains() {
@@ -497,7 +553,7 @@ last_from() {
     fi
 }
 
-# Итог за сутки: сколько было сбоев, сколько восстановлено и что не устранено.
+# Итог за период: сколько было сбоев, сколько восстановлено и что не устранено.
 # Сбой - проверка, не прошедшая дважды подряд; разовые сбои сюда не входят.
 summary_load() {
     local since epoch kind label detail reason _action
@@ -530,13 +586,28 @@ summary_load() {
     sum_total=$((sum_repaired + sum_cleared + sum_open))
 }
 
+# «за сутки», «за 3 дня», «за 7 дней», «за 21 день».
+period_text() {
+    local form='дней'
+    if (( summary_days == 1 )); then
+        echo 'за сутки'
+        return 0
+    fi
+    if (( summary_days % 10 == 1 && summary_days % 100 != 11 )); then
+        form='день'
+    elif (( summary_days % 10 >= 2 && summary_days % 10 <= 4 && (summary_days % 100 < 12 || summary_days % 100 > 14) )); then
+        form='дня'
+    fi
+    echo "за $summary_days $form"
+}
+
 summary_text() {
     local text
     if (( sum_total == 0 )); then
-        echo 'за сутки сбоев не было'
+        echo "$(period_text) сбоев не было"
         return 0
     fi
-    text="за сутки сбоев $sum_total, восстановлено $sum_repaired"
+    text="$(period_text) сбоев $sum_total, восстановлено $sum_repaired"
     (( sum_cleared == 0 )) || text+=", прошло без действия службы $sum_cleared"
     (( sum_open == 0 )) || text+=", не восстановлено $sum_open"
     echo "$text"
@@ -601,7 +672,7 @@ show_status() {
         printf '  %s\n' "${sum_open_items[@]}"
     fi
     if (( sum_repaired > 0 )); then
-        echo 'Восстановлено за сутки:'
+        echo "Восстановлено $(period_text):"
         printf '  %s\n' "${sum_repaired_items[@]:$(last_from 10 "${#sum_repaired_items[@]}")}"
     fi
     if [[ ! -r "$state_file" ]]; then

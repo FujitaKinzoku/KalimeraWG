@@ -10,11 +10,75 @@ awg_held_packages=(amneziawg amneziawg-dkms amneziawg-tools sing-box)
 awg_held_packages=()
 {% endif %}
 awg_new_holds=()
+# Причина последней неудачи apt: её показывает cascade-check, когда журнал
+# systemd уже вытеснен.
+awg_apt_error=''
+# Репозиторий, недоступность которого не мешает ночному обновлению: пакеты
+# AmneziaWG из него ночью не ставятся.
+readonly awg_optional_source={{ (common_apt_optional_source_pattern | default('ppa.launchpadcontent.net/amnezia/')) | quote }}
 
 awg_release_holds() {
     [[ -z "${awg_new_holds[*]}" ]] || apt-mark unhold "${awg_new_holds[@]}" >/dev/null
 }
 
+# Шаг apt: сообщения об ошибках идут в журнал как обычно, а последняя строка
+# "E:" запоминается.
+awg_apt_step() {
+    local rc=0 errors
+    errors="$(mktemp)" || { "$@"; return; }
+    "$@" 2>"$errors" || rc=$?
+    cat "$errors" >&2
+    if (( rc != 0 )); then
+        awg_apt_error="$(grep -E '^E:' "$errors" | tail -n 1 | cut -c 1-200 || true)"
+        [[ -n "$awg_apt_error" ]] || awg_apt_error="apt завершился с кодом $rc"
+    fi
+    rm -f "$errors"
+    return "$rc"
+}
+
+# Списки пакетов. apt-get update возвращает успех, даже когда зеркало не
+# ответило: обновление шло бы по старым спискам, и сервер молча перестал бы
+# получать обновления. Не ответивший репозиторий считается неудачей шага.
+awg_apt_update() {
+    local rc=0 errors hosts
+    errors="$(mktemp)" || { apt-get "$@" -q update; return; }
+    LC_ALL=C apt-get "$@" -q update 2>"$errors" || rc=$?
+    cat "$errors" >&2
+    hosts="$(grep -oE '^(W|E): Failed to fetch [a-z+]+://[^ ]+' "$errors" |
+        sed -E 's#^.*://##' | grep -vF -- "$awg_optional_source" |
+        sed -E 's#/.*$##' | sort -u | paste -sd, - || true)"
+    if [[ -n "$hosts" ]]; then
+        awg_apt_error="не ответили репозитории: ${hosts//,/, }"
+        rc=1
+    elif (( rc != 0 )); then
+        awg_apt_error="$(grep -E '^E:' "$errors" | tail -n 1 | cut -c 1-200 || true)"
+        [[ -n "$awg_apt_error" ]] || awg_apt_error="apt-get update завершился с кодом $rc"
+    fi
+    rm -f "$errors"
+    return "$rc"
+}
+
+# Пакеты в согласованном состоянии: нет наполовину установленных и ненастроенных.
+awg_dpkg_consistent() {
+    [[ -z "$(dpkg --audit 2>/dev/null || true)" ]]
+}
+
+# Прерванная установка пакетов (перезагрузка или нехватка памяти посреди
+# обновления) оставляет пакеты ненастроенными. Каждый следующий запуск apt
+# завершался бы ошибкой, пока человек не выполнит dpkg --configure -a.
+awg_dpkg_recover() {
+    if awg_dpkg_consistent; then
+        return 0
+    fi
+    printf 'Найдена незавершённая установка пакетов: завершаю её.\n' >&2
+    awg_apt_step dpkg --force-confdef --force-confold --configure -a || true
+    awg_apt_step apt-get -o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold -y -f install || true
+    awg_dpkg_consistent
+}
+
+# Возвращает 0 при успехе. Каждая неудача обрабатывается явно: функцию вызывают
+# в условии, а там bash не прерывает её по первой ошибке сам.
 awg_full_upgrade() {
     local package held running flavour
     local -a apt_options=(
@@ -24,11 +88,11 @@ awg_full_upgrade() {
     )
     local -a kernel_packages=()
 
-    held="$(apt-mark showhold)"
+    held="$(apt-mark showhold)" || return 1
     for package in "${awg_held_packages[@]}"; do
         dpkg-query -W "$package" >/dev/null 2>&1 || continue
         if ! grep -Fxq -- "$package" <<<"$held"; then
-            apt-mark hold "$package" >/dev/null
+            apt-mark hold "$package" >/dev/null || return 1
             awg_new_holds+=("$package")
         fi
     done
@@ -37,8 +101,12 @@ awg_full_upgrade() {
     # shellcheck disable=SC2064
     trap "${awg_exit_handler:-awg_release_holds}" EXIT
 
-    apt-get "${apt_options[@]}" -q update
-    apt-get "${apt_options[@]}" -y upgrade
+    if ! awg_dpkg_recover; then
+        awg_apt_error='установка пакетов прервана и не восстановлена: sudo dpkg --configure -a'
+        return 1
+    fi
+    awg_apt_update "${apt_options[@]}" || return 1
+    awg_apt_step apt-get "${apt_options[@]}" -y upgrade || return
 
     # apt-get upgrade не ставит новое ядро: у него новое имя пакета. Его тянет
     # метапакет той же сборки; для generic - облегчённый linux-image-virtual,
@@ -51,12 +119,12 @@ awg_full_upgrade() {
     kernel_packages+=("linux-headers-$flavour")
 {% endif %}
     if apt-cache show "linux-image-$flavour" >/dev/null 2>&1; then
-        apt-get "${apt_options[@]}" -y install "${kernel_packages[@]}"
+        awg_apt_step apt-get "${apt_options[@]}" -y install "${kernel_packages[@]}" || return
     else
         printf 'Метапакет linux-image-%s не найден в репозиториях; новое ядро не устанавливается.\n' "$flavour" >&2
     fi
 
-    apt-get "${apt_options[@]}" -y autoremove
+    awg_apt_step apt-get "${apt_options[@]}" -y autoremove || return
 {% if awg_node_role | default('') == 'entry' %}
 
     # После обновления библиотек needrestart перезапускает systemd-networkd,
@@ -68,4 +136,5 @@ awg_full_upgrade() {
         || systemctl start {{ entry_routing_service_name | default('awg-entry-routing.service') }} \
         || printf 'Не удалось повторно применить policy routing ENTRY.\n' >&2
 {% endif %}
+    return 0
 }

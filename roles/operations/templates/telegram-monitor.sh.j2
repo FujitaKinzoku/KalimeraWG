@@ -10,6 +10,13 @@ fi
 readonly ENV_FILE
 readonly STATE_DIR={{ awg_telegram_monitor_state_dir | quote }}
 readonly NODE_ROLE={{ awg_node_role | quote }}
+# Метка каскада в начале каждого сообщения: по ней различают несколько каскадов
+# в одном чате. Имя сервера и адреса в сообщения не попадают.
+readonly LABEL={{ (awg_telegram_label | default('')) | string | quote }}
+# Сообщение «проверка состояния не пройдена» уходит, когда ошибка держится дольше
+# этого срока: за это время служба самовосстановления успевает её устранить и
+# сообщить об этом сама. Разовый сбой проверки тревогу не поднимает.
+readonly FAIL_DELAY={{ awg_telegram_monitor_fail_delay | default(480) | int }}
 {% if awg_node_role == 'entry' and entry_ru_proxy_enabled | bool %}
 readonly PROXY_MONITORED=true
 readonly PROXY_DISABLED_FLAG={{ entry_ru_proxy_disabled_flag | quote }}
@@ -21,12 +28,18 @@ readonly PROXY_MANUAL_FLAG=''
 {% endif %}
 
 test_mode=false
+check_mode=false
 notify_text=''
 case "${0##*/}:${1:-}" in
     *:--notify)
         # Готовое сообщение от службы самовосстановления: что сломалось и что сделано.
         [[ $# -eq 2 && -n "$2" ]] || { echo 'Использование: awg-telegram-monitor --notify ТЕКСТ' >&2; exit 2; }
         notify_text="$2"
+        ;;
+    *:--check)
+        # Доставка возможна: API отвечает и принимает токен. Ничего не отправляет.
+        [[ $# -eq 1 ]] || { echo 'Использование: awg-telegram-monitor --check' >&2; exit 2; }
+        check_mode=true
         ;;
     telegram-test:)
         [[ $# -eq 0 ]] || { echo 'Использование: telegram-test' >&2; exit 2; }
@@ -53,6 +66,9 @@ case "${0##*/}:${1:-}" in
 esac
 
 if [[ ! -r "$ENV_FILE" ]]; then
+    # Готовое сообщение не отправлено: код 3 отличает это от доставки, и служба,
+    # которая его передала, повторит попытку позже.
+    [[ -z "$notify_text" && "$check_mode" == false ]] || exit 3
     [[ "$test_mode" == false ]] && exit 0
     echo 'Telegram-мониторинг не настроен.' >&2
     exit 1
@@ -65,12 +81,25 @@ source "$ENV_FILE"
 
 send_message() {
     local message="$1"
+    [[ -z "$LABEL" ]] || message="[$LABEL] $message"
     printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' \
         "$TELEGRAM_BOT_TOKEN" |
-        curl --silent --show-error --fail --config - \
+        curl --silent --show-error --fail --max-time 30 --config - \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${message}" >/dev/null
 }
+
+# Две попытки: единственный потерянный ответ не должен давать замечание в отчёте.
+if [[ "$check_mode" == true ]]; then
+    for attempt in 1 2; do
+        if printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TELEGRAM_BOT_TOKEN" |
+                curl --silent --fail --max-time 10 --config - >/dev/null 2>&1; then
+            exit 0
+        fi
+        (( attempt == 2 )) || sleep 2
+    done
+    exit 1
+fi
 
 # Готовое сообщение уходит без общей блокировки: оно не должно пропасть из-за
 # того, что в этот момент идёт очередная проверка состояния. Адреса и токены
@@ -121,6 +150,26 @@ else
     fi
 fi
 unset audit_output security_warning
+
+# Ошибка проверки подтверждается временем: пока она моложе FAIL_DELAY, состояние
+# не меняется и сообщение не уходит. Запись о загрузке тоже не трогается, поэтому
+# после перезагрузки сообщение «сервер перезапущен» придёт уже с итогом: служба
+# могла ещё не успеть запуститься.
+failed_since_file="$STATE_DIR/failed-since"
+if [[ "$current" == failed ]]; then
+    now="$(date +%s)"
+    failed_since="$(cat "$failed_since_file" 2>/dev/null || true)"
+    if [[ ! "$failed_since" =~ ^[0-9]+$ ]]; then
+        failed_since="$now"
+        printf '%s\n' "$failed_since" >"$failed_since_file"
+        chmod 0600 "$failed_since_file"
+    fi
+    if (( now - failed_since < FAIL_DELAY )); then
+        exit 0
+    fi
+else
+    rm -f "$failed_since_file"
+fi
 
 previous="$(cat "$STATE_DIR/status" 2>/dev/null || true)"
 boot_id="$(cat /proc/sys/kernel/random/boot_id)"

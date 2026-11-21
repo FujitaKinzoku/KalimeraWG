@@ -76,14 +76,20 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
   and DNS query logs, shell history and core dumps are disabled.
 - **Locked-down SSH.** A dedicated `kalimera` admin, key-only login, root
   disabled, a non-standard port and Fail2Ban.
+- **Unattended operation.** The cascade is built to run for months without
+  anyone logging in: Ubuntu updates are installed nightly, and once a week ENTRY
+  reboots the servers one at a time when an update requires it, checking the
+  cascade after each. A reboot does not start if the server might not come back.
+  See [Unattended operation](#unattended-operation).
 - **Self-monitoring.** `awg-health` and `server-audit` check services,
-  firewall, DNS and routes. Telegram reports reboots and failures.
+  firewall, DNS and routes. Telegram reports failures the cascade did not fix
+  itself and new component versions, and sends a weekly digest.
 - **Self-healing.** Every few minutes each server checks itself and fixes a
   local fault with the action for that exact fault: it restarts a stopped
   service, restores routing rules, refills the network set. Configuration drift
   and causes outside the server are not fixed, they are named. `cascade-check`
-  shows a 24-hour summary for every server: how many faults there were, how
-  many were repaired and which error is left.
+  shows a weekly summary for every server and for the cascade: how many faults
+  there were, how many were repaired and which error is left.
 - **Updates under control.** Every server checks daily for a new kernel,
   AmneziaWG and Xray-core and shows `UPD` with the command that applies it.
   An update is one command, verified and rolled back on failure.
@@ -189,10 +195,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.6.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.7.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.6.0` release rather than the moving `main`
+The command installs the pinned `v3.7.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -204,7 +210,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.6.0 --depth 1 \
+git clone --branch v3.7.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -253,7 +259,7 @@ table at login. Full reference: `kalimera-help`.
 | Task | Commands |
 |---|---|
 | Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
-| Self-healing | `self-heal status`: 24-hour summary, what was fixed and what was not; `self-heal run`, `self-heal off`, `self-heal on` |
+| Self-healing | `self-heal status`: weekly summary, what was fixed and what was not; `self-heal run`, `self-heal off`, `self-heal on` |
 | Full cascade check (on ENTRY) | `cascade-check`: ENTRY, EXIT, FRONT, links and DNS; summary OK / WARN / FAIL |
 | AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
 | VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete`; profile with a backup cascade: `vless-user auto NAME FILE` |
@@ -264,7 +270,7 @@ table at login. Full reference: `kalimera-help`.
 | Security | `fail2ban-client status sshd`, `f2b-reset`, `ssh-key-audit status`, `telegram-test` |
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 | Maintenance time | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (ENTRY only) |
-| Planned reboot | `cascade-reboot`, `cascade-reboot --yes`, `cascade-reboot status` (ENTRY only) |
+| Cascade reboot (ENTRY only) | `cascade-reboot`: check without rebooting; `cascade-reboot --yes`; `cascade-reboot status`: automation, next window, result; `cascade-reboot auto on`, `auto off` |
 | Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
@@ -347,9 +353,72 @@ Check again and show the full list on a server (no sudo): `kalimera-updates`.
 
 | What | Command | What happens |
 |---|---|---|
-| kernel | installed nightly, or right now: `kalimera-updates install kernel`; then `sudo reboot` | installs the new kernel and builds the AmneziaWG module for it; reboot servers of one cascade one at a time |
+| kernel | installed nightly; the weekly window reboots, or right now on ENTRY: `cascade-reboot --yes` | installs the new kernel and builds the AmneziaWG module for it; servers reboot one at a time with a cascade check |
 | AmneziaWG | on ENTRY: `kalimera-deploy --resume --update-amneziawg` | updates packages on ENTRY and EXIT, verifies the cascade, rolls back on failure; client configs stay the same |
 | Xray-core | on ENTRY: `kalimera-deploy --resume --update-xray` | installs the latest stable release on FRONT with SHA-256 from GitHub, checks the uplink through the CDN, rolls back on failure |
+
+A new AmneziaWG or Xray version is also announced in Telegram: once per version,
+with the install command. They are not updated automatically: an old version
+does not break the cascade, and a new one may need attention.
+
+### Unattended operation
+
+The cascade can be left alone for months. What happens without a human:
+
+| What | When | How |
+|---|---|---|
+| Ubuntu updates and a new kernel | every night | `awg-maintenance`; an interrupted package installation is finished automatically, an unreachable mirror is a skip until the next night, not an error |
+| Reboot after an update | once a week | ENTRY reboots FRONT, EXIT and itself one at a time and checks the cascade after each |
+| Local faults | every 5 minutes | `self-heal`: the action for the exact check that failed |
+| FRONT certificate | when due | certbot, saved into the encrypted bundle |
+| Telegram digest | once a week | cascade state, self-healing count, new versions, reboot |
+
+**Reboot guards.** A server is not rebooted if it might not come back or not
+rejoin the cascade:
+
+- a package installation is unfinished or running right now;
+- the kernel that would boot is not installed completely: no image, initramfs
+  missing or damaged, no modules, kernel absent from the boot menu;
+- the AmneziaWG module is not built for that kernel (ENTRY and EXIT);
+- the secret store would not open after boot: the bundle cannot be read or the
+  second server does not hand over its key share. Secrets are saved right
+  before the reboot;
+- the SSH configuration has an error or the root filesystem is almost full.
+
+The automatic reboot follows additional rules of caution:
+
+- a new kernel is held for 72 hours after installation: a bug in a fresh
+  Ubuntu kernel is usually found and fixed within days;
+- the `cascade-check` report must have no errors: a healthy cascade must not
+  become broken because of a planned update;
+- not more often than once in 6 days, and not within an hour after boot.
+
+FRONT is rebooted first: without it the main AmneziaWG path keeps working. If a
+server does not come back or the cascade fails the check afterwards, the other
+servers are left alone, the automation stops and reports this to Telegram.
+Resume after fixing the cause: `cascade-reboot auto on`.
+
+The window is Sunday, ninety minutes after the nightly maintenance starts, in
+its time zone; `maintenance-time` moves both. Settings live in
+`inventory/production/group_vars/all/main.yml`, then `kalimera-deploy --resume`:
+
+```yaml
+awg_weekly_day: Sun                        # weekday of the window
+awg_auto_reboot_enabled: true              # false - manual reboot only
+awg_auto_reboot_kernel_min_age_hours: 72   # hold time for a new kernel
+awg_telegram_label: "VK"                   # cascade label in Telegram messages
+```
+
+Where to look: `cascade-reboot status` (automation, next window, last
+decision), `cascade-reboot` (guards of every server without rebooting),
+`cascade-check` (self-healing summary, new versions, domain expiry, Telegram
+delivery).
+
+**What the cascade will not do by itself.** It does not pay for servers, the
+domain, the proxy or the CDN. It does not bring back a server that failed to
+boot. It does not update AmneziaWG and Xray. FRONT warns about the domain
+registration a month ahead; the rest is yours to remember. Without Telegram
+the cascade works the same, but has nowhere to report what needs you.
 
 ### KalimeraWG release
 
@@ -363,7 +432,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.6.0
+sudo git -C /root/KalimeraWG switch --detach v3.7.0
 kalimera-deploy --resume
 ```
 
@@ -390,6 +459,7 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.7.0:** unattended operation. Once a week ENTRY reboots the cascade servers one at a time when an update requires it, and does not start a reboot if a server might not come back. Telegram sends a weekly digest, announces new AmneziaWG and Xray versions and warns about domain expiry ahead of time. `cascade-check` shows the self-healing total for the whole cascade and available updates. Nightly maintenance finishes an interrupted package installation by itself and no longer fails because a mirror was unreachable once.
 - **v3.6.0:** self-healing. Every five minutes each server checks itself and fixes a local fault with the action for that exact fault; configuration drift and causes outside the server are named, not fixed. `cascade-check` shows a 24-hour summary: how many faults there were, how many were repaired and what is left. Nightly maintenance records why it failed and no longer fails because of a one-off error.
 - **v3.5.2:** a fix release after a review of the whole code base. Changes to the domain, address and port lists survive an ENTRY reboot. The daily audit and Telegram monitoring pass on schedule. Routing rules are applied without gaps, and a cascade update no longer restarts the routing service. Command messages match the outcome.
 - **v3.5.1:** client browsers stay on the ENTRY resolver: the bootstrap names of encrypted DNS (DoH) do not resolve, so the domain lists also apply to a browser that used to switch to DoH on its own. In the `selected` scope `proxy-domain` names are resolved by the Russian DoT from ENTRY, with a cache.

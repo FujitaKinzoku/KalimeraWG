@@ -959,7 +959,9 @@ class PolicyWiringTests(unittest.TestCase):
         self.assertIn(
             "check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked", text
         )
-        selected = text[text.index("{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}"):]
+        # Блок с проверкой сетей; условие по области выше него относится к DNS прокси.
+        condition = "{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}"
+        selected = text[text.rindex(condition, 0, text.index("check 'российские сети выходят напрямую с ENTRY")):]
         selected = selected[: selected.index("{% endif %}")]
         self.assertIn("ru_networks_bypass_proxy", selected.split("{% else %}")[0])
         self.assertIn("udp_ru_bypass_absent", selected.split("{% else %}")[1])

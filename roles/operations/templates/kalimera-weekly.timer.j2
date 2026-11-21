@@ -1,0 +1,33 @@
+{# Еженедельное окно: день недели awg_weekly_day, через awg_weekly_offset_minutes
+   минут после начала ночного обслуживания, в том же часовом поясе. Команда
+   maintenance-time, меняя время обслуживания, сдвигает и это окно. Окно, которое
+   пришлось бы на следующие сутки, переносится на следующий день недели. Готовое
+   выражение можно задать целиком в awg_weekly_calendar. #}
+{% set weekly_calendar = awg_weekly_calendar | default('') %}
+{% if not weekly_calendar %}
+{%   set weekly_days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] %}
+{%   set weekly_day = awg_weekly_day | default('Sun') %}
+{%   set weekly_parts = (awg_maintenance_calendar | default('*-*-* 05:20:00')).split() %}
+{%   set weekly_clock = (weekly_parts[1] if weekly_parts | length > 1 else '').split(':') %}
+{%   if weekly_parts | length in [2, 3] and weekly_parts[0] == '*-*-*' and weekly_clock | length == 3 and weekly_day in weekly_days %}
+{%     set weekly_total = (weekly_clock[0] | int) * 60 + (weekly_clock[1] | int) + (awg_weekly_offset_minutes | default(90) | int) %}
+{%     set weekly_minutes = weekly_total % 1440 %}
+{%     set weekly_day = weekly_days[(weekly_days.index(weekly_day) + weekly_total // 1440) % 7] %}
+{%     set weekly_calendar = weekly_day ~ ' *-*-* ' ~ ('%02d:%02d:00' | format(weekly_minutes // 60, weekly_minutes % 60)) ~ ((' ' ~ weekly_parts[2]) if weekly_parts | length == 3 else '') %}
+{%   else %}
+{%     set weekly_calendar = 'Sun *-*-* 07:00:00' %}
+{%   endif %}
+{% endif %}
+[Unit]
+Description=Еженедельное окно KalimeraWG: сводка и перезагрузка каскада
+
+[Timer]
+OnCalendar={{ weekly_calendar }}
+# Пропущенное окно не навёрстывается: перезагрузка в случайное время после
+# включения сервера хуже, чем перезагрузка через неделю.
+Persistent=false
+RandomizedDelaySec=0
+Unit=kalimera-weekly.service
+
+[Install]
+WantedBy=timers.target
