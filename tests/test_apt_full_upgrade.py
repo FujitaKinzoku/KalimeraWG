@@ -24,7 +24,35 @@ ROOT = Path(__file__).parents[1]
 TEMPLATES = ROOT / "roles" / "operations" / "templates"
 
 FAKES = {
-    "apt-get": 'printf "apt-get %s\\n" "$*" >>"$CALLS"',
+    # apt-get update: текст ошибок и код возврата задаются переменными среды.
+    "apt-get": textwrap.dedent(
+        """\
+        printf 'apt-get %s\\n' "$*" >>"$CALLS"
+        if [[ " $* " == *" update "* ]]; then
+            [[ -z "${FAKE_UPDATE_STDERR:-}" ]] || printf '%s\\n' "$FAKE_UPDATE_STDERR" >&2
+            exit "${FAKE_UPDATE_RC:-0}"
+        fi
+        if [[ " $* " == *" upgrade "* && -n "${FAKE_UPGRADE_STDERR:-}" ]]; then
+            printf '%s\\n' "$FAKE_UPGRADE_STDERR" >&2
+            exit 100
+        fi
+        """
+    ),
+    # dpkg --audit сообщает о незавершённой установке, пока её не завершит
+    # dpkg --configure -a (FAKE_DPKG_STUCK - не завершает).
+    "dpkg": textwrap.dedent(
+        """\
+        printf 'dpkg %s\\n' "$*" >>"$CALLS"
+        if [[ "$1" == --audit ]]; then
+            if [[ -n "${FAKE_DPKG_BROKEN:-}" && ! -e "$FAKE_STATE/dpkg-fixed" ]]; then
+                printf 'The following packages are only half configured:\\n libc6\\n'
+            fi
+        elif [[ " $* " == *" --configure "* && -z "${FAKE_DPKG_STUCK:-}" ]]; then
+            : >"$FAKE_STATE/dpkg-fixed"
+        fi
+        exit 0
+        """
+    ),
     "apt-mark": textwrap.dedent(
         """\
         printf 'apt-mark %s\\n' "$*" >>"$CALLS"
@@ -58,6 +86,13 @@ def render(role: str) -> str:
 
 
 def run(role: str, **environment: str) -> list[str]:
+    code, calls = run_result(role, **environment)
+    assert code == 0, calls
+    return calls
+
+
+def run_result(role: str, **environment: str) -> tuple[int, list[str]]:
+    """Код возврата awg_full_upgrade и вызовы; причина неудачи - строка ERROR."""
     bash = shutil.which("bash")
     if bash is None or os.name == "nt":
         raise unittest.SkipTest("нужен bash на Linux")
@@ -73,23 +108,24 @@ def run(role: str, **environment: str) -> list[str]:
         calls.touch()
         script = root / "upgrade.sh"
         script.write_text(
-            "set -Eeuo pipefail\n" + render(role) + "\nawg_full_upgrade\n",
+            "set -Eeuo pipefail\n"
+            + render(role)
+            + '\nawg_full_upgrade || { code=$?; printf \'ERROR %s\\n\' "$awg_apt_error" >>"$CALLS"; exit "$code"; }\n',
             encoding="utf-8",
         )
         env = {
             **os.environ,
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "CALLS": str(calls),
+            "FAKE_STATE": str(root),
             "FAKE_RUNNING_KERNEL": "6.8.0-149-generic",
             "FAKE_KNOWN_PACKAGES": "linux-image-virtual linux-headers-virtual",
             "FAKE_INSTALLED": "amneziawg amneziawg-dkms amneziawg-tools",
             "FAKE_ALREADY_HELD": "",
             **environment,
         }
-        result = subprocess.run(
-            [bash, str(script)], capture_output=True, text=True, env=env, check=True
-        )
-        return calls.read_text(encoding="utf-8").splitlines() + [
+        result = subprocess.run([bash, str(script)], capture_output=True, text=True, env=env, check=False)
+        return result.returncode, calls.read_text(encoding="utf-8").splitlines() + [
             "STDERR " + line for line in result.stderr.splitlines()
         ]
 
@@ -169,6 +205,54 @@ class FullUpgradeTests(unittest.TestCase):
             "новое ядро не устанавливается.",
             calls,
         )
+
+
+class UnattendedFailureTests(unittest.TestCase):
+    """Сервер без присмотра: ошибки обновления не должны ни копиться молча, ни повторяться вечно."""
+
+    MIRROR = "W: Failed to fetch http://mirror.example.invalid/ubuntu/dists/noble/InRelease  Could not resolve 'mirror.example.invalid'"
+    PPA = "W: Failed to fetch https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu/dists/noble/InRelease  Connection timed out"
+
+    def test_silent_mirror_stops_the_upgrade_and_is_named(self) -> None:
+        # apt-get update возвращает успех и при неответившем зеркале: обновление шло
+        # по старым спискам, и сервер молча переставал получать обновления.
+        code, calls = run_result("entry", FAKE_UPDATE_STDERR=self.MIRROR)
+        self.assertEqual(code, 1, calls)
+        self.assertEqual(len(apt_get(calls)), 1, calls)
+        self.assertIn("ERROR не ответили репозитории: mirror.example.invalid", calls)
+        # Удержание AmneziaWG снимается и при неудаче.
+        self.assertIn("apt-mark unhold amneziawg amneziawg-dkms amneziawg-tools", calls)
+
+    def test_silent_amneziawg_ppa_does_not_stop_ubuntu_updates(self) -> None:
+        # Пакеты AmneziaWG ночью не ставятся: их репозиторий для обновления Ubuntu не нужен.
+        code, calls = run_result("entry", FAKE_UPDATE_STDERR=self.PPA)
+        self.assertEqual(code, 0, calls)
+        self.assertEqual(len(apt_get(calls)), 4, calls)
+
+    def test_failed_download_keeps_the_reason(self) -> None:
+        code, calls = run_result(
+            "front", FAKE_UPGRADE_STDERR="E: Failed to fetch http://mirror.example.invalid/pool/x.deb  404  Not Found"
+        )
+        self.assertEqual(code, 100, calls)
+        self.assertIn("ERROR E: Failed to fetch http://mirror.example.invalid/pool/x.deb  404  Not Found", calls)
+
+    def test_interrupted_installation_is_finished_first(self) -> None:
+        code, calls = run_result("entry", FAKE_DPKG_BROKEN="1")
+        self.assertEqual(code, 0, calls)
+        configure = calls.index("dpkg --force-confdef --force-confold --configure -a")
+        update = next(i for i, call in enumerate(calls) if call.endswith(" -q update"))
+        self.assertLess(configure, update)
+        self.assertIn("STDERR Найдена незавершённая установка пакетов: завершаю её.", calls)
+
+    def test_installation_that_cannot_be_finished_stops_the_upgrade(self) -> None:
+        code, calls = run_result("entry", FAKE_DPKG_BROKEN="1", FAKE_DPKG_STUCK="1")
+        self.assertEqual(code, 1, calls)
+        self.assertFalse([call for call in apt_get(calls) if call.endswith(" -q update")], calls)
+        self.assertIn("ERROR установка пакетов прервана и не восстановлена: sudo dpkg --configure -a", calls)
+
+    def test_healthy_packages_are_not_reconfigured(self) -> None:
+        calls = run("entry")
+        self.assertFalse([call for call in calls if "--configure" in call], calls)
 
 
 if __name__ == "__main__":

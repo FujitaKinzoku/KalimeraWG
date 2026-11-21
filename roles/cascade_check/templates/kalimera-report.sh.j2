@@ -163,9 +163,10 @@ check_updates() {
     local level component message action
     [[ -r "$updates_state" ]] || return 0
     while IFS=$'\t' read -r level component message action; do
-        [[ "$level" == UPD ]] || continue
-        case "$component" in
-            amneziawg|xray) add OK "обновление компонента: $message" "${action:-}" ;;
+        case "$level:$component" in
+            UPD:amneziawg|UPD:xray) add OK "обновление компонента: $message" "${action:-}" ;;
+            # Срок регистрации домена: замечание появляется заранее, за месяц.
+            WARN:domain) add WARN "$message" '' "${action:-}" ;;
         esac
     done <"$updates_state"
 }

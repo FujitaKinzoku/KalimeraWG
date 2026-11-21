@@ -685,15 +685,22 @@ class KalimeraReportTests(unittest.TestCase):
             "#checked\t2026-11-21 06:10 UTC\n"
             "UPD\tkernel\tядро 6.8.0-99 установлено, работает 6.8.0-90\tsudo reboot\n"
             "UPD\tamneziawg\tдоступен AmneziaWG: amneziawg-dkms 1.0 → 1.1\tна ENTRY: kalimera-deploy --resume --update-amneziawg\n"
-            "OK\txray\tXray 26.10.31 актуален\t\n",
+            "OK\txray\tXray 26.10.31 актуален\t\n"
+            "WARN\tdomain\tрегистрация домена example.uk истекает 2026-12-11 (через 19 дн.)\tпродлите домен у регистратора\n"
+            "OK\tdomain\tдомен example.org зарегистрирован до 2027-05-01\t\n",
             encoding="utf-8",
         )
-        # Ядро ставит ночное обслуживание: в напоминание оно не входит.
+        # Ядро ставит ночное обслуживание: в напоминание оно не входит. Срок
+        # домена - замечание: оно появляется заранее.
         self.assertEqual(
             self.run_report("check_updates\n"),
             row(
                 "ENTRY", "OK", "обновление компонента: доступен AmneziaWG: amneziawg-dkms 1.0 → 1.1",
                 "на ENTRY: kalimera-deploy --resume --update-amneziawg",
+            )
+            + row(
+                "ENTRY", "WARN", "регистрация домена example.uk истекает 2026-12-11 (через 19 дн.)", "",
+                "продлите домен у регистратора",
             ),
         )
 

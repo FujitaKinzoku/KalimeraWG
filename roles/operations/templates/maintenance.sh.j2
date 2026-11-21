@@ -20,8 +20,14 @@ export DEBIAN_FRONTEND=noninteractive
 readonly state_file={{ awg_maintenance_state_path | default('/run/awg-maintenance.state') | quote }}
 readonly audit_attempts=3
 readonly audit_retry_delay=60
+# Сколько запусков подряд обновление пакетов может не состояться по внешней
+# причине (не ответило зеркало, оборвалась загрузка), прежде чем это станет
+# ошибкой. Счётчик живёт в RAM и сбрасывается первым удачным обновлением.
+readonly skip_file={{ awg_maintenance_skip_path | default('/run/awg-maintenance.skipped') | quote }}
+readonly max_skipped={{ awg_maintenance_max_skipped | default(3) | int }}
 stage='запуск'
 details=''
+upgrade_note=''
 
 maintenance_record() {
     local temporary
@@ -60,7 +66,25 @@ if [[ "$scheduled" == true ]]; then
     unattended-upgrade -d
 {% else %}
     # Режим full: то же, что update-all, - все обновления Ubuntu и новое ядро.
-    awg_full_upgrade
+    if awg_full_upgrade; then
+        rm -f "$skip_file"
+    elif awg_dpkg_consistent; then
+        # Обновление не состоялось, но пакеты целы: система в том же состоянии,
+        # что до запуска. Это недоступное зеркало или оборванная загрузка, и
+        # следующей ночью обновление повторится само. Ошибкой это становится,
+        # когда повторяется несколько запусков подряд.
+        skipped=$(( $(cat "$skip_file" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "$skipped" >"$skip_file"
+        if (( skipped >= max_skipped )); then
+            details="обновление пакетов не выполняется (запусков подряд: $skipped): $awg_apt_error"
+            exit 1
+        fi
+        upgrade_note="обновление пакетов пропущено (запусков подряд: $skipped из $max_skipped): $awg_apt_error"
+        printf '%s\n' "$upgrade_note" >&2
+    else
+        details="$awg_apt_error"
+        exit 1
+    fi
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
     stage='подготовка модуля AmneziaWG для установленных ядер'
@@ -88,7 +112,8 @@ if [[ "$scheduled" == true ]]; then
     if (( audit_rc != 0 )); then
         exit "$audit_rc"
     fi
-    details=''
+    # Пропущенное обновление остаётся в записи об успешном запуске.
+    details="$upgrade_note"
 else
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 --simulate upgrade
@@ -101,7 +126,11 @@ else
 {% if awg_maintenance_upgrade_mode | default('full') == 'security' %}
     printf '%s\n' 'Ночью автоматически ставятся только обновления безопасности; остальные: update-all'
 {% else %}
-    printf '%s\n' 'Ночью автоматически ставятся все обновления Ubuntu и новое ядро; перезагрузка - вручную.'
+{% if awg_auto_reboot_enabled | default(true) | bool %}
+    printf '%s\n' 'Ночью автоматически ставятся все обновления Ubuntu и новое ядро; перезагрузку раз в неделю выполняет cascade-reboot (состояние: cascade-reboot status на ENTRY).'
+{% else %}
+    printf '%s\n' 'Ночью автоматически ставятся все обновления Ubuntu и новое ядро; перезагрузка - вручную: на ENTRY cascade-reboot --yes.'
+{% endif %}
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
     printf '%s\n' \

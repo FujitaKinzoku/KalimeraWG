@@ -39,6 +39,21 @@ FAKES = {
     ),
     "apt-cache": "exit 0\n",
     "dpkg-query": "exit 0\n",
+    # dpkg --audit сообщает о незавершённой установке, пока её не завершит
+    # dpkg --configure -a (FAKE_DPKG_STUCK - не завершает).
+    "dpkg": textwrap.dedent(
+        """\
+        printf 'dpkg %s\\n' "$*" >>"$CALLS"
+        if [[ "$1" == --audit ]]; then
+            if [[ -n "${FAKE_DPKG_BROKEN:-}" && ! -e "$FAKE_STATE/dpkg-fixed" ]]; then
+                printf 'The following packages are only half configured:\\n libc6\\n'
+            fi
+        elif [[ " $* " == *" --configure "* && -z "${FAKE_DPKG_STUCK:-}" ]]; then
+            : >"$FAKE_STATE/dpkg-fixed"
+        fi
+        exit 0
+        """
+    ),
     "uname": 'printf "6.8.0-151-generic\\n"\n',
     "systemctl": 'printf "systemctl %s\\n" "$*" >>"$CALLS"\n',
     "sleep": 'printf "sleep %s\\n" "$*" >>"$CALLS"\n',
@@ -73,9 +88,11 @@ def render(role: str, state: Path, bin_dir: Path, lock: Path) -> str:
         loader=jinja2.FileSystemLoader(str(TEMPLATES)), trim_blocks=True, keep_trailing_newline=True
     )
     environment.filters["quote"] = lambda value: shlex.quote(str(value))
+    environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
     text = environment.get_template("maintenance.sh.j2").render(
         awg_node_role=role,
         awg_maintenance_state_path=str(state),
+        awg_maintenance_skip_path=str(state) + ".skipped",
         awg_server_audit_path=str(bin_dir / "server-audit"),
         kalimera_updates_path=str(bin_dir / "kalimera-updates"),
     )
@@ -114,6 +131,7 @@ class MaintenanceCase(unittest.TestCase):
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "CALLS": str(self.calls),
+            "FAKE_STATE": str(self.dir),
             **environment,
         }
         return subprocess.run(
@@ -164,12 +182,58 @@ class ScheduledRunTests(MaintenanceCase):
         self.assertIn("Обслуживание остановлено на этапе «итоговый аудит»", result.stderr)
         self.assertIn("код 2", result.stderr)
 
-    def test_package_failure_names_its_stage_and_releases_the_hold(self) -> None:
+    def test_one_failed_upgrade_is_skipped_not_failed(self) -> None:
+        # Не ответило зеркало или оборвалась загрузка: пакеты целы, следующей ночью
+        # обновление повторится само. Раньше это давало неисправный модуль до утра.
         result = self.run_maintenance("--scheduled", FAKE_UPGRADE_RC="100")
-        self.assertEqual(result.returncode, 100)
+        self.assertEqual(result.returncode, 0, result.stderr)
         status, _when, stage, details = self.state_fields()
-        self.assertEqual((status, stage, details), ("FAIL", "обновление пакетов Ubuntu", ""))
+        self.assertEqual((status, stage), ("OK", "итоговый аудит"))
+        self.assertEqual(
+            details, "обновление пакетов пропущено (запусков подряд: 1 из 3): apt завершился с кодом 100"
+        )
+        # Остальное обслуживание выполняется: модуль ядра, аудит; удержание снято.
+        self.assertTrue(self.called("kernel-guard"))
+        self.assertEqual(self.called("server-audit"), ["server-audit --quiet"])
         self.assertTrue(self.called("apt-mark unhold"))
+
+    def test_upgrade_failing_night_after_night_becomes_a_failure(self) -> None:
+        for _ in range(2):
+            self.assertEqual(self.run_maintenance("--scheduled", FAKE_UPGRADE_RC="100").returncode, 0)
+        result = self.run_maintenance("--scheduled", FAKE_UPGRADE_RC="100")
+        self.assertEqual(result.returncode, 1)
+        status, _when, stage, details = self.state_fields()
+        self.assertEqual((status, stage), ("FAIL", "обновление пакетов Ubuntu"))
+        self.assertEqual(
+            details, "обновление пакетов не выполняется (запусков подряд: 3): apt завершился с кодом 100"
+        )
+        self.assertTrue(self.called("apt-mark unhold"))
+
+    def test_successful_upgrade_resets_the_count(self) -> None:
+        for _ in range(2):
+            self.run_maintenance("--scheduled", FAKE_UPGRADE_RC="100")
+        self.assertEqual(self.run_maintenance("--scheduled").returncode, 0)
+        self.assertEqual(self.state_fields()[3], "")
+        # Счёт начат заново: следующая неудача снова первая.
+        self.run_maintenance("--scheduled", FAKE_UPGRADE_RC="100")
+        self.assertIn("запусков подряд: 1 из 3", self.state_fields()[3])
+
+    def test_interrupted_installation_is_finished_by_the_run(self) -> None:
+        # Раньше после прерванной установки каждое следующее обслуживание падало,
+        # пока человек не выполнял dpkg --configure -a.
+        result = self.run_maintenance("--scheduled", FAKE_DPKG_BROKEN="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.called("dpkg --force-confdef"), ["dpkg --force-confdef --force-confold --configure -a"])
+        self.assertEqual(self.state_fields()[0], "OK")
+        self.assertEqual(self.state_fields()[3], "")
+
+    def test_broken_packages_are_a_failure_at_once(self) -> None:
+        # Пакеты не в порядке: это не пропуск до завтра, а состояние, требующее внимания.
+        result = self.run_maintenance("--scheduled", FAKE_DPKG_BROKEN="1", FAKE_DPKG_STUCK="1")
+        self.assertEqual(result.returncode, 1)
+        status, _when, stage, details = self.state_fields()
+        self.assertEqual((status, stage), ("FAIL", "обновление пакетов Ubuntu"))
+        self.assertEqual(details, "установка пакетов прервана и не восстановлена: sudo dpkg --configure -a")
         self.assertFalse(self.called("server-audit"))
 
     def test_kernel_guard_failure_names_its_stage(self) -> None:
