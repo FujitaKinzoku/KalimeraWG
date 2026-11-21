@@ -189,10 +189,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.5.2/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.6.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.5.2` release rather than the moving `main`
+The command installs the pinned `v3.6.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -204,7 +204,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.5.2 --depth 1 \
+git clone --branch v3.6.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -363,7 +363,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.5.2
+sudo git -C /root/KalimeraWG switch --detach v3.6.0
 kalimera-deploy --resume
 ```
 
@@ -390,6 +390,7 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.6.0:** self-healing. Every five minutes each server checks itself and fixes a local fault with the action for that exact fault; configuration drift and causes outside the server are named, not fixed. `cascade-check` shows a 24-hour summary: how many faults there were, how many were repaired and what is left. Nightly maintenance records why it failed and no longer fails because of a one-off error.
 - **v3.5.2:** a fix release after a review of the whole code base. Changes to the domain, address and port lists survive an ENTRY reboot. The daily audit and Telegram monitoring pass on schedule. Routing rules are applied without gaps, and a cascade update no longer restarts the routing service. Command messages match the outcome.
 - **v3.5.1:** client browsers stay on the ENTRY resolver: the bootstrap names of encrypted DNS (DoH) do not resolve, so the domain lists also apply to a browser that used to switch to DoH on its own. In the `selected` scope `proxy-domain` names are resolved by the Russian DoT from ENTRY, with a cache.
 - **v3.5.0:** the Russian proxy can carry selected sites only: the `proxy-domain` and `proxy-address` lists, while the rest of the Russian traffic leaves ENTRY directly. The proxy and Telegram notifications can be switched on for a running cascade: `kalimera-deploy --resume --enable-ru-proxy`, `--enable-telegram`; keys and client configs stay the same.
