@@ -20,7 +20,7 @@ readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run
 readonly front_entry_host={{ (front_entry_address | default('')) | quote }}
 readonly front_entry_port={{ (front_entry_reality_port | default(0)) | int }}
 readonly maintenance_state={{ (awg_maintenance_state_path | default('/run/awg-maintenance.state')) | quote }}
-readonly self_heal_state={{ ((awg_self_heal_state_dir | default('/run/awg-self-heal')) ~ '/state') | quote }}
+readonly self_heal={{ (awg_self_heal_path | default('/usr/local/sbin/self-heal')) | quote }}
 
 {% raw %}
 usage() { echo 'Использование: kalimera-report --tsv'; }
@@ -107,24 +107,18 @@ check_services() {
     fi
 }
 
-# Итог последнего цикла самовосстановления: что восстановлено и что устранить не
-# удалось. Сами непройденные проверки показывает awg-health ниже.
+# Итог самовосстановления за сутки: сколько было сбоев, сколько восстановлено и
+# какие ошибки не устранены. Строку собирает сама служба: счёт ведётся в одном
+# месте. Поля разделены символом US (0x1f), а не табуляцией: read склеивает
+# соседние табуляции, и пустое значение сдвинуло бы рекомендацию на его место.
 check_self_heal() {
-    local status='' when='' repaired='' unresolved=''
-    [[ -r "$self_heal_state" ]] || return 0
-    IFS=$'\t' read -r status when repaired unresolved <"$self_heal_state" || true
-    # Пустое поле записано как "-": иначе read склеил бы соседние табуляции.
-    [[ "$repaired" != - ]] || repaired=''
-    [[ "$unresolved" != - ]] || unresolved=''
+    local line status='' label='' value='' hint=''
+    [[ -x "$self_heal" ]] || return 0
+    line="$("$self_heal" --report 2>/dev/null || true)"
+    [[ -n "$line" ]] || return 0
+    IFS=$'\x1f' read -r status label value hint <<<"$line" || true
     case "$status" in
-        REPAIRED)
-            add OK 'самовосстановление' "$when: восстановлено: $repaired" ;;
-        UNRESOLVED)
-            add WARN 'самовосстановление не устранило ошибку' "$when: $unresolved${repaired:+; восстановлено: $repaired}" 'подробности: self-heal status' ;;
-        SKIPPED)
-            add OK 'самовосстановление приостановлено' "$when: $unresolved" ;;
-        OK)
-            add OK 'самовосстановление: вмешательство не требовалось' ;;
+        OK|WARN|FAIL) add "$status" "$label" "$value" "$hint" ;;
     esac
 }
 

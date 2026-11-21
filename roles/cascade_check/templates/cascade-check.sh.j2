@@ -476,6 +476,7 @@ build_summary() {
     local ok warn fail worst reach
     local total_ok=0 total_warn=0 total_fail=0
     local dns_total=0 dns_passed=0 dns_worst=OK
+    local -A heal_text=() heal_status=()
 
     for section in ENTRY EXIT FRONT LINK CDN DNS; do
         ok="${counts[$section:OK]:-0}"
@@ -523,6 +524,39 @@ build_summary() {
             *) reach="$(reach_text "$(rtt_of 'ENTRY → FRONT: SSH')")" ;;
         esac
         sum_add "$(status_color "$worst")" "$section: OK $ok · WARN $warn · FAIL $fail · $reach"
+    done
+
+    # Самовосстановление по серверам: сколько было сбоев за сутки и сколько из
+    # них восстановлено. Неустранённая ошибка называется здесь же вместе с причиной.
+    sum_head 'САМОВОССТАНОВЛЕНИЕ'
+    while IFS= read -r line; do
+        split_row "$line"
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$label" == самовосстановление* ]] || continue
+        if [[ "$label" == 'самовосстановление: '* ]]; then
+            # Итог за сутки; значение при OK - перечень восстановленного, он уже
+            # есть в разделе сервера, при WARN - неустранённые ошибки.
+            text="${label#самовосстановление: } · статус $status"
+            [[ "$status" == OK || -z "$value" ]] || text+=": $value"
+        else
+            # Служба приостановлена или выключена администратором.
+            text="${label#самовосстановление}"
+            text="${text# }"
+            [[ -z "$value" ]] || text+="${text:+: }$value"
+            text+=" · статус $status"
+        fi
+        heal_text[$seg]="$text"
+        heal_status[$seg]="$status"
+    done <"$rows_file"
+    for section in ENTRY EXIT FRONT; do
+        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+            continue
+        fi
+        if [[ -n "${heal_status[$section]:-}" ]]; then
+            sum_add "$(status_color "${heal_status[$section]}")" "$section: ${heal_text[$section]}"
+        else
+            sum_add "$c_info" "$section: сведений нет (служба выключена или отчёт не получен)"
+        fi
     done
 
     sum_head 'СВЯЗИ И ЗАДЕРЖКИ'

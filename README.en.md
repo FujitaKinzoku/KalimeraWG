@@ -81,7 +81,9 @@ a third server, FRONT, accepts VLESS through a Russian cloud CDN.
 - **Self-healing.** Every few minutes each server checks itself and fixes a
   local fault with the action for that exact fault: it restarts a stopped
   service, restores routing rules, refills the network set. Configuration drift
-  and causes outside the server are not fixed, they are named.
+  and causes outside the server are not fixed, they are named. `cascade-check`
+  shows a 24-hour summary for every server: how many faults there were, how
+  many were repaired and which error is left.
 - **Updates under control.** Every server checks daily for a new kernel,
   AmneziaWG and Xray-core and shows `UPD` with the command that applies it.
   An update is one command, verified and rolled back on failure.
@@ -251,7 +253,7 @@ table at login. Full reference: `kalimera-help`.
 | Task | Commands |
 |---|---|
 | Status | `kalimera-status`, `awg-health --strict`, `server-audit` |
-| Self-healing | `self-heal status`: what was fixed and what was not; `self-heal run`, `self-heal off`, `self-heal on` |
+| Self-healing | `self-heal status`: 24-hour summary, what was fixed and what was not; `self-heal run`, `self-heal off`, `self-heal on` |
 | Full cascade check (on ENTRY) | `cascade-check`: ENTRY, EXIT, FRONT, links and DNS; summary OK / WARN / FAIL |
 | AmneziaWG clients | `vpn-user NAME PROFILE`, `vpn-user list`, `vpn-user delete NAME` |
 | VLESS clients (on FRONT) | `vless-user create NAME cdn`, `list`, `export`, `delete`; profile with a backup cascade: `vless-user auto NAME FILE` |

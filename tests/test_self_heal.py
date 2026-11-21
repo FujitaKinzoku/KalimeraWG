@@ -64,6 +64,10 @@ if [[ "$1" == is-active ]]; then
     esac
     exit 0
 fi
+if [[ "$1" == is-enabled ]]; then
+    [[ ! -e "$state/timer-disabled" ]] || exit 1
+    exit 0
+fi
 [[ ! -e "$state/systemctl-fails" ]] || exit 1
 """
 
@@ -175,7 +179,9 @@ class SelfHealCase(unittest.TestCase):
         return [
             line
             for line in self.calls()
-            if not line.startswith(("systemctl is-active", "systemctl --failed", "sleep ", "awg-telegram-monitor"))
+            if not line.startswith(
+                ("systemctl is-active", "systemctl is-enabled", "systemctl --failed", "sleep ", "awg-telegram-monitor")
+            )
             and not line.startswith("systemctl reset-failed")
         ]
 
@@ -187,25 +193,33 @@ class SelfHealCase(unittest.TestCase):
         return ["" if field == "-" else field for field in fields]
 
     def report_row(self) -> list[str]:
-        """Строка cascade-check о самовосстановлении: настоящий файл состояния читает kalimera-report."""
+        """Строка cascade-check о самовосстановлении.
+
+        kalimera-report вызывает настоящую программу self-heal --report, поэтому
+        проверяется вся цепочка: журнал восстановлений, итог и разбор строки.
+        """
         environment = jinja2.Environment(trim_blocks=True, keep_trailing_newline=True)
         environment.filters["quote"] = lambda value: shlex.quote(str(value))
         environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
         report = self.dir / "kalimera-report"
         report.write_text(
             environment.from_string(REPORT.read_text(encoding="utf-8")).render(
-                awg_node_role="entry", awg_self_heal_state_dir=str(self.state_dir)
+                awg_node_role="entry", awg_self_heal_path=str(self.script())
             ),
             encoding="utf-8",
         )
+        env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
         result = subprocess.run(
             [self.bash, "-c", f"source {shlex.quote(str(report))}\ncheck_self_heal\n"],
             capture_output=True,
             text=True,
+            env=env,
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout.rstrip("\n").split("\t")
+        fields = result.stdout.rstrip("\n").split("\t")
+        self.assertEqual(len(fields), 6, fields)
+        return fields
 
     def health_runs(self) -> int:
         return int((self.dir / "health-count").read_text(encoding="utf-8"))
@@ -430,28 +444,114 @@ class GuardTests(SelfHealCase):
         self.assertNotIn("\t\t", raw)
         output = self.run_heal("status").stdout
         self.assertIn("не устранено: UFW соответствует последней управляемой политике", output)
-        self.assertNotIn("восстановлено:", output)
+        self.assertNotIn("  восстановлено:", output)
+        self.assertNotIn("Восстановлено за сутки:", output)
+        self.assertIn("Итог: за сутки сбоев 1, восстановлено 0, не восстановлено 1.", output)
         segment, status, label, value, hint, _ms = self.report_row()
-        self.assertEqual((segment, status, label), ("ENTRY", "WARN", "самовосстановление не устранило ошибку"))
-        self.assertIn("UFW соответствует последней управляемой политике - расхождение настроек", value)
-        self.assertNotIn("восстановлено", value)
+        self.assertEqual(
+            (segment, status, label),
+            ("ENTRY", "WARN", "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1"),
+        )
+        # Неустранённая ошибка названа вместе с причиной.
+        self.assertEqual(
+            value,
+            "UFW соответствует последней управляемой политике - расхождение настроек с выпуском: "
+            "на ENTRY kalimera-deploy --resume",
+        )
         self.assertEqual(hint, "подробности: self-heal status")
 
     def test_report_names_the_reason_of_a_pause(self) -> None:
         (self.dir / "deploy.active").write_text("", encoding="utf-8")
         self.run_heal("--scheduled")
         _segment, status, label, value, _hint, _ms = self.report_row()
-        self.assertEqual((status, label), ("OK", "самовосстановление приостановлено"))
-        self.assertRegex(value, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC: идёт kalimera-deploy$")
+        self.assertEqual((status, label, value), ("OK", "самовосстановление приостановлено", "идёт kalimera-deploy"))
         self.assertIn("пропущен: идёт kalimera-deploy", self.run_heal("status").stdout)
 
-    def test_report_shows_what_was_repaired(self) -> None:
-        self.health(1, "служба dnsmasq")
-        self.health(2, "служба dnsmasq")
+    def test_finished_deploy_is_not_reported_as_a_pause(self) -> None:
+        # Найдено на рабочем каскаде: до пяти минут после обновления отчёт писал
+        # «приостановлено», хотя deploy уже закончился.
+        marker = self.dir / "deploy.active"
+        marker.write_text("", encoding="utf-8")
+        self.run_heal("--scheduled")
+        marker.unlink()
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label, value), ("OK", "самовосстановление: за сутки сбоев не было", ""))
+
+    def test_report_counts_failures_and_repairs(self) -> None:
+        # Пример из запроса: «сбоев 2, восстановлено 2, статус OK».
+        failed = ("Fail2Ban активен", "строгая политика Fail2Ban применяется")
+        self.health(1, *failed)
+        self.health(2, *failed)
+        self.run_heal("--scheduled")
+        self.assertEqual(self.changes(), ["systemctl restart fail2ban.service"])
+        _segment, status, label, value, hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 2, восстановлено 2"))
+        self.assertEqual(
+            value,
+            "Fail2Ban активен (перезапуск Fail2Ban); строгая политика Fail2Ban применяется (перезапуск Fail2Ban)",
+        )
+        self.assertEqual(hint, "")
+        self.assertIn("Итог: за сутки сбоев 2, восстановлено 2.", self.run_heal("status").stdout)
+
+    def test_lasting_error_is_one_failure_however_long_it_lasts(self) -> None:
+        self.health("last", "UFW соответствует последней управляемой политике", status="WARN")
+        for _ in range(3):
+            self.run_heal("--scheduled")
+        _segment, status, label, _value, _hint, _ms = self.report_row()
+        self.assertEqual(
+            (status, label), ("WARN", "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1")
+        )
+
+    def test_partly_repaired_cycle_names_only_what_is_left(self) -> None:
+        failed = ("служба dnsmasq", "UFW соответствует последней управляемой политике")
+        self.health(1, *failed)
+        self.health(2, *failed)
+        self.health("last", "UFW соответствует последней управляемой политике")
         self.run_heal("--scheduled")
         _segment, status, label, value, _hint, _ms = self.report_row()
-        self.assertEqual((status, label), ("OK", "самовосстановление"))
-        self.assertTrue(value.endswith("восстановлено: служба dnsmasq (перезапуск dnsmasq)"), value)
+        self.assertEqual(
+            (status, label), ("WARN", "самовосстановление: за сутки сбоев 2, восстановлено 1, не восстановлено 1")
+        )
+        self.assertTrue(value.startswith("UFW соответствует последней управляемой политике - "), value)
+        self.assertNotIn("dnsmasq", value)
+
+    def test_error_fixed_by_a_later_cycle_counts_as_repaired(self) -> None:
+        # Служба стартует дольше паузы: проверка ещё не проходит, а к следующему
+        # циклу проходит. Восстановление засчитывается выполненному действию.
+        self.health(1, "служба dnsmasq")
+        self.health(2, "служба dnsmasq")
+        self.health(3, "служба dnsmasq")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.report_row()[2], "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1")
+        self.run_heal("--scheduled")
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 1"))
+        self.assertEqual(value, "служба dnsmasq (перезапуск dnsmasq)")
+
+    def test_error_gone_without_an_action_is_not_claimed_as_repaired(self) -> None:
+        # Расхождение настроек устранил deploy, а не служба.
+        self.health(1, "UFW соответствует последней управляемой политике")
+        self.health(2, "UFW соответствует последней управляемой политике")
+        self.run_heal("--scheduled")
+        self.run_heal("--scheduled")
+        _segment, status, label, _value, _hint, _ms = self.report_row()
+        self.assertEqual(
+            (status, label),
+            ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 0, прошло без действия службы 1"),
+        )
+
+    def test_report_covers_the_last_day_only(self) -> None:
+        self.run_heal("--scheduled")
+        old = int(time.time()) - 2 * 86400
+        (self.state_dir / "events").write_text(
+            f"{old}\x1fREPAIRED\x1fслужба dnsmasq\x1fперезапуск dnsmasq\n", encoding="utf-8"
+        )
+        self.assertEqual(self.report_row()[2], "самовосстановление: за сутки сбоев не было")
+
+    def test_report_before_the_first_cycle(self) -> None:
+        self.assertEqual(
+            self.report_row()[2], "самовосстановление: запусков после загрузки сервера ещё не было"
+        )
 
     def test_status_shows_the_last_result(self) -> None:
         self.health(1, "служба dnsmasq")
@@ -487,6 +587,20 @@ class FailedUnitTests(SelfHealCase):
         self.run_heal("--scheduled")
         self.assertEqual(self.changes(), [])
         self.assertIn("не исправляется автоматически", self.state()[3])
+        # Команда для поиска причины называет сам модуль, а не «ИМЯ».
+        self.assertIn("sudo journalctl -u something-else.service -b --no-pager", self.state()[3])
+        self.assertNotIn("ИМЯ", self.state()[3])
+
+    def test_job_fixed_by_its_rerun_counts_as_repaired(self) -> None:
+        # Повторный запуск идёт в фоне: его итог виден только в следующем цикле.
+        self.failed_units("awg-ru-zone-update.service")
+        self.run_heal("--scheduled")
+        self.assertEqual(self.report_row()[1], "WARN")
+        self.failed_units()
+        self.run_heal("--scheduled")
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление: за сутки сбоев 1, восстановлено 1"))
+        self.assertIn("модуль systemd awg-ru-zone-update.service (", value)
 
     def test_own_and_audit_units_are_ignored(self) -> None:
         self.failed_units("awg-server-audit.service", "awg-self-heal.service")
@@ -603,6 +717,46 @@ class WiringTests(unittest.TestCase):
         manifest = (ROOT / "roles/operations/templates/awg-managed-integrity.sh.j2").read_text(encoding="utf-8")
         self.assertIn("/etc/systemd/system/awg-self-heal.timer", manifest)
         self.assertIn("awg_self_heal_path | default('/usr/local/sbin/self-heal')", manifest)
+
+    def test_administrator_reaches_the_program_through_the_gateway(self) -> None:
+        # На рабочем каскаде «self-heal run» от администратора ответила Permission
+        # denied в сеансе, открытом до обновления: функции команд читаются при
+        # входе. Здесь та же цепочка в новом сеансе: функция, sudo, шлюз, программа.
+        bash = bash_path()
+        if os.geteuid() == 0:
+            self.skipTest("функции команд создаются только для обычного пользователя")
+        environment = jinja2.Environment(trim_blocks=True, keep_trailing_newline=True)
+        environment.filters["quote"] = lambda value: shlex.quote(str(value))
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            sbin = directory / "sbin"
+            sbin.mkdir()
+            program = sbin / "self-heal"
+            program.write_text('#!/bin/sh\necho "программа self-heal: $*"\n', encoding="utf-8")
+            program.chmod(0o755)
+            gateway = directory / "kalimera-admin-command"
+            text = (ROOT / "roles/security/templates/kalimera-admin-command.sh.j2").read_text(encoding="utf-8")
+            text = environment.from_string(text).render(awg_node_role="exit")
+            text = text.replace("[[ $EUID -eq 0 ]] ||", "true ||", 1).replace("/usr/local/sbin/", f"{sbin}/")
+            gateway.write_text(text, encoding="utf-8")
+            gateway.chmod(0o755)
+            sudo = directory / "sudo"
+            sudo.write_text('#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n', encoding="utf-8")
+            sudo.chmod(0o755)
+            tools = directory / "kalimera-shell-tools.sh"
+            text = (ROOT / "roles/terminal/templates/kalimera-shell-tools.sh.j2").read_text(encoding="utf-8")
+            text = environment.from_string(text).render(awg_node_role="exit")
+            tools.write_text(text.replace("/usr/local/libexec/kalimera-admin-command", str(gateway)), encoding="utf-8")
+            result = subprocess.run(
+                [bash, "--norc", "-i", "-c", f"source {shlex.quote(str(tools))}\nself-heal status\n"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"},
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("программа self-heal: status", result.stdout)
 
     def test_deploy_marks_itself_and_cleans_up(self) -> None:
         site = (ROOT / "playbooks" / "site.yml").read_text(encoding="utf-8")

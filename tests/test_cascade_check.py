@@ -225,8 +225,81 @@ class CascadeCheckTests(unittest.TestCase):
         # Заголовки разделов в деталях похожи на группы сводки ("DNS: ..."),
         # поэтому поиск идёт от начала сводки.
         start = plain.index("СЕРВЕРЫ")
-        positions = [plain.index(title, start) for title in ("СЕРВЕРЫ", "СВЯЗИ И ЗАДЕРЖКИ", "DNS", "ИТОГ")]
+        titles = ("СЕРВЕРЫ", "САМОВОССТАНОВЛЕНИЕ", "СВЯЗИ И ЗАДЕРЖКИ", "DNS", "ИТОГ")
+        positions = [plain.index(title, start) for title in titles]
         self.assertEqual(positions, sorted(positions), plain)
+
+    def summary(self, rows: str, *, style: str = "plain") -> str:
+        """Сводка о самовосстановлении: строки между её заголовком и следующей группой."""
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n", style=style)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plain = ANSI.sub("", result.stdout)
+        start = plain.index("САМОВОССТАНОВЛЕНИЕ", plain.index("СЕРВЕРЫ"))
+        return plain[start:plain.index("СВЯЗИ И ЗАДЕРЖКИ", start)]
+
+    def test_summary_counts_repairs_for_every_server(self) -> None:
+        text = self.summary(
+            row(
+                "ENTRY", "OK", "самовосстановление: за сутки сбоев 2, восстановлено 2",
+                "Fail2Ban активен (перезапуск Fail2Ban); строгая политика Fail2Ban применяется (перезапуск Fail2Ban)",
+            )
+            + row("EXIT", "OK", "самовосстановление: за сутки сбоев не было")
+            + row("FRONT", "OK", "самовосстановление: за сутки сбоев 1, восстановлено 1", "служба Xray (перезапуск Xray)")
+        )
+        self.assertIn("ENTRY: за сутки сбоев 2, восстановлено 2 · статус OK\n", text)
+        self.assertIn("EXIT: за сутки сбоев не было · статус OK\n", text)
+        self.assertIn("FRONT: за сутки сбоев 1, восстановлено 1 · статус OK\n", text)
+        # Серверы идут в порядке каскада независимо от порядка строк отчёта.
+        self.assertLess(text.index("ENTRY:"), text.index("EXIT:"))
+        self.assertLess(text.index("EXIT:"), text.index("FRONT:"))
+
+    def test_summary_names_the_error_that_was_not_repaired(self) -> None:
+        self.rows.write_text(
+            row("ENTRY", "OK", "самовосстановление: за сутки сбоев не было")
+            + row(
+                "EXIT", "WARN", "самовосстановление: за сутки сбоев 2, восстановлено 1, не восстановлено 1",
+                "служба Unbound - действие «перезапуск Unbound» не помогло, попытки на этот час исчерпаны",
+                "подробности: self-heal status",
+            )
+            + row("FRONT", "OK", "самовосстановление: за сутки сбоев не было"),
+            encoding="utf-8",
+        )
+        result = self.run_body('render\nexit "$exit_code"\n')
+        # Неустранённая ошибка - замечание: итог отчёта не «все проверки пройдены».
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(
+            "EXIT: за сутки сбоев 2, восстановлено 1, не восстановлено 1 · статус WARN: "
+            "служба Unbound - действие «перезапуск Unbound» не помогло, попытки на этот час исчерпаны\n",
+            result.stdout,
+        )
+        self.assertIn("→ подробности: self-heal status", result.stdout)
+
+    def test_summary_shows_a_paused_or_disabled_service(self) -> None:
+        text = self.summary(
+            row("ENTRY", "OK", "самовосстановление приостановлено", "идёт kalimera-deploy")
+            + row("EXIT", "OK", "самовосстановление выключено администратором")
+            + row("EXIT", "OK", "служба EXIT")
+        )
+        self.assertIn("ENTRY: приостановлено: идёт kalimera-deploy · статус OK\n", text)
+        self.assertIn("EXIT: выключено администратором · статус OK\n", text)
+        # От FRONT строки нет: служба выключена в настройках либо отчёт не получен.
+        self.assertIn("FRONT: сведений нет", text)
+
+    def test_summary_wraps_a_long_error_inside_the_box(self) -> None:
+        text = self.summary(
+            row(
+                "ENTRY", "WARN", "самовосстановление: за сутки сбоев 1, восстановлено 0, не восстановлено 1",
+                "UFW соответствует последней управляемой политике - расхождение настроек с выпуском: "
+                "на ENTRY kalimera-deploy --resume",
+                "подробности: self-heal status",
+            ),
+            style="fancy",
+        )
+        # Длинная строка переносится по словам: ни одна строка рамки не шире неё.
+        widths = {len(line) for line in text.splitlines() if line.startswith("│") and line.endswith("│")}
+        self.assertEqual(len(widths), 1, text)
+        self.assertIn("kalimera-deploy --resume", " ".join(text.split()).replace("│ │ ", ""))
 
     def test_server_line_shows_response_time_from_the_ssh_link(self) -> None:
         self.rows.write_text(

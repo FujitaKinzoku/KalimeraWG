@@ -20,6 +20,12 @@ readonly state_file="$state_dir/state"
 readonly history_file="$state_dir/history"
 readonly attempts_file="$state_dir/attempts"
 readonly notified_file="$state_dir/notified"
+readonly events_file="$state_dir/events"
+readonly open_file="$state_dir/open"
+# Поля журнала восстановлений разделены символом US (0x1f): в отличие от
+# табуляции, read не склеивает соседние разделители при пустом поле.
+readonly sep=$'\x1f'
+readonly summary_window=86400
 readonly manual_off_flag={{ awg_self_heal_manual_off_flag | default('/var/lib/awg-self-heal.manual-off') | quote }}
 readonly deploy_marker={{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') | quote }}
 readonly deploy_marker_ttl=10800
@@ -36,6 +42,8 @@ mode=status
 case "${1:-status}" in
     status|run|on|off) [[ $# -le 1 ]] || { usage >&2; exit 2; }; mode="${1:-status}" ;;
     --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; mode=scheduled ;;
+    # Строка для cascade-check: статус, название, значение и рекомендация.
+    --report) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; mode=report ;;
     --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -165,7 +173,7 @@ classify_unit() {
         kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|certbot.service|awg-local-peer-apply.service)
             plan_action="unit_rerun:$1" ;;
         *)
-            plan_reason='manual:причина: sudo journalctl -u ИМЯ -b --no-pager' ;;
+            plan_reason="manual:причина: sudo journalctl -u $1 -b --no-pager" ;;
     esac
 }
 
@@ -433,6 +441,134 @@ contains() {
     return 1
 }
 
+# Журнал восстановлений: "время<US>вид<US>проверка<US>действие". Вид REPAIRED -
+# восстановлено службой, CLEARED - ошибка прошла без её действия.
+event_add() {
+    printf '%s\x1f%s\x1f%s\x1f%s\n' "$(date +%s)" "$1" "$2" "${3:-}" >>"$events_file"
+    tail -n 500 "$events_file" >"$events_file.tmp" && mv -f "$events_file.tmp" "$events_file"
+}
+
+# Список неустранённых ошибок: "время первого появления<US>проверка<US>причина
+# <US>выполненное действие". Одна ошибка - одна строка, сколько бы циклов она ни
+# держалась: иначе сбой считался бы заново каждые несколько минут.
+open_remove() {
+    [[ -s "$open_file" ]] || return 0
+    awk -F "$sep" -v label="$1" '$2 != label' "$open_file" >"$open_file.tmp" || true
+    mv -f "$open_file.tmp" "$open_file"
+}
+
+open_set() {
+    local first=''
+    if [[ -s "$open_file" ]]; then
+        first="$(awk -F "$sep" -v label="$1" '$2 == label { print $1; exit }' "$open_file")"
+    fi
+    open_remove "$1"
+    printf '%s\x1f%s\x1f%s\x1f%s\n' "${first:-$(date +%s)}" "$1" "$2" "${3:-}" >>"$open_file"
+}
+
+# Закрыть неустранённые ошибки, которые больше не проявляются. Аргументы -
+# проверки, не проходящие сейчас. Ошибка, для которой служба успела выполнить
+# действие, считается восстановленной ею, остальные - прошедшими без её участия.
+close_cleared() {
+    local epoch label reason action
+    [[ -s "$open_file" ]] || return 0
+    : >"$open_file.keep"
+    while IFS="$sep" read -r epoch label reason action; do
+        [[ -n "$label" ]] || continue
+        if contains "$label" "$@"; then
+            printf '%s\x1f%s\x1f%s\x1f%s\n' "$epoch" "$label" "$reason" "$action" >>"$open_file.keep"
+        elif [[ -n "$action" ]]; then
+            event_add REPAIRED "$label" "$action"
+            history_add "восстановлено: $label ($action)"
+        else
+            event_add CLEARED "$label"
+            history_add "прошло без действия службы: $label"
+        fi
+    done <"$open_file"
+    mv -f "$open_file.keep" "$open_file"
+}
+
+# Индекс, с которого начинаются последние $1 элементов массива длиной $2.
+last_from() {
+    if (( $2 > $1 )); then
+        echo $(( $2 - $1 ))
+    else
+        echo 0
+    fi
+}
+
+# Итог за сутки: сколько было сбоев, сколько восстановлено и что не устранено.
+# Сбой - проверка, не прошедшая дважды подряд; разовые сбои сюда не входят.
+summary_load() {
+    local since epoch kind label detail reason _action
+    since=$(( $(date +%s) - summary_window ))
+    sum_repaired=0
+    sum_cleared=0
+    sum_repaired_items=()
+    sum_open_items=()
+    if [[ -s "$events_file" ]]; then
+        while IFS="$sep" read -r epoch kind label detail; do
+            if [[ ! "$epoch" =~ ^[0-9]+$ ]] || (( epoch < since )); then
+                continue
+            fi
+            case "$kind" in
+                REPAIRED)
+                    sum_repaired=$((sum_repaired + 1))
+                    sum_repaired_items+=("$label ($detail)")
+                    ;;
+                CLEARED) sum_cleared=$((sum_cleared + 1)) ;;
+            esac
+        done <"$events_file"
+    fi
+    if [[ -s "$open_file" ]]; then
+        while IFS="$sep" read -r epoch label reason _action; do
+            [[ -n "$label" ]] || continue
+            sum_open_items+=("$label - $reason")
+        done <"$open_file"
+    fi
+    sum_open=${#sum_open_items[@]}
+    sum_total=$((sum_repaired + sum_cleared + sum_open))
+}
+
+summary_text() {
+    local text
+    if (( sum_total == 0 )); then
+        echo 'за сутки сбоев не было'
+        return 0
+    fi
+    text="за сутки сбоев $sum_total, восстановлено $sum_repaired"
+    (( sum_cleared == 0 )) || text+=", прошло без действия службы $sum_cleared"
+    (( sum_open == 0 )) || text+=", не восстановлено $sum_open"
+    echo "$text"
+}
+
+# Строка для cascade-check: "СТАТУС<US>проверка<US>значение<US>рекомендация".
+# Неустранённая ошибка даёт WARN и называется вместе с причиной.
+report_row() {
+    # О службе, выключенной командой self-heal off, сообщает awg-health; служба,
+    # выключенная в inventory, строки не даёт.
+    [[ ! -e "$manual_off_flag" ]] || return 0
+    systemctl is-enabled --quiet "$timer" 2>/dev/null || return 0
+    if deploy_in_progress; then
+        printf 'OK\x1f%s\x1f%s\x1f\n' 'самовосстановление приостановлено' 'идёт kalimera-deploy'
+        return 0
+    fi
+    if [[ ! -r "$state_file" ]]; then
+        printf 'OK\x1f%s\x1f\x1f\n' 'самовосстановление: запусков после загрузки сервера ещё не было'
+        return 0
+    fi
+    summary_load
+    if (( sum_open > 0 )); then
+        printf 'WARN\x1f%s\x1f%s\x1f%s\n' "самовосстановление: $(summary_text)" \
+            "$(join_items "${sum_open_items[@]}")" 'подробности: self-heal status'
+    elif (( sum_repaired > 0 )); then
+        printf 'OK\x1f%s\x1f%s\x1f\n' "самовосстановление: $(summary_text)" \
+            "$(join_items "${sum_repaired_items[@]:$(last_from 5 "${#sum_repaired_items[@]}")}")"
+    else
+        printf 'OK\x1f%s\x1f\x1f\n' "самовосстановление: $(summary_text)"
+    fi
+}
+
 deploy_in_progress() {
     local age
     [[ -e "$deploy_marker" ]] || return 1
@@ -458,6 +594,16 @@ show_status() {
     else
         echo 'Самовосстановление: таймер не активен. Включить: self-heal on'
     fi
+    summary_load
+    echo "Итог: $(summary_text)."
+    if (( sum_open > 0 )); then
+        echo 'Не восстановлено:'
+        printf '  %s\n' "${sum_open_items[@]}"
+    fi
+    if (( sum_repaired > 0 )); then
+        echo 'Восстановлено за сутки:'
+        printf '  %s\n' "${sum_repaired_items[@]:$(last_from 10 "${#sum_repaired_items[@]}")}"
+    fi
     if [[ ! -r "$state_file" ]]; then
         echo 'Запусков после загрузки сервера ещё не было.'
     else
@@ -482,6 +628,10 @@ show_status() {
 case "$mode" in
     status)
         show_status
+        exit 0
+        ;;
+    report)
+        report_row
         exit 0
         ;;
     on)
@@ -520,6 +670,7 @@ fi
 declare -a failures=()
 collect_failures
 if (( ${#failures[@]} == 0 )); then
+    close_cleared
     write_state OK
     rm -f "$notified_file"
     [[ "$mode" == scheduled ]] || echo 'Все проверки пройдены, вмешательство не требуется.'
@@ -537,6 +688,7 @@ for label in "${first[@]}"; do
     fi
 done
 if (( ${#confirmed[@]} == 0 )); then
+    close_cleared "${failures[@]}"
     write_state OK
     history_add "разовый сбой, прошёл сам: $(join_items "${first[@]}")"
     [[ "$mode" == scheduled ]] || echo 'Сбой был разовым и прошёл сам; вмешательство не потребовалось.'
@@ -613,37 +765,50 @@ declare -a repaired=()
 declare -a unresolved=()
 for label in "${confirmed[@]}"; do
     action="${label_action[$label]:-}"
+    title=''
+    [[ -z "$action" ]] || title="$(action_title "$action")"
     if ! contains "$label" "${failures[@]}"; then
         if [[ -n "$action" && "${action_result[$action]:-}" == completed ]]; then
-            repaired+=("$label ($(action_title "$action"))")
+            repaired+=("$label ($title)")
+            event_add REPAIRED "$label" "$title"
         else
             repaired+=("$label (прошло без действия)")
+            event_add CLEARED "$label"
         fi
+        open_remove "$label"
         continue
     fi
+    # Действие, после которого ошибка ещё держится, запоминается: если она пройдёт
+    # к следующему циклу, восстановление засчитывается службе.
+    done_title=''
     if [[ -z "$action" ]]; then
-        unresolved+=("$label - ${label_reason[$label]}")
-        continue
+        reason="${label_reason[$label]}"
+    else
+        case "${action_result[$action]:-}" in
+            exhausted)
+                reason="действие «$title» не помогло, попытки на этот час исчерпаны" ;;
+            failed)
+                reason="действие «$title» завершилось ошибкой" ;;
+            blocked)
+                reason='ждёт открытия хранилища секретов' ;;
+            inapplicable)
+                reason='не исправляется автоматически: действие к этому состоянию не применимо' ;;
+            *)
+                done_title="$title"
+                case "$action" in
+                    unit_maintenance|unit_rerun:*)
+                        reason='запущено повторно, результат будет в следующем цикле' ;;
+                    *)
+                        reason="действие «$title» выполнено, проверка всё ещё не проходит" ;;
+                esac
+                ;;
+        esac
     fi
-    case "${action_result[$action]:-}" in
-        exhausted)
-            unresolved+=("$label - действие «$(action_title "$action")» не помогло, попытки на этот час исчерпаны") ;;
-        failed)
-            unresolved+=("$label - действие «$(action_title "$action")» завершилось ошибкой") ;;
-        blocked)
-            unresolved+=("$label - ждёт открытия хранилища секретов") ;;
-        inapplicable)
-            unresolved+=("$label - не исправляется автоматически: действие к этому состоянию не применимо") ;;
-        *)
-            case "$action" in
-                unit_maintenance|unit_rerun:*)
-                    unresolved+=("$label - запущено повторно, результат будет в следующем цикле") ;;
-                *)
-                    unresolved+=("$label - действие «$(action_title "$action")» выполнено, проверка всё ещё не проходит") ;;
-            esac
-            ;;
-    esac
+    unresolved+=("$label - $reason")
+    open_set "$label" "$reason" "$done_title"
 done
+# Ошибки прошлых циклов, которые больше не проявляются.
+close_cleared "${failures[@]}"
 
 node="${role^^}"
 newline=$'\n'
