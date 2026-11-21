@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Предохранители перезагрузки сервера KalimeraWG. Проверяет то, от чего зависит,
+# поднимется ли сервер после перезагрузки и вернётся ли он в каскад:
+#   - установка пакетов завершена и не идёт прямо сейчас;
+#   - ядро, которое загрузится, установлено целиком: образ, initramfs, модули,
+#     запись в меню загрузчика;
+#   - модуль AmneziaWG собран под это ядро (ENTRY и EXIT);
+#   - хранилище секретов откроется после загрузки: пакет расшифровывается, а
+#     второй сервер отдаёт свою долю ключа;
+#   - конфигурация SSH без ошибок, на диске есть место.
+# Режимы: check - только чтение; prepare - перед самой перезагрузкой, сначала
+# собирает модуль AmneziaWG и сохраняет секреты в зашифрованный пакет.
+#
+# Вывод - строки "СТАТУС<TAB>проверка<TAB>подробности":
+#   NEED - нужна ли перезагрузка (yes или no);
+#   OK   - проверка пройдена;
+#   FAIL - перезагружать нельзя: сервер может не подняться;
+#   WAIT - нельзя сейчас: идёт установка пакетов или deploy;
+#   HOLD - правило автоматической перезагрузки (сервер загружен недавно, новое
+#          ядро ещё не выдержано); ручную перезагрузку не останавливает.
+# Код возврата: 0 - препятствий нет, 1 - есть FAIL, 3 - только WAIT или HOLD.
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
+
+readonly role={{ awg_node_role | default('') | quote }}
+readonly secrets_enabled={{ 'true' if (runtime_secrets_enabled | default(false) | bool) else 'false' }}
+readonly secretctl={{ runtime_secrets_ctl_path | default('/usr/local/sbin/kalimera-secretctl') | quote }}
+readonly unlock_unit={{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') | quote }}
+readonly kernel_guard={{ awg_kernel_guard_path | default('/usr/local/sbin/awg-kernel-guard') | quote }}
+readonly deploy_marker={{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') | quote }}
+readonly reboot_marker={{ awg_reboot_required_path | default('/var/run/reboot-required') | quote }}
+readonly boot_dir={{ awg_reboot_guard_boot_dir | default('/boot') | quote }}
+readonly modules_dir={{ awg_reboot_guard_modules_dir | default('/lib/modules') | quote }}
+# Новое ядро выдерживается перед автоматической перезагрузкой: ошибку в свежем
+# ядре Ubuntu обычно находят и исправляют за несколько дней.
+readonly kernel_min_age_hours={{ awg_auto_reboot_kernel_min_age_hours | default(72) | int }}
+readonly min_uptime_seconds={{ awg_auto_reboot_min_uptime_seconds | default(3600) | int }}
+readonly disk_limit={{ awg_reboot_guard_disk_limit_percent | default(95) | int }}
+
+{% raw %}
+usage() { echo 'Использование: kalimera-reboot-guard check|prepare'; }
+case "${1:-}" in
+    check|prepare) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; mode="$1" ;;
+    --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+failures=0
+holds=0
+
+row() {
+    local status="$1" label="$2" detail="${3:-}"
+    label="${label//$'\t'/ }"
+    detail="${detail//$'\t'/ }"
+    detail="${detail//$'\n'/ }"
+    printf '%s\t%s\t%s\n' "$status" "$label" "$detail"
+    case "$status" in
+        FAIL) failures=$((failures + 1)) ;;
+        WAIT|HOLD) holds=$((holds + 1)) ;;
+    esac
+}
+
+# Нужна ли перезагрузка: файл создают пакеты ядра, libc и другие при обновлении.
+check_need() {
+    local packages=''
+    if [[ -e "$reboot_marker" ]]; then
+        packages="$(sort -u "$reboot_marker.pkgs" 2>/dev/null | paste -sd, - | sed 's/,/, /g' | cut -c 1-160 || true)"
+        row NEED yes "${packages:-обновление системы}"
+    else
+        row NEED no ''
+    fi
+}
+
+# Сервер, загруженный только что, не перезагружается автоматически второй раз:
+# так ошибка в условии перезагрузки не превратится в цикл.
+check_uptime() {
+    local uptime
+    uptime="$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
+    if [[ "$uptime" =~ ^[0-9]+$ ]] && (( uptime < min_uptime_seconds )); then
+        row HOLD 'сервер загружен недавно' "$((uptime / 60)) мин назад; автоматическая перезагрузка не раньше чем через $(( (min_uptime_seconds - uptime) / 60 + 1 )) мин"
+    else
+        row OK 'сервер работает достаточно долго'
+    fi
+}
+
+unit_busy() {
+    local state
+    state="$(systemctl is-active "$1" 2>/dev/null || true)"
+    [[ "$state" == active || "$state" == activating ]]
+}
+
+# Перезагрузка посреди установки пакетов оставляет их наполовину настроенными:
+# именно так ядро может остаться без initramfs.
+check_packages() {
+    local unit audit busy=''
+    # unattended-upgrades.service в список не входит: это фоновая служба ожидания
+    # выключения, она активна всегда и установку пакетов не означает.
+    for unit in awg-maintenance.service apt-daily.service apt-daily-upgrade.service; do
+        ! unit_busy "$unit" || busy+="${busy:+, }$unit"
+    done
+    if pgrep -x dpkg >/dev/null 2>&1 || pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1; then
+        busy+="${busy:+, }dpkg или apt"
+    fi
+    if [[ -n "$busy" ]]; then
+        row WAIT 'идёт установка пакетов' "$busy"
+    else
+        row OK 'установка пакетов не выполняется'
+    fi
+    if [[ -e "$deploy_marker" ]] && (( $(date +%s) - $(stat -c %Y "$deploy_marker" 2>/dev/null || echo 0) < 10800 )); then
+        row WAIT 'идёт kalimera-deploy' ''
+    fi
+    audit="$(dpkg --audit 2>/dev/null || true)"
+    if [[ -n "$audit" ]]; then
+        row FAIL 'установка пакетов не завершена' 'ночное обслуживание завершит её само; вручную: sudo dpkg --configure -a'
+    else
+        row OK 'пакеты в согласованном состоянии'
+    fi
+}
+
+# Версии ядер, образы которых лежат в /boot. Копии вида vmlinuz-X.old и
+# временные файлы dpkg версиями не считаются.
+installed_kernels() {
+    local image
+    compgen -G "$boot_dir/vmlinuz-*" >/dev/null || return 0
+    for image in "$boot_dir"/vmlinuz-*; do
+        printf '%s\n' "${image##*/vmlinuz-}"
+    done | awk '/^[0-9]/ && !/\.(old|bak|dpkg-[a-z]+)$/'
+}
+
+# Ядро, которое загрузится: самое новое из установленных, как выбирает GRUB.
+target_kernel() {
+    local newest
+    newest="$(installed_kernels | sort -V | tail -n 1)"
+    printf '%s\n' "${newest:-$(uname -r)}"
+}
+
+check_kernel() {
+    local running target image initrd grub age_hours
+    running="$(uname -r)"
+    target="$(target_kernel)"
+    image="$boot_dir/vmlinuz-$target"
+    initrd="$boot_dir/initrd.img-$target"
+    grub="$boot_dir/grub/grub.cfg"
+    if [[ "$target" == "$running" ]]; then
+        row OK "после перезагрузки останется ядро $running"
+    else
+        row OK "после перезагрузки загрузится ядро $target" "сейчас работает $running"
+    fi
+    # Сервер, у которого образов ядра в /boot нет вовсе, загружается средствами
+    # хостинга: проверять там нечего.
+    if [[ -z "$(installed_kernels)" ]]; then
+        row OK 'ядро загружает хостинг: файлы ядра не проверяются'
+        return 0
+    fi
+    if [[ ! -s "$image" ]]; then
+        row FAIL "образ ядра $target отсутствует или пуст" "$image"
+    else
+        row OK "образ ядра $target на месте"
+    fi
+    # initramfs обязателен, если им пользуется работающее ядро.
+    if [[ -e "$boot_dir/initrd.img-$running" || -e "$initrd" ]]; then
+        if [[ ! -s "$initrd" ]]; then
+            row FAIL "initramfs ядра $target отсутствует или пуст" 'sudo update-initramfs -c -k '"$target"'; чаще всего не хватило места на диске'
+        elif command -v lsinitramfs >/dev/null 2>&1 && ! lsinitramfs "$initrd" >/dev/null 2>&1; then
+            row FAIL "initramfs ядра $target повреждён" 'sudo update-initramfs -u -k '"$target"
+        else
+            row OK "initramfs ядра $target цел"
+        fi
+    fi
+    if [[ ! -s "$modules_dir/$target/modules.dep" ]]; then
+        row FAIL "модули ядра $target не установлены" "$modules_dir/$target"
+    else
+        row OK "модули ядра $target на месте"
+    fi
+    # Меню загрузчика. Проверяется, только если им пользуется работающее ядро.
+    if [[ -e "$grub" ]] && grep -Fq -- "vmlinuz-$running" "$grub" 2>/dev/null; then
+        if command -v grub-script-check >/dev/null 2>&1 && ! grub-script-check "$grub" >/dev/null 2>&1; then
+            row FAIL 'меню загрузчика GRUB повреждено' 'sudo update-grub'
+        elif ! grep -Fq -- "vmlinuz-$target" "$grub" 2>/dev/null; then
+            row FAIL "ядро $target не внесено в меню загрузчика" 'sudo update-grub'
+        else
+            row OK 'меню загрузчика GRUB в порядке'
+        fi
+    fi
+    if [[ "$target" != "$running" && -e "$image" ]]; then
+        age_hours=$(( ($(date +%s) - $(stat -c %Z "$image" 2>/dev/null || date +%s)) / 3600 ))
+        if (( age_hours < kernel_min_age_hours )); then
+            row HOLD "ядро $target установлено недавно" "$age_hours ч назад; автоматическая перезагрузка не раньше чем через $((kernel_min_age_hours - age_hours)) ч"
+        else
+            row OK "ядро $target выдержано" "установлено $age_hours ч назад"
+        fi
+    fi
+}
+
+# Без модуля AmneziaWG под загруженное ядро не поднимется ни один интерфейс
+# каскада. Перед перезагрузкой модуль собирается под все установленные ядра.
+check_awg_module() {
+    local target
+    [[ "$role" == entry || "$role" == exit ]] || return 0
+    target="$(target_kernel)"
+    if [[ "$mode" == prepare && -x "$kernel_guard" ]]; then
+        "$kernel_guard" >/dev/null 2>&1 || true
+    fi
+    if modinfo -k "$target" amneziawg >/dev/null 2>&1; then
+        row OK "модуль AmneziaWG собран для ядра $target"
+    else
+        row FAIL "модуль AmneziaWG не собран для ядра $target" 'без него каскад не поднимется: sudo awg-kernel-guard; если не помогает - на ENTRY kalimera-deploy --resume --update-amneziawg'
+    fi
+}
+
+check_disk() {
+    local used
+    used="$(df -P / 2>/dev/null | awk 'NR == 2 { sub(/%/, "", $5); print $5 }')"
+    if [[ "$used" =~ ^[0-9]+$ ]] && (( used >= disk_limit )); then
+        row FAIL 'корневой раздел почти заполнен' "занято $used%: освободите место, sudo apt-get clean"
+    else
+        row OK 'на корневом разделе есть место'
+    fi
+}
+
+# С ошибкой в конфигурации sshd не запустится: сервер был бы недоступен, а
+# соседние серверы не получили бы от него долю ключа.
+check_ssh() {
+    local sshd
+    sshd="$(command -v sshd 2>/dev/null || true)"
+    [[ -n "$sshd" ]] || return 0
+    if "$sshd" -t >/dev/null 2>&1; then
+        row OK 'конфигурация SSH без ошибок'
+    else
+        row FAIL 'конфигурация SSH содержит ошибку' 'причина: sudo sshd -t; исправление: на ENTRY kalimera-deploy --resume'
+    fi
+}
+
+# Секреты лежат в RAM и после загрузки собираются из зашифрованного пакета; ключ
+# к нему складывается из долей двух серверов. Проверка читает пакет так же, как
+# это произойдёт при загрузке.
+check_secrets() {
+    [[ "$secrets_enabled" == true ]] || return 0
+    if [[ ! -x "$secretctl" ]]; then
+        row FAIL 'программа хранилища секретов не установлена' 'на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    if ! systemctl is-enabled --quiet "$unlock_unit" 2>/dev/null; then
+        row FAIL 'открытие хранилища секретов при загрузке выключено' "sudo systemctl enable $unlock_unit"
+        return 0
+    fi
+    if [[ "$mode" == prepare ]]; then
+        # Изменения, сделанные после последнего сохранения, без этого пропали бы.
+        if ! "$secretctl" seal >/dev/null 2>&1; then
+            row FAIL 'секреты не сохранены в зашифрованный пакет' 'второй сервер не отдал долю ключа: cascade-check; затем sudo kalimera-secretctl seal'
+            return 0
+        fi
+    fi
+    if "$secretctl" check >/dev/null 2>&1; then
+        row OK 'хранилище секретов откроется после перезагрузки'
+    else
+        row FAIL 'хранилище секретов не откроется после перезагрузки' 'пакет не читается или второй сервер не отдаёт долю ключа: cascade-check; sudo kalimera-secretctl check'
+    fi
+}
+
+check_need
+check_uptime
+check_packages
+check_kernel
+check_awg_module
+check_disk
+check_ssh
+check_secrets
+
+if (( failures > 0 )); then
+    exit 1
+elif (( holds > 0 )); then
+    exit 3
+fi
+exit 0
+{% endraw %}

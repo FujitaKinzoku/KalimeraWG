@@ -1,0 +1,14 @@
+[Unit]
+Description=Еженедельное окно KalimeraWG: сводка в Telegram и перезагрузка каскада, если она нужна
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ kalimera_weekly_path | default('/usr/local/libexec/kalimera-weekly') }}
+Environment=HOME=/root
+# Ожидание конца установки пакетов, перезагрузка серверов по одному и проверка
+# каскада после каждого.
+TimeoutStartSec=3h
+Nice=5
+UMask=0077

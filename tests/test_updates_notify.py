@@ -288,6 +288,16 @@ class DomainExpiryTests(UpdatesCase):
         (self.dir / "rdap-example.uk.json").write_text('{"events": "нет"}', encoding="utf-8")
         self.assertIn("INFO срок регистрации домена", self.run_updates())
 
+    def test_impossible_date_does_not_break_the_whole_check(self) -> None:
+        (self.dir / "rdap-example.uk.json").write_text(
+            json.dumps({"events": [{"eventAction": "expiration", "eventDate": "2026-13-45T00:00:00Z"}]}),
+            encoding="utf-8",
+        )
+        output = self.run_updates("--scheduled")
+        self.assertIn("INFO срок регистрации домена example.uk не определён: реестр вернул непонятную дату", output)
+        self.assertIn("OK   ядро", output)  # остальные проверки выполнены и записаны
+        self.assertEqual(self.sent(), [])
+
     def test_entry_does_not_ask_about_domains(self) -> None:
         # Запрос с ENTRY раскрыл бы реестру его адрес рядом с именем домена.
         self.expires_in(5)

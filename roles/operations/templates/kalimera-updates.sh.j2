@@ -413,7 +413,7 @@ domain_expiry() {
 # ошибка: срок просто не определён (INFO). Замечание появляется заранее, за
 # DOMAIN_WARN_DAYS дней: домен, не продлённый вовремя, каскад сам не вернёт.
 check_domains() {
-    local name result registered expiry days now bootstrap='' seen=' '
+    local name result registered expiry expiry_epoch days now bootstrap='' seen=' '
     now="$(date +%s)"
     for name in "$ORIGIN_DOMAIN" "$CDN_DOMAIN"; do
         [[ "$name" == *.* ]] || continue
@@ -430,7 +430,14 @@ check_domains() {
         read -r registered expiry <<<"$result"
         [[ "$seen" != *" $registered "* ]] || continue
         seen+="$registered "
-        days=$(( ($(date -u -d "$expiry" +%s) - now) / 86400 ))
+        # Дата из ответа реестра может оказаться несуществующей: это тоже «срок не
+        # определён», а не причина оборвать всю проверку обновлений.
+        expiry_epoch="$(date -u -d "$expiry" +%s 2>/dev/null || true)"
+        if [[ ! "$expiry_epoch" =~ ^[0-9]+$ ]]; then
+            record INFO domain "срок регистрации домена $registered не определён: реестр вернул непонятную дату"
+            continue
+        fi
+        days=$(( (expiry_epoch - now) / 86400 ))
         if (( days < 0 )); then
             record WARN domain "регистрация домена $registered истекла $expiry" \
                 'продлите домен у регистратора: без него перестанут работать CDN и сертификат FRONT'

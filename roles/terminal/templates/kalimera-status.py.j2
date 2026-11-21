@@ -17,6 +17,7 @@ from pathlib import Path
 
 CONFIG = {
     "role": {{ awg_node_role | default('front') | to_json }},
+    "auto_reboot": {{ 'True' if (awg_auto_reboot_enabled | default(true) | bool) else 'False' }},
     "entry_host": {{ terminal_summary_entry_host | to_json }},
     "exit_host": {{ terminal_summary_exit_host | to_json }},
     "front_present": {{ 'True' if terminal_summary_front_present | bool else 'False' }},
@@ -446,11 +447,23 @@ def reboot_required_panel() -> None:
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
         return
+    if CONFIG.get("auto_reboot"):
+        # Перезагрузку выполнит автоматика в еженедельное окно: это не тревога, и
+        # уведомление в Telegram при каждом входе здесь было бы шумом.
+        panel(
+            "ПЕРЕЗАГРУЗКА",
+            [
+                ("Статус", "требуется после обновления; выполнится автоматически в еженедельное окно", "INFO"),
+                ("Команда", "на ENTRY: cascade-reboot status · сейчас: cascade-reboot --yes", "INFO"),
+            ],
+            preferred_label_width=COMMAND_LABEL_WIDTH,
+        )
+        return
     panel(
         "ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА",
         [
             ("Статус", "обновления системы требуют перезагрузки сервера", "REBOOT"),
-            ("Команда", "sudo systemctl reboot", "INFO"),
+            ("Команда", "на ENTRY: cascade-reboot --yes (серверы по очереди с проверкой)", "INFO"),
         ],
         preferred_label_width=COMMAND_LABEL_WIDTH,
     )
@@ -555,7 +568,8 @@ def command_panels() -> None:
                 ("cascade-reboot", "порядок перезагрузки и проверка без перезагрузки", "INFO"),
                 ("cascade-reboot --yes", "перезагрузить FRONT, EXIT и ENTRY по очереди", "INFO"),
                 ("cascade-reboot --yes --force", "то же, но продолжать несмотря на ошибки проверки", "INFO"),
-                ("cascade-reboot status", "результат проверки после перезагрузки ENTRY", "INFO"),
+                ("cascade-reboot status", "автоматическая перезагрузка: состояние, окно, итог проверки", "INFO"),
+                ("cascade-reboot auto on|off", "включить автоматику (и снять остановку) или выключить", "INFO"),
                 ("maintenance-time ЧЧ:ММ ЗОНА", "время ночного обслуживания, например 02:20 Asia/Manila", "INFO"),
                 ("maintenance-time show", "текущее время ночного обслуживания", "INFO"),
             ],

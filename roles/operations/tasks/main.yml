@@ -75,6 +75,42 @@
     - {src: f2b-reset.sh.j2, dest: f2b-reset}
     - {src: ssh-key-audit.sh.j2, dest: ssh-key-audit}
     - {src: kalimera-updates.sh.j2, dest: kalimera-updates}
+    - {src: reboot-guard.sh.j2, dest: kalimera-reboot-guard}
+
+# Еженедельное окно ENTRY: сводка в Telegram и автоматическая перезагрузка
+# каскада. Состояние автоматики хранится на диске: оно должно пережить
+# перезагрузку ENTRY, которой автоматика и управляет.
+- name: "Создание каталога состояния перезагрузки каскада"
+  ansible.builtin.file:
+    path: "{{ awg_auto_reboot_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: awg_node_role == 'entry'
+
+- name: "Установка программы еженедельного окна"
+  ansible.builtin.template:
+    src: kalimera-weekly.sh.j2
+    dest: "{{ kalimera_weekly_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+    validate: /usr/bin/bash -n %s
+  when: awg_node_role == 'entry'
+
+- name: "Установка модулей systemd еженедельного окна"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kalimera-weekly.service
+    - kalimera-weekly.timer
+  when: awg_node_role == 'entry'
+  notify: Перезагрузить модули systemd для администрирования
 
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
@@ -410,6 +446,16 @@
     name: kalimera-updates.timer
     enabled: true
     state: started
+
+# Таймер включён и тогда, когда автоматическая перезагрузка выключена: в то же
+# окно уходит еженедельная сводка. Перезапуск таймера применяет новое время.
+- name: Включение еженедельного окна ENTRY
+  ansible.builtin.systemd_service:
+    name: kalimera-weekly.timer
+    enabled: true
+    state: restarted
+    daemon_reload: true
+  when: awg_node_role == 'entry'
 
 # Первая проверка сразу после deploy, чтобы server-audit и экран входа
 # показывали состояние обновлений без ожидания таймера. Недоступность сети
