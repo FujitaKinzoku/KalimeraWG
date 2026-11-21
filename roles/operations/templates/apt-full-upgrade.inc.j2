@@ -32,7 +32,10 @@ awg_full_upgrade() {
             awg_new_holds+=("$package")
         fi
     done
-    trap awg_release_holds EXIT
+    # Ночное обслуживание задаёт свой обработчик выхода: он тоже снимает удержание
+    # и вдобавок записывает итог запуска. Имя обработчика подставляется сразу.
+    # shellcheck disable=SC2064
+    trap "${awg_exit_handler:-awg_release_holds}" EXIT
 
     apt-get "${apt_options[@]}" -q update
     apt-get "${apt_options[@]}" -y upgrade

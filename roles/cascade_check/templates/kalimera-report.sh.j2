@@ -19,6 +19,7 @@ readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default(
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
 readonly front_entry_host={{ (front_entry_address | default('')) | quote }}
 readonly front_entry_port={{ (front_entry_reality_port | default(0)) | int }}
+readonly maintenance_state={{ (awg_maintenance_state_path | default('/run/awg-maintenance.state')) | quote }}
 
 {% raw %}
 usage() { echo 'Использование: kalimera-report --tsv'; }
@@ -71,15 +72,37 @@ run_report() {
     KALIMERA_REPORT_STYLE=plain KALIMERA_REPORT_RESULTS="$file" "$@" >/dev/null 2>&1 || true
 }
 
+# Итог последнего ночного обслуживания, если оно не прошло: время, этап и названия
+# проверок. Журнал службы в RAM вытесняется раньше, чем его успевают посмотреть.
+maintenance_failure() {
+    local status='' when='' stage='' details=''
+    [[ -r "$maintenance_state" ]] || return 0
+    IFS=$'\t' read -r status when stage details <"$maintenance_state" || true
+    [[ "$status" == FAIL ]] || return 0
+    printf '%s, этап «%s»%s' "$when" "$stage" "${details:+: $details}"
+}
+
+# Неисправный модуль - замечание, а не отказ каскада: у каждой службы, через
+# которую идёт трафик, есть своя проверка. Раньше из-за одного неудачного ночного
+# обслуживания отчёт сообщал «работа каскада нарушена» при исправном каскаде.
 check_services() {
-    local failed units
+    local failed units hint reason
     failed="$(systemctl --failed --no-legend --plain --no-pager 2>/dev/null |
         awk 'NF && $1 != "awg-server-audit.service" { print $1 }' || true)"
     if [[ -z "$failed" ]]; then
         add OK 'неисправные модули systemd отсутствуют'
     else
         units="$(paste -sd ',' <<<"$failed" | sed 's/,/, /g')"
-        add FAIL 'неисправные модули systemd' "$units" 'причина: sudo journalctl -u ИМЯ -b --no-pager; затем sudo systemctl restart ИМЯ'
+        hint='причина: sudo journalctl -u ИМЯ -b --no-pager; затем sudo systemctl restart ИМЯ'
+        if grep -Fxq awg-maintenance.service <<<"$failed"; then
+            reason="$(maintenance_failure)"
+            if [[ -n "$reason" ]]; then
+                hint="ночное обслуживание $reason; повторить: sudo systemctl start awg-maintenance.service"
+                [[ "$failed" == awg-maintenance.service ]] ||
+                    hint+='; остальные модули: sudo journalctl -u ИМЯ -b --no-pager'
+            fi
+        fi
+        add WARN 'неисправные модули systemd' "$units" "$hint"
     fi
 }
 

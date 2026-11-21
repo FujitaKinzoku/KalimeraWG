@@ -533,13 +533,12 @@ dns_no_logs_policy_is_active() {
 # разрешается. Вывод unbound-control сначала читается целиком: grep -q в конвейере
 # закрыл бы канал раньше времени, и при pipefail проверка падала бы через раз.
 ru_dot_dns_is_active() {
-    local forwards zone answer
+    local forwards zone
     forwards="$(unbound-control list_forwards 2>/dev/null)" || return 1
     for zone in{% for zone in entry_dns_ru_dot_zones %} {{ zone | quote }}{% endfor %}; do
         grep -Eq "^${zone//./\\.}\. IN forward (.* )?{{ (entry_dns_ru_dot_upstreams | map(attribute='address') | first) | replace('.', '\\.') }}( |\$)" <<<"$forwards" || return 1
     done
-    answer="$(dig +short +time=5 +tries=1 @127.0.0.1 -p {{ entry_dns_default_port | int }} {{ entry_dns_ru_dot_probe_name | default('yandex.ru') | quote }} A 2>/dev/null)" || return 1
-    grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"
+    dns_resolves_a 127.0.0.1 {{ entry_dns_ru_dot_probe_name | default('yandex.ru') | quote }} {{ entry_dns_default_port | int }}
 }
 {% endif %}
 
@@ -609,13 +608,21 @@ client_doh_names_refused() {
 
 # dig возвращает 0 и при SERVFAIL, а при таймауте пишет ошибку в stdout,
 # поэтому успехом считается только полученный IPv4-адрес. $1 - резолвер,
-# $2 - имя, $3 - порт (по умолчанию 53).
+# $2 - имя, $3 - порт (по умолчанию 53). Попыток две: один потерянный ответ или
+# запрос в момент перезапуска резолвера ещё не неисправность, а проверка с одной
+# попыткой из-за него объявляла отказ DNS.
 dns_resolves_a() {
-    local answer
+    local answer attempt
     local -a port_args=()
     [[ -z "${3:-}" ]] || port_args=(-p "$3")
-    answer="$(dig +short +time=5 +tries=1 "@$1" "${port_args[@]}" "$2" A 2>/dev/null)" || return 1
-    grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"
+    for attempt in 1 2; do
+        answer="$(dig +short +time=3 +tries=1 "@$1" "${port_args[@]}" "$2" A 2>/dev/null || true)"
+        if grep -Eq '^[0-9]+(\.[0-9]+){3}$' <<<"$answer"; then
+            return 0
+        fi
+        (( attempt == 2 )) || sleep 2
+    done
+    return 1
 }
 
 # Набор российских сетей есть и наполнен. Пустой набор означал бы, что все

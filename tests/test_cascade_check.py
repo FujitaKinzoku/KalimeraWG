@@ -404,12 +404,61 @@ class KalimeraReportTests(unittest.TestCase):
                 entry_ru_proxy_enabled=True,
                 entry_ru_proxy_manual_disabled_flag=str(self.dir / "no-manual"),
                 entry_ru_proxy_disabled_flag=str(self.dir / "no-failopen"),
+                awg_maintenance_state_path=str(self.dir / "maintenance.state"),
             ),
             encoding="utf-8",
         )
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def failed_units(self, *units: str) -> str:
+        """Подставной systemctl --failed и вызов проверки модулей."""
+        lines = "".join(f"{unit} loaded failed failed описание\\n" for unit in units)
+        return f"systemctl() {{ printf '{lines}'; }}\ncheck_services\n"
+
+    def test_failed_maintenance_is_a_warning_with_the_recorded_reason(self) -> None:
+        # Найдено на рабочем каскаде: одно неудачное ночное обслуживание давало
+        # «FAIL: работа каскада нарушена» при исправном каскаде, а причина к утру
+        # пропадала вместе с журналом.
+        (self.dir / "maintenance.state").write_text(
+            "FAIL\t2026-11-20 18:30 UTC\tитоговый аудит\tстрогая проверка роли сервера: основной DNS по UDP\n",
+            encoding="utf-8",
+        )
+        result = self.run_body(self.failed_units("awg-maintenance.service"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            row(
+                "ENTRY",
+                "WARN",
+                "неисправные модули systemd",
+                "awg-maintenance.service",
+                "ночное обслуживание 2026-11-20 18:30 UTC, этап «итоговый аудит»: строгая проверка роли "
+                "сервера: основной DNS по UDP; повторить: sudo systemctl start awg-maintenance.service",
+            ),
+        )
+
+    def test_other_failed_units_keep_the_general_hint(self) -> None:
+        (self.dir / "maintenance.state").write_text(
+            "OK\t2026-11-21 18:30 UTC\tитоговый аудит\t\n", encoding="utf-8"
+        )
+        result = self.run_body(self.failed_units("awg-maintenance.service", "certbot.service"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            row(
+                "ENTRY",
+                "WARN",
+                "неисправные модули systemd",
+                "awg-maintenance.service, certbot.service",
+                "причина: sudo journalctl -u ИМЯ -b --no-pager; затем sudo systemctl restart ИМЯ",
+            ),
+        )
+
+    def test_no_failed_units_is_ok(self) -> None:
+        result = self.run_body("systemctl() { :; }\ncheck_services\n")
+        self.assertEqual(result.stdout, row("ENTRY", "OK", "неисправные модули systemd отсутствуют"))
 
     def run_body(self, body: str):
         return subprocess.run(

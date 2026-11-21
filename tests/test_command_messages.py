@@ -395,6 +395,36 @@ class HealthProbeTests(CommandCase):
             self.verdict("dns_resolves_a", "dns_resolves_a 127.0.0.1 example.com 5353", "dig", "exit 0\n"), "FAIL"
         )
 
+    def counting_dig(self, answers_from: int) -> str:
+        """Подставной dig: адрес приходит начиная с попытки answers_from."""
+        counter = shlex.quote(str(self.dir / "dig-count"))
+        return (
+            f'count="$(cat {counter} 2>/dev/null || echo 0)"\n'
+            f"count=$((count + 1))\n"
+            f'echo "$count" >{counter}\n'
+            f"(( count < {answers_from} )) || echo 93.184.216.34\n"
+        )
+
+    def test_dns_check_survives_one_lost_answer(self) -> None:
+        # Проверка с одной попыткой объявляла отказ DNS из-за единственного
+        # потерянного ответа, например сразу после перезапуска резолвера.
+        self.fake(self.fakebin / "sleep")
+        self.assertEqual(
+            self.verdict("dns_resolves_a", "dns_resolves_a 127.0.0.1 example.com 5353", "dig", self.counting_dig(2)),
+            "PASS",
+        )
+        self.assertEqual((self.dir / "dig-count").read_text(encoding="utf-8").strip(), "2")
+        self.assertEqual(self.called("sleep"), ["sleep 2"])
+
+    def test_dns_check_fails_after_two_attempts(self) -> None:
+        self.fake(self.fakebin / "sleep")
+        self.assertEqual(
+            self.verdict("dns_resolves_a", "dns_resolves_a 127.0.0.1 example.com 5353", "dig", self.counting_dig(3)),
+            "FAIL",
+        )
+        self.assertEqual((self.dir / "dig-count").read_text(encoding="utf-8").strip(), "2")
+        self.assertEqual(self.called("sleep"), ["sleep 2"])
+
     def test_dns_checks_use_the_strict_probe(self) -> None:
         text = HEALTH.read_text(encoding="utf-8")
         for label in (

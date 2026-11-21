@@ -216,9 +216,11 @@ audit_passed() {
     [[ "$quiet" == true ]] || report_line OK "$1"
 }
 
-# $1 - FAIL или WARN, $2 - проверка, $3 - рекомендация.
+# $1 - FAIL или WARN, $2 - проверка, $3 - рекомендация. Непройденная проверка
+# печатается и в тихом режиме: его использует ночное обслуживание, и без этой
+# строки в журнале не оставалось причины сбоя.
 audit_failed() {
-    [[ "$quiet" == true ]] || report_line FAIL "$2"
+    report_line FAIL "$2"
     failures=$((failures + 1))
     [[ "$1" != FAIL ]] || critical=$((critical + 1))
     report_note "$1" "$2" "$3"
@@ -240,14 +242,22 @@ record_warn_result() {
 # Строгая проверка роли: awg-health --strict возвращает 1 при критичных
 # ошибках и 3, если есть только замечания.
 record_health() {
-    local label='строгая проверка роли сервера' rc=0
-    {{ awg_health_script_path | quote }} --strict >/dev/null 2>&1 || rc=$?
+    local label='строгая проверка роли сервера' rc=0 rows failed=''
+    # Названия непройденных проверок awg-health попадают в строку аудита. Сбой бывает
+    # кратким: к моменту, когда awg-health запускают вручную, его уже не видно.
+    rows="$(mktemp /run/server-audit.health.XXXXXX 2>/dev/null || true)"
+    KALIMERA_REPORT_RESULTS="$rows" {{ awg_health_script_path | quote }} --strict >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )) && [[ -n "$rows" && -s "$rows" ]]; then
+        failed="$(awk -F '\t' '$1 == "FAIL" || $1 == "WARN" { print $2 }' "$rows" |
+            head -n 5 | paste -sd ';' | sed 's/;/; /g')"
+    fi
+    [[ -z "$rows" ]] || rm -f "$rows"
     if (( rc == 0 )); then
         audit_passed "$label"
     elif (( rc == 3 )); then
-        audit_failed WARN "$label: только замечания" 'подробности и рекомендации: awg-health --strict'
+        audit_failed WARN "$label: только замечания${failed:+ ($failed)}" 'подробности и рекомендации: awg-health --strict'
     else
-        audit_failed FAIL "$label" 'подробности и рекомендации: awg-health --strict'
+        audit_failed FAIL "$label${failed:+: $failed}" 'подробности и рекомендации: awg-health --strict'
     fi
 }
 
@@ -661,6 +671,18 @@ if [[ "$quiet" == false && "$failures" -gt 0 ]] && ! no_failed_units; then
     printf 'Неисправные модули systemd:\n'
     systemctl --failed --no-legend --plain --no-pager |
         awk '$1 != "awg-server-audit.service"' || true
+fi
+# Причина сбоя ночного обслуживания: его журнал в RAM вытесняется за несколько
+# часов, а итог запуска обслуживание записывает в /run.
+maintenance_state={{ awg_maintenance_state_path | default('/run/awg-maintenance.state') | quote }}
+if [[ "$quiet" == false && -r "$maintenance_state" ]] &&
+        systemctl is-failed --quiet awg-maintenance.service 2>/dev/null; then
+    IFS=$'\t' read -r maintenance_status maintenance_when maintenance_stage maintenance_details \
+        <"$maintenance_state" || true
+    if [[ "${maintenance_status:-}" == FAIL ]]; then
+        printf 'Ночное обслуживание %s остановлено на этапе «%s»%s. Повторить: sudo systemctl start awg-maintenance.service\n' \
+            "${maintenance_when:-}" "${maintenance_stage:-}" "${maintenance_details:+: $maintenance_details}"
+    fi
 fi
 if [[ "$quiet" == true ]]; then
     :
