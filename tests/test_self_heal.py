@@ -26,6 +26,7 @@ import yaml
 ROOT = Path(__file__).parents[1]
 HEALTH_ROLE = ROOT / "roles" / "health"
 SELF_HEAL = HEALTH_ROLE / "templates" / "awg-self-heal.sh.j2"
+REPORT = ROOT / "roles" / "cascade_check" / "templates" / "kalimera-report.sh.j2"
 HEALTH = HEALTH_ROLE / "templates" / "awg-health.sh.j2"
 UNLOCK = "kalimera-secrets-unlock.service"
 
@@ -179,8 +180,32 @@ class SelfHealCase(unittest.TestCase):
         ]
 
     def state(self) -> list[str]:
+        """Поля состояния; пустое поле записано в файле как "-"."""
         fields = (self.state_dir / "state").read_text(encoding="utf-8").rstrip("\n").split("\t")
-        return fields + [""] * (4 - len(fields))
+        self.assertEqual(len(fields), 4, fields)
+        self.assertNotIn("", fields)
+        return ["" if field == "-" else field for field in fields]
+
+    def report_row(self) -> list[str]:
+        """Строка cascade-check о самовосстановлении: настоящий файл состояния читает kalimera-report."""
+        environment = jinja2.Environment(trim_blocks=True, keep_trailing_newline=True)
+        environment.filters["quote"] = lambda value: shlex.quote(str(value))
+        environment.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
+        report = self.dir / "kalimera-report"
+        report.write_text(
+            environment.from_string(REPORT.read_text(encoding="utf-8")).render(
+                awg_node_role="entry", awg_self_heal_state_dir=str(self.state_dir)
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [self.bash, "-c", f"source {shlex.quote(str(report))}\ncheck_self_heal\n"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.rstrip("\n").split("\t")
 
     def health_runs(self) -> int:
         return int((self.dir / "health-count").read_text(encoding="utf-8"))
@@ -394,6 +419,39 @@ class GuardTests(SelfHealCase):
         self.assertEqual(self.run_heal("on").returncode, 0)
         self.assertFalse((self.dir / "manual-off").exists())
         self.assertIn("systemctl enable --now awg-self-heal.timer", self.calls())
+
+    def test_unresolved_error_is_never_shown_as_repaired(self) -> None:
+        # Найдено на рабочем каскаде: поле «восстановлено» было пустым, read склеивал
+        # соседние табуляции, и следующее поле читалось на его месте. Неустранённая
+        # ошибка показывалась как «восстановлено», а причина паузы пропадала.
+        self.health("last", "UFW соответствует последней управляемой политике", status="WARN")
+        self.run_heal("--scheduled")
+        raw = (self.state_dir / "state").read_text(encoding="utf-8")
+        self.assertNotIn("\t\t", raw)
+        output = self.run_heal("status").stdout
+        self.assertIn("не устранено: UFW соответствует последней управляемой политике", output)
+        self.assertNotIn("восстановлено:", output)
+        segment, status, label, value, hint, _ms = self.report_row()
+        self.assertEqual((segment, status, label), ("ENTRY", "WARN", "самовосстановление не устранило ошибку"))
+        self.assertIn("UFW соответствует последней управляемой политике - расхождение настроек", value)
+        self.assertNotIn("восстановлено", value)
+        self.assertEqual(hint, "подробности: self-heal status")
+
+    def test_report_names_the_reason_of_a_pause(self) -> None:
+        (self.dir / "deploy.active").write_text("", encoding="utf-8")
+        self.run_heal("--scheduled")
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление приостановлено"))
+        self.assertRegex(value, r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC: идёт kalimera-deploy$")
+        self.assertIn("пропущен: идёт kalimera-deploy", self.run_heal("status").stdout)
+
+    def test_report_shows_what_was_repaired(self) -> None:
+        self.health(1, "служба dnsmasq")
+        self.health(2, "служба dnsmasq")
+        self.run_heal("--scheduled")
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual((status, label), ("OK", "самовосстановление"))
+        self.assertTrue(value.endswith("восстановлено: служба dnsmasq (перезапуск dnsmasq)"), value)
 
     def test_status_shows_the_last_result(self) -> None:
         self.health(1, "служба dnsmasq")

@@ -113,13 +113,16 @@ check_self_heal() {
     local status='' when='' repaired='' unresolved=''
     [[ -r "$self_heal_state" ]] || return 0
     IFS=$'\t' read -r status when repaired unresolved <"$self_heal_state" || true
+    # Пустое поле записано как "-": иначе read склеил бы соседние табуляции.
+    [[ "$repaired" != - ]] || repaired=''
+    [[ "$unresolved" != - ]] || unresolved=''
     case "$status" in
         REPAIRED)
             add OK 'самовосстановление' "$when: восстановлено: $repaired" ;;
         UNRESOLVED)
             add WARN 'самовосстановление не устранило ошибку' "$when: $unresolved${repaired:+; восстановлено: $repaired}" 'подробности: self-heal status' ;;
         SKIPPED)
-            add OK 'самовосстановление приостановлено' "$unresolved" ;;
+            add OK 'самовосстановление приостановлено' "$when: $unresolved" ;;
         OK)
             add OK 'самовосстановление: вмешательство не требовалось' ;;
     esac

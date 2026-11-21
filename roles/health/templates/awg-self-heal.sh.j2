@@ -372,10 +372,12 @@ history_add() {
 }
 
 # Состояние последнего запуска: "СТАТУС<TAB>время<TAB>восстановлено<TAB>не устранено".
+# Пустое поле записывается как "-": read с табуляцией в IFS склеивает соседние
+# разделители, и текст «не устранено» читался бы как «восстановлено».
 write_state() {
     local temporary
     temporary="$(mktemp "$state_file.XXXXXX")"
-    printf '%s\t%s\t%s\t%s\n' "$1" "$(now_text)" "${2:-}" "${3:-}" >"$temporary"
+    printf '%s\t%s\t%s\t%s\n' "$1" "$(now_text)" "${2:--}" "${3:--}" >"$temporary"
     chmod 0644 "$temporary"
     mv -f "$temporary" "$state_file"
 }
@@ -460,6 +462,8 @@ show_status() {
         echo 'Запусков после загрузки сервера ещё не было.'
     else
         IFS=$'\t' read -r status when repaired unresolved <"$state_file" || true
+        [[ "$repaired" != - ]] || repaired=''
+        [[ "$unresolved" != - ]] || unresolved=''
         case "$status" in
             OK) echo "Последний запуск $when: все проверки пройдены, вмешательство не требовалось." ;;
             REPAIRED) echo "Последний запуск $when: восстановлено." ;;
