@@ -442,6 +442,12 @@
             dest: "{{ rendered_shell_root }}/awg-health-entry"
             mode: "0700"
 
+        - name: Формирование программы самовосстановления ENTRY
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-self-heal.sh.j2"
+            dest: "{{ rendered_shell_root }}/self-heal-entry"
+            mode: "0700"
+
         # В примерном inventory RU-прокси включён, поэтому ветви режима без прокси
         # (российский DoT прямо с ENTRY) формируются отдельно. Значение из
         # include_vars перекрывает только set_fact, поэтому исходное сохраняется и
@@ -581,6 +587,12 @@
             dest: "{{ rendered_shell_root }}/awg-health-exit"
             mode: "0700"
 
+        - name: Формирование программы самовосстановления EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-self-heal.sh.j2"
+            dest: "{{ rendered_shell_root }}/self-heal-exit"
+            mode: "0700"
+
         - name: Формирование полной проверки роли EXIT
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/terminal/templates/kalimera-test.sh.j2"
@@ -641,6 +653,12 @@
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
             dest: "{{ rendered_shell_root }}/awg-health-front"
+            mode: "0700"
+
+        - name: Формирование программы самовосстановления FRONT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-self-heal.sh.j2"
+            dest: "{{ rendered_shell_root }}/self-heal-front"
             mode: "0700"
 
         - name: Проверка автономного формирования health FRONT без defaults common
@@ -729,6 +747,9 @@
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/awg-health-front"
               - "{{ rendered_shell_root }}/awg-health-front-standalone"
+              - "{{ rendered_shell_root }}/self-heal-entry"
+              - "{{ rendered_shell_root }}/self-heal-exit"
+              - "{{ rendered_shell_root }}/self-heal-front"
               - "{{ rendered_shell_root }}/kalimera-help"
               - "{{ rendered_shell_root }}/kalimera-test"
               - "{{ rendered_shell_root }}/kalimera-test-exit"

@@ -6,6 +6,19 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    # Пока отметка есть, служба самовосстановления ничего не меняет: во время
+    # deploy службы перезапускаются намеренно. Отметку снимает последний play и
+    # cleanup.yml; забытая отметка перестаёт действовать через три часа.
+    - name: Отметка идущего deploy для службы самовосстановления
+      ansible.builtin.file:
+        path: "{{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') }}"
+        state: touch
+        owner: root
+        group: root
+        mode: "0644"
+      changed_when: false
+      when: awg_adoption_mode == 'apply'
+
     - name: Проверка системного DNS до изменения состояния серверов
       ansible.builtin.shell: |
         set -Eeuo pipefail
@@ -663,3 +676,9 @@
         - apt-daily.timer
         - apt-daily-upgrade.timer
       when: awg_restore_apt | default(true) | bool
+
+    - name: Снятие отметки идущего deploy
+      ansible.builtin.file:
+        path: "{{ kalimera_deploy_marker_path | default('/run/kalimera-deploy.active') }}"
+        state: absent
+      changed_when: false

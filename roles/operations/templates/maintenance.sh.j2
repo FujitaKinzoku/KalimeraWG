@@ -2,9 +2,10 @@
 set -Eeuo pipefail
 [[ $EUID -eq 0 ]] || { echo 'Запустите команду от root.' >&2; exit 1; }
 usage() { echo 'Использование: maintenance [--scheduled]'; }
+scheduled=false
 case "${1:-}" in
     '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
-    --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; } ;;
+    --scheduled) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; scheduled=true ;;
     --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
 esac
@@ -12,9 +13,47 @@ export DEBIAN_FRONTEND=noninteractive
 
 {% include 'apt-full-upgrade.inc.j2' %}
 
+# Итог ночного запуска. Журнал systemd хранится в RAM и вытесняется за несколько
+# часов: причина сбоя пропадала раньше, чем её успевали посмотреть. Файл в /run
+# остаётся до следующего запуска или перезагрузки; его показывают cascade-check и
+# server-audit. В нём только время, этап и названия проверок.
+readonly state_file={{ awg_maintenance_state_path | default('/run/awg-maintenance.state') | quote }}
+readonly audit_attempts=3
+readonly audit_retry_delay=60
+stage='запуск'
+details=''
+
+maintenance_record() {
+    local temporary
+    temporary="$(mktemp "$state_file.XXXXXX")" || return 0
+    printf '%s\t%s\t%s\t%s\n' "$1" "$(date -u '+%Y-%m-%d %H:%M UTC')" "$stage" "$details" >"$temporary"
+    chmod 0644 "$temporary"
+    mv -f "$temporary" "$state_file"
+}
+
+maintenance_exit() {
+    local rc=$?
+    trap - EXIT
+    awg_release_holds || true
+    if (( rc == 0 )); then
+        maintenance_record OK || true
+    else
+        maintenance_record FAIL || true
+        printf 'Обслуживание остановлено на этапе «%s»%s; код %d.\n' "$stage" "${details:+: $details}" "$rc" >&2
+    fi
+    exit "$rc"
+}
+
+if [[ "$scheduled" == true ]]; then
+    awg_exit_handler=maintenance_exit
+    trap maintenance_exit EXIT
+    stage='ожидание другого обслуживания пакетов'
+fi
+
 exec 9>/run/awg-apt-maintenance.lock
 flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
-if [[ "${1:-}" == "--scheduled" ]]; then
+if [[ "$scheduled" == true ]]; then
+    stage='обновление пакетов Ubuntu'
 {% if awg_maintenance_upgrade_mode | default('full') == 'security' %}
     # Режим security: только обновления безопасности через unattended-upgrades.
     apt-get -o DPkg::Lock::Timeout=600 -q update
@@ -24,6 +63,7 @@ if [[ "${1:-}" == "--scheduled" ]]; then
     awg_full_upgrade
 {% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
+    stage='подготовка модуля AmneziaWG для установленных ядер'
     /usr/local/sbin/awg-kernel-guard
 {% endif %}
     flock -u 9
@@ -31,7 +71,24 @@ if [[ "${1:-}" == "--scheduled" ]]; then
     # Свежее состояние для экрана входа и server-audit: например, UPD
     # «ядро установлено, нужна перезагрузка». Сбой проверки не роняет обслуживание.
     {{ kalimera_updates_path | default('/usr/local/sbin/kalimera-updates') | quote }} >/dev/null 2>&1 || true
-    {{ awg_server_audit_path | quote }} --quiet
+    # Итоговый аудит повторяется: обновление могло только что перезапустить службу,
+    # и одна неудача сразу после него ещё не неисправность. Обслуживание считается
+    # неудачным, только если проверка не прошла несколько раз подряд.
+    stage='итоговый аудит'
+    audit_rc=0
+    for (( attempt = 1; attempt <= audit_attempts; attempt++ )); do
+        audit_rc=0
+        audit_output="$({{ awg_server_audit_path | quote }} --quiet 2>&1)" || audit_rc=$?
+        (( audit_rc != 0 )) || break
+        details="$(sed -n 's/^FAIL[[:space:]]\{1,\}//p' <<<"$audit_output" | paste -sd ';' | sed 's/;/; /g')"
+        printf 'Итоговый аудит, попытка %d из %d, не пройдено: %s.\n' \
+            "$attempt" "$audit_attempts" "${details:-число проверок - $audit_rc}" >&2
+        (( attempt == audit_attempts )) || sleep "$audit_retry_delay"
+    done
+    if (( audit_rc != 0 )); then
+        exit "$audit_rc"
+    fi
+    details=''
 else
     apt-get -o DPkg::Lock::Timeout=600 update
     apt-get -o DPkg::Lock::Timeout=600 --simulate upgrade

@@ -15,6 +15,45 @@
     group: root
     mode: "0750"
 
+- name: "Установка: самовосстановление - программа"
+  ansible.builtin.template:
+    src: awg-self-heal.sh.j2
+    dest: "{{ awg_self_heal_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+    validate: /usr/bin/bash -n %s
+
+- name: "Установка: самовосстановление - модули systemd"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - awg-self-heal.service
+    - awg-self-heal.timer
+  register: awg_self_heal_units
+
+- name: "Проверка: самовосстановление выключено администратором"
+  ansible.builtin.stat:
+    path: "{{ awg_self_heal_manual_off_flag }}"
+  register: awg_self_heal_manual_off
+
+# Команда self-heal off оставляет отметку: deploy не включает службу обратно.
+- name: "Включение: таймер самовосстановления"
+  ansible.builtin.systemd_service:
+    name: "{{ awg_self_heal_timer_name }}"
+    enabled: "{{ awg_self_heal_active | bool }}"
+    state: >-
+      {{ 'stopped' if not (awg_self_heal_active | bool)
+         else ('restarted' if awg_self_heal_units.changed else 'started') }}
+    daemon_reload: true
+  vars:
+    awg_self_heal_active: >-
+      {{ (awg_self_heal_enabled | bool) and not awg_self_heal_manual_off.stat.exists }}
+
 - name: "Применение: проверка состояния - этап 3"
   ansible.builtin.meta: flush_handlers
 

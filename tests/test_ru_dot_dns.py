@@ -507,8 +507,11 @@ class HealthCheckTests(SyncCase):
         function = text.index("ru_dot_dns_is_active() {")
         start = text.rindex("{% if entry_dns_ru_dot_active | default(false) | bool %}", 0, function)
         end = text.index("{% endif %}", function) + len("{% endif %}")
+        # Проверка имени идёт через общую пробу DNS с повтором.
+        probe = text.index("dns_resolves_a() {")
+        probe_text = text[probe:text.index("\n}\n", probe) + 3]
         defaults = load_defaults()
-        return environment().from_string(text[start:end]).render(
+        return environment().from_string(text[start:end] + "\n" + probe_text).render(
             entry_dns_ru_dot_active=True,
             entry_dns_ru_dot_zones=defaults["entry_dns_ru_dot_zones"],
             entry_dns_ru_dot_upstreams=defaults["entry_dns_ru_dot_upstreams"],

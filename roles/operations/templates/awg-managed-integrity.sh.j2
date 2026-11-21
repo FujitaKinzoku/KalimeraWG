@@ -37,6 +37,9 @@ managed_files() {
 /etc/systemd/system/kalimera-updates.timer
 /etc/systemd/system/awg-server-audit.service
 /etc/systemd/system/awg-server-audit.timer
+{{ awg_self_heal_path | default('/usr/local/sbin/self-heal') }}
+/etc/systemd/system/awg-self-heal.service
+/etc/systemd/system/awg-self-heal.timer
 {% if runtime_secrets_enabled | default(false) | bool %}
 {{ runtime_secrets_ctl_path }}
 {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}

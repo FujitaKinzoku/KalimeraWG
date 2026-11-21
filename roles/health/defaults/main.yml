@@ -3,3 +3,25 @@ awg_health_script_path: /usr/local/sbin/awg-health
 awg_health_run_during_deploy: true
 security_ufw_policy_marker: /var/lib/awg-iac/security/ufw-policy.sha256
 awg_telegram_monitor_deferred_flag: /run/awg-telegram-monitor.deferred
+
+# Самовосстановление: служба раз в несколько минут запускает awg-health и для
+# непройденной проверки выполняет действие именно для неё. Выключить на сервере:
+# self-heal off; выключить для всего каскада: awg_self_heal_enabled: false в
+# group_vars/all/main.yml, затем kalimera-deploy --resume.
+awg_self_heal_enabled: true
+awg_self_heal_path: /usr/local/sbin/self-heal
+awg_self_heal_timer_name: awg-self-heal.timer
+awg_self_heal_state_dir: /run/awg-self-heal
+awg_self_heal_manual_off_flag: /var/lib/awg-self-heal.manual-off
+awg_self_heal_boot_delay: 3min
+awg_self_heal_interval: 5min
+# Пауза перед повторной проверкой: действие выполняется, только если проверка не
+# прошла дважды.
+awg_self_heal_confirm_delay: 20
+# Пауза после действий перед итоговой проверкой.
+awg_self_heal_settle_delay: 10
+# Не больше стольких попыток одного действия за окно.
+awg_self_heal_max_attempts: 3
+awg_self_heal_attempts_window: 3600
+# Отметка идущего deploy: пока она есть, самовосстановление ничего не меняет.
+kalimera_deploy_marker_path: /run/kalimera-deploy.active
