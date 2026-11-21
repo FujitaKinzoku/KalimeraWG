@@ -980,7 +980,14 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
     check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
     check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
     check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
+{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
+    # Ответ идёт через внешний SOCKS5-прокси. В области selected через него
+    # направляются только выбранные домены и адреса: сбой прокси - замечание, а не
+    # отказ каскада. При длительном сбое сторож переводит их напрямую через ENTRY.
+    check_minor 'прослушивание российского DoH' dns_resolves_a 127.0.0.1 yandex.ru {{ entry_dns_ru_port | int }}
+{% else %}
     check 'прослушивание российского DoH' dns_resolves_a 127.0.0.1 yandex.ru {{ entry_dns_ru_port | int }}
+{% endif %}
     check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked {{ entry_ru_mark | quote }}
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" != proxy ]]; then

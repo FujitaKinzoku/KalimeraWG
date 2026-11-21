@@ -40,6 +40,10 @@ managed_files() {
 {{ awg_self_heal_path | default('/usr/local/sbin/self-heal') }}
 /etc/systemd/system/awg-self-heal.service
 /etc/systemd/system/awg-self-heal.timer
+/usr/local/sbin/kalimera-reboot-guard
+{{ kalimera_weekly_path | default('/usr/local/libexec/kalimera-weekly') }}
+/etc/systemd/system/kalimera-weekly.service
+/etc/systemd/system/kalimera-weekly.timer
 {% if runtime_secrets_enabled | default(false) | bool %}
 {{ runtime_secrets_ctl_path }}
 {{ runtime_secrets_export_path | default('/usr/local/libexec/kalimera-share-export') }}

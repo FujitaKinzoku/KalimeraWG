@@ -13,7 +13,10 @@ export DEBIAN_FRONTEND=noninteractive
 
 exec 9>/run/awg-apt-maintenance.lock
 flock -w 600 9 || { echo 'Другое обслуживание пакетов не завершилось за 10 минут.' >&2; exit 75; }
-awg_full_upgrade
+awg_full_upgrade || {
+    printf 'Обновление не выполнено: %s\n' "${awg_apt_error:-причина в выводе apt выше}" >&2
+    exit 1
+}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 /usr/local/sbin/awg-kernel-guard
 {% endif %}
@@ -30,5 +33,10 @@ printf '%s\n' \
 printf '%s\n' \
   'Xray-core обновляется с управляющего ENTRY: kalimera-deploy --resume --update-xray'
 {% endif %}
+{% if awg_auto_reboot_enabled | default(true) | bool %}
 [[ ! -e /var/run/reboot-required ]] ||
-  echo 'Требуется перезагрузка; автоматически она не выполняется: sudo reboot (серверы одного каскада по очереди).'
+  echo 'Требуется перезагрузка: её выполнит автоматическая перезагрузка каскада в еженедельное окно; сейчас - на ENTRY: cascade-reboot --yes'
+{% else %}
+[[ ! -e /var/run/reboot-required ]] ||
+  echo 'Требуется перезагрузка; автоматически она не выполняется. На ENTRY: cascade-reboot --yes (серверы по очереди с проверкой).'
+{% endif %}

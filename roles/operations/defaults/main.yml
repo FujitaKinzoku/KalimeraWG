@@ -27,6 +27,27 @@ kalimera_updates_state_dir: /run/kalimera-updates
 kalimera_updates_apt_lock_path: /run/awg-apt-maintenance.lock
 kalimera_updates_calendar: "*-*-* 06:10:00"
 kalimera_updates_xray_releases_api: https://api.github.com/repos/XTLS/Xray-core/releases/latest
+# Работа без присмотра. Раз в неделю ENTRY отправляет сводку в Telegram и, если
+# после обновления нужна перезагрузка, перезагружает серверы каскада по одному
+# (FRONT, EXIT, ENTRY) с проверкой после каждого.
+#   awg_weekly_day            - день недели ночного обслуживания, после которого
+#                               открывается окно (Mon, Tue, Wed, Thu, Fri, Sat, Sun);
+#   awg_weekly_offset_minutes - через сколько минут после начала обслуживания;
+#   awg_weekly_calendar       - готовое выражение systemd вместо двух предыдущих.
+awg_weekly_day: Sun
+awg_weekly_offset_minutes: 90
+awg_weekly_calendar: ""
+kalimera_weekly_path: /usr/local/libexec/kalimera-weekly
+kalimera_controller_venv_path: /root/.local/share/awg-iac/controller-venv
+# Автоматическая перезагрузка: false - перезагрузка остаётся за администратором
+# (cascade-reboot --yes), сводка продолжает приходить.
+awg_auto_reboot_enabled: true
+awg_auto_reboot_state_dir: /var/lib/kalimera/cascade-reboot
+# Не чаще одного раза за столько дней.
+awg_auto_reboot_min_interval_days: 6
+# Новое ядро выдерживается столько часов после установки: ошибку в свежем ядре
+# Ubuntu обычно находят и исправляют за несколько дней.
+awg_auto_reboot_kernel_min_age_hours: 72
 awg_domain_policy_dir: /etc/awg/domain-policy
 awg_client_output_dir: /root/awg-client-configs
 entry_ru_proxy_capability_path: /usr/local/sbin/ru-proxy-capability

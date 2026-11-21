@@ -19,7 +19,7 @@ readonly cdn_enabled={{ 'true' if (cascade_check_cdn_enabled | bool) else 'false
 readonly cdn_domain={{ cascade_check_cdn_domain | quote }}
 
 {% raw %}
-usage() { echo 'Использование: cascade-check'; }
+usage() { echo 'Использование: cascade-check [--tsv]'; }
 
 work=''
 rows_file=''
@@ -476,7 +476,15 @@ build_summary() {
     local ok warn fail worst reach
     local total_ok=0 total_warn=0 total_fail=0
     local dns_total=0 dns_passed=0 dns_worst=OK
-    local -A heal_text=() heal_status=()
+    local -A heal_text=() heal_status=() update_seen=()
+    local heal_window='' heal_worst=OK heal_known=0 update_lines=0
+    local heal_failures=0 heal_repaired=0 heal_cleared=0 heal_open=0
+    # Счёт самовосстановления в строке сервера: «за 7 дней сбоев 2, восстановлено 1,
+    # прошло без действия службы 1, не восстановлено 1».
+    local re_window='^самовосстановление: (за [^,]+) сбоев'
+    local re_counts='сбоев ([0-9]+), восстановлено ([0-9]+)'
+    local re_cleared='прошло без действия службы ([0-9]+)'
+    local re_open='не восстановлено ([0-9]+)'
 
     for section in ENTRY EXIT FRONT LINK CDN DNS; do
         ok="${counts[$section:OK]:-0}"
@@ -526,7 +534,7 @@ build_summary() {
         sum_add "$(status_color "$worst")" "$section: OK $ok · WARN $warn · FAIL $fail · $reach"
     done
 
-    # Самовосстановление по серверам: сколько было сбоев за сутки и сколько из
+    # Самовосстановление по серверам: сколько было сбоев за неделю и сколько из
     # них восстановлено. Неустранённая ошибка называется здесь же вместе с причиной.
     sum_head 'САМОВОССТАНОВЛЕНИЕ'
     while IFS= read -r line; do
@@ -534,10 +542,28 @@ build_summary() {
         [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
         [[ "$label" == самовосстановление* ]] || continue
         if [[ "$label" == 'самовосстановление: '* ]]; then
-            # Итог за сутки; значение при OK - перечень восстановленного, он уже
+            # Итог за период; значение при OK - перечень восстановленного, он уже
             # есть в разделе сервера, при WARN - неустранённые ошибки.
             text="${label#самовосстановление: } · статус $status"
             [[ "$status" == OK || -z "$value" ]] || text+=": $value"
+            # Сумма по каскаду для группы «ИТОГ».
+            if [[ "$label" =~ $re_window ]]; then
+                heal_window="${BASH_REMATCH[1]}"
+                heal_known=$((heal_known + 1))
+            fi
+            if [[ "$label" =~ $re_counts ]]; then
+                heal_failures=$((heal_failures + BASH_REMATCH[1]))
+                heal_repaired=$((heal_repaired + BASH_REMATCH[2]))
+            fi
+            if [[ "$label" =~ $re_cleared ]]; then
+                heal_cleared=$((heal_cleared + BASH_REMATCH[1]))
+            fi
+            if [[ "$label" =~ $re_open ]]; then
+                heal_open=$((heal_open + BASH_REMATCH[1]))
+            fi
+            if [[ "$status" == FAIL || ( "$status" == WARN && "$heal_worst" == OK ) ]]; then
+                heal_worst="$status"
+            fi
         else
             # Служба приостановлена или выключена администратором.
             text="${label#самовосстановление}"
@@ -619,8 +645,37 @@ build_summary() {
         sum_add "$(status_color "$dns_worst")" "статус DNS: $dns_worst ($dns_passed из $dns_total)"
     fi
 
+    # Новые версии AmneziaWG и Xray: не ошибка, а напоминание. Одно обновление,
+    # найденное на двух серверах (AmneziaWG на ENTRY и EXIT), печатается один раз.
+    sum_head 'ОБНОВЛЕНИЯ'
+    while IFS= read -r line; do
+        split_row "$line"
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$label" == 'обновление компонента: '* ]] || continue
+        text="${label#обновление компонента: }"
+        [[ -z "${update_seen[$text]+set}" ]] || continue
+        update_seen[$text]=1
+        update_lines=$((update_lines + 1))
+        [[ -z "$value" ]] || text+=" → $value"
+        sum_add "$c_info" "$text"
+    done <"$rows_file"
+    if (( update_lines == 0 )); then
+        sum_add "$c_ok" 'новых версий AmneziaWG и Xray нет'
+    fi
+
     sum_head 'ИТОГ'
     sum_add "$(status_color "$sum_verdict")" "ИТОГ: OK $total_ok · WARN $total_warn · FAIL $total_fail"
+    # Самовосстановление по всему каскаду: сумма строк серверов из группы выше.
+    if (( heal_known == 0 )); then
+        sum_add "$c_info" 'самовосстановление: сведений нет'
+    elif (( heal_failures == 0 )); then
+        sum_add "$c_ok" "самовосстановление $heal_window: сбоев не было · статус OK"
+    else
+        text="самовосстановление $heal_window: сбоев $heal_failures, восстановлено $heal_repaired"
+        (( heal_cleared == 0 )) || text+=", прошло без действия службы $heal_cleared"
+        (( heal_open == 0 )) || text+=", не восстановлено $heal_open"
+        sum_add "$(status_color "$heal_worst")" "$text · статус $heal_worst"
+    fi
 }
 
 # Печать сводки. В терминале - рамка цветом итога с группами; без терминала -
@@ -694,9 +749,23 @@ render() {
     print_summary
 }
 
+# Строки отчёта без оформления: для еженедельной сводки и автоматической
+# перезагрузки, которым нужен статус каждой проверки, а не текст для терминала.
+# Код возврата тот же: 0 - всё в порядке, 3 - есть замечания, 1 - ошибки.
+print_rows() {
+    cat "$rows_file"
+    if grep -q $'^[^\t]*\tFAIL\t' "$rows_file"; then
+        exit_code=1
+    elif grep -q $'^[^\t]*\tWARN\t' "$rows_file"; then
+        exit_code=3
+    fi
+}
+
 main() {
+    local tsv=false
     case "${1:-}" in
         '') [[ $# -eq 0 ]] || { usage >&2; exit 2; } ;;
+        --tsv) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; tsv=true ;;
         --help|-h) [[ $# -eq 1 ]] || { usage >&2; exit 2; }; usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
@@ -715,7 +784,11 @@ main() {
     if [[ "$front_present" == true ]]; then
         collect_remote FRONT "$front_host" "$front_port"
     fi
-    render
+    if [[ "$tsv" == true ]]; then
+        print_rows
+    else
+        render
+    fi
     exit "$exit_code"
 }
 

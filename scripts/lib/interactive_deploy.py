@@ -26,6 +26,7 @@ import time
 import urllib.request
 import zoneinfo
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 from ansible.parsing.vault import VaultLib, VaultSecret
@@ -3831,10 +3832,39 @@ def cascade_verify_script() -> str:
         set -u
         sleep 120
         mkdir -p {CASCADE_VERIFY_DIR}
+        # Туннели и хранилище секретов поднимаются не сразу: проверка повторяется,
+        # пока не пройдёт, но не дольше десяти минут.
+        deadline=$(( $(date +%s) + 600 ))
+        while :; do
+            {CASCADE_CHECK_PATH} > {CASCADE_VERIFY_DIR}/last-verify.tmp 2>&1
+            rc=$?
+            if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || [ "$(date +%s)" -ge "$deadline" ]; then
+                break
+            fi
+            sleep 30
+        done
         {{
-            {CASCADE_CHECK_PATH}
-            echo "rc=$?"
-        }} > {CASCADE_VERIFY_DIR}/last-verify.txt 2>&1
+            cat {CASCADE_VERIFY_DIR}/last-verify.tmp
+            echo "rc=$rc"
+        }} > {CASCADE_VERIFY_DIR}/last-verify.txt
+        rm -f {CASCADE_VERIFY_DIR}/last-verify.tmp
+        # Перезагрузку начала автоматика: она сообщает итог, а после неудачи
+        # останавливается до команды cascade-reboot auto on.
+        if [ -e {AUTO_PENDING_FILE} ]; then
+            rm -f {AUTO_PENDING_FILE}
+            now="$(date -u '+%Y-%m-%d %H:%M UTC')"
+            if [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]; then
+                printf '%s\\n' "$now: выполнена, каскад исправен" > {AUTO_STATUS_FILE}
+                {TELEGRAM_NOTIFIER_PATH} --notify "AWG ENTRY: автоматическая перезагрузка каскада завершена; каскад исправен" >/dev/null 2>&1 || true
+            else
+                reason="после перезагрузки ENTRY каскад не прошёл проверку: cascade-check"
+                printf '%s\\n' "$now: $reason" > {AUTO_BLOCK_FILE}
+                printf '%s\\n' "$now: остановлена - $reason" > {AUTO_STATUS_FILE}
+                {TELEGRAM_NOTIFIER_PATH} --notify "AWG ENTRY: автоматическая перезагрузка каскада остановлена
+        $reason
+        Возобновить после устранения причины: cascade-reboot auto on" >/dev/null 2>&1 || true
+            fi
+        fi
         systemctl disable {CASCADE_VERIFY_UNIT}.service >/dev/null 2>&1 || true
         exit 0
         """
@@ -3852,8 +3882,9 @@ def cascade_verify_unit() -> str:
         [Service]
         Type=oneshot
         # По умолчанию systemd снимает oneshot через 90 с, а проверка после загрузки
-        # ждёт 120 с и идёт дольше: без этого она всегда обрывалась до записи результата.
-        TimeoutStartSec=900
+        # ждёт 120 с и повторяется до десяти минут: без этого она всегда обрывалась
+        # до записи результата.
+        TimeoutStartSec=1800
         ExecStart={CASCADE_VERIFY_SCRIPT}
 
         [Install]
@@ -3897,18 +3928,20 @@ def ansible_adhoc(
     module_args: str,
     *,
     become: bool = False,
+    oneline: bool = True,
+    timeout: int = ADHOC_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str] | None:
     """Короткая команда Ansible на группе с ограничением по времени.
 
     Модуль reboot ждёт сервер внутри Ansible и мог зависнуть без сообщения. Здесь
     каждый вызов ограничен по времени: при отсутствии ответа возвращается None.
+    oneline=False оставляет вывод команды построчным, с табуляциями как есть.
     """
     argv = [
         require_command("ansible"),
         "-i",
         str(hosts_path),
         group,
-        "-o",
         "-m",
         module,
         "-a",
@@ -3916,6 +3949,8 @@ def ansible_adhoc(
         "--vault-password-file",
         str(vault_password),
     ]
+    if oneline:
+        argv.insert(4, "-o")
     if become:
         argv.append("-b")
     try:
@@ -3924,7 +3959,7 @@ def ansible_adhoc(
             capture_output=True,
             text=True,
             check=False,
-            timeout=ADHOC_TIMEOUT_SECONDS,
+            timeout=timeout,
             cwd=str(repo),
         )
     except subprocess.TimeoutExpired:
@@ -4023,6 +4058,137 @@ def status_line(level: str, text: str) -> None:
     print(prefix + text)
 
 
+REBOOT_GUARD_PATH = Path("/usr/local/sbin/kalimera-reboot-guard")
+TELEGRAM_NOTIFIER_PATH = Path("/usr/local/sbin/awg-telegram-monitor")
+# Подготовка к перезагрузке может собирать модуль AmneziaWG под новое ядро.
+GUARD_TIMEOUT_SECONDS = 900
+GUARD_ROW_RE = re.compile(r"^(NEED|OK|FAIL|WAIT|HOLD)\t([^\t]*)(?:\t(.*))?$")
+# Состояние автоматической перезагрузки. Каталог постоянный: отметки должны
+# пережить перезагрузку ENTRY, которой автоматика и управляет.
+AUTO_BLOCK_FILE = CASCADE_VERIFY_DIR / "auto-blocked"
+AUTO_OFF_FILE = CASCADE_VERIFY_DIR / "auto-off"
+AUTO_LAST_FILE = CASCADE_VERIFY_DIR / "auto-last"
+AUTO_PENDING_FILE = CASCADE_VERIFY_DIR / "auto-pending"
+AUTO_STATUS_FILE = CASCADE_VERIFY_DIR / "auto-status"
+WEEKLY_TIMER = "kalimera-weekly.timer"
+DEFAULT_AUTO_REBOOT_INTERVAL_DAYS = 6
+GUARD_WAIT_ATTEMPTS = 20
+GUARD_WAIT_SECONDS = 120
+SERVER_NAMES = {"entry": "ENTRY", "exit": "EXIT", "front": "FRONT"}
+
+
+class GuardReport(NamedTuple):
+    """Ответ kalimera-reboot-guard одного сервера.
+
+    rows - строки (статус, проверка, подробности): FAIL - сервер может не
+    подняться, WAIT - идёт установка пакетов или deploy, HOLD - правило только
+    для автоматической перезагрузки.
+    """
+
+    group: str
+    answered: bool
+    need: bool = False
+    need_reason: str = ""
+    rows: tuple[tuple[str, str, str], ...] = ()
+
+    def problems(self, *statuses: str) -> list[str]:
+        return [
+            f"{label}: {detail}" if detail else label
+            for status, label, detail in self.rows
+            if status in statuses
+        ]
+
+
+def parse_guard_output(group: str, output: str) -> GuardReport:
+    """Разобрать вывод kalimera-reboot-guard; посторонние строки Ansible пропускаются."""
+    rows: list[tuple[str, str, str]] = []
+    need: bool | None = None
+    need_reason = ""
+    for line in output.splitlines():
+        match = GUARD_ROW_RE.match(line)
+        if not match:
+            continue
+        status, label, detail = match.group(1), match.group(2), match.group(3) or ""
+        if status == "NEED":
+            need = label == "yes"
+            need_reason = detail
+        else:
+            rows.append((status, label, detail))
+    if need is None:
+        # Без строки NEED это не ответ предохранителей: программа не установлена
+        # или сервер не выполнил команду.
+        return GuardReport(group, answered=False)
+    return GuardReport(group, True, need, need_reason, tuple(rows))
+
+
+def run_reboot_guard(
+    repo: Path, hosts_path: Path, vault_password: Path, group: str, mode: str
+) -> GuardReport:
+    """Предохранители перезагрузки на сервере group: check или prepare."""
+    if group == "entry":
+        if not REBOOT_GUARD_PATH.is_file():
+            return GuardReport(group, answered=False)
+        try:
+            result = subprocess.run(
+                [str(REBOOT_GUARD_PATH), mode],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GUARD_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return GuardReport(group, answered=False)
+        return parse_guard_output(group, result.stdout)
+    result = ansible_adhoc(
+        repo,
+        hosts_path,
+        vault_password,
+        group,
+        "command",
+        f"{REBOOT_GUARD_PATH} {mode}",
+        become=True,
+        oneline=False,
+        timeout=GUARD_TIMEOUT_SECONDS,
+    )
+    if result is None:
+        return GuardReport(group, answered=False)
+    return parse_guard_output(group, result.stdout)
+
+
+def guard_blockers(report: GuardReport, *, automatic: bool) -> list[str]:
+    """Причины, по которым сервер нельзя перезагружать.
+
+    Правила HOLD (свежее ядро, недавняя загрузка) относятся только к
+    автоматической перезагрузке: человек, запустивший её сам, уже принял решение.
+    """
+    if not report.answered:
+        return ["предохранители перезагрузки не ответили; на ENTRY: kalimera-deploy --resume"]
+    if automatic:
+        return report.problems("FAIL", "WAIT", "HOLD")
+    return report.problems("FAIL", "WAIT")
+
+
+def utc_now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+
+
+def telegram_notify(text: str) -> bool:
+    """Отправить готовое сообщение через Telegram-монитор сервера; False - не доставлено."""
+    if not TELEGRAM_NOTIFIER_PATH.is_file():
+        return False
+    try:
+        result = subprocess.run(
+            [str(TELEGRAM_NOTIFIER_PATH), "--notify", text],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=90,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def run_cascade_reboot(
     repo: Path, production: Path, vault_password: Path, *, confirmed: bool, force: bool = False
 ) -> None:
@@ -4070,6 +4236,28 @@ def run_cascade_reboot(
             "адрес ENTRY в правилах доступа. На этом сервере проверьте: "
             "sudo fail2ban-client status sshd; sudo ufw status numbered"
         )
+    # Предохранители: сервер не перезагружается, если может не подняться после
+    # этого (ядро установлено не целиком, нет модуля AmneziaWG, не откроется
+    # хранилище секретов) или если на нём идёт установка пакетов.
+    unsafe: list[str] = []
+    for group in plan:
+        report = run_reboot_guard(repo, hosts_path, vault_password, group, "check")
+        problems = guard_blockers(report, automatic=False)
+        for problem in problems:
+            status_line("FAIL", f"{group}: {problem}")
+        if problems:
+            unsafe.append(group)
+            continue
+        need = "перезагрузка требуется" if report.need else "перезагрузка не требуется"
+        status_line("OK", f"{group}: предохранители пройдены, {need}")
+        for note in report.problems("HOLD"):
+            print(f"     {group}: автоматическая перезагрузка отложена - {note}")
+    if unsafe and not force:
+        fail(
+            f"Перезагрузка не начата: {', '.join(unsafe)} может не подняться после неё "
+            "(причины выше). Ничего не перезагружено. Перезагрузить несмотря на это: "
+            "cascade-reboot --yes --force"
+        )
     if not confirmed:
         status_line("OK", "перезагрузка возможна: все серверы отвечают")
         print("Перезагрузка не выполнена. Для запуска выполните: cascade-reboot --yes")
@@ -4077,6 +4265,16 @@ def run_cascade_reboot(
     for group in plan[:-1]:
         print(f"Перезагрузка: {group}")
         boot_before = boot_ids[group]
+        # Перед самой перезагрузкой: модуль AmneziaWG собирается под новое ядро,
+        # секреты сохраняются в зашифрованный пакет, проверка повторяется.
+        problems = guard_blockers(
+            run_reboot_guard(repo, hosts_path, vault_password, group, "prepare"), automatic=False
+        )
+        if problems and not force:
+            fail(
+                f"{group} не перезагружен: подготовка не пройдена ({'; '.join(problems)}). "
+                "Остальные серверы не перезагружались."
+            )
         if not schedule_host_reboot(repo, hosts_path, vault_password, group):
             fail(
                 f"Не удалось запланировать перезагрузку {group}. Остальные серверы не перезагружались."
@@ -4095,20 +4293,399 @@ def run_cascade_reboot(
                 "серверы не перезагружались. Чтобы продолжить несмотря на ошибки: cascade-reboot --yes --force"
             )
         print(f"ВНИМАНИЕ: после {group} остались ошибки (выше). Продолжаю, потому что указан --force")
+    problems = guard_blockers(
+        run_reboot_guard(repo, hosts_path, vault_password, "entry", "prepare"), automatic=False
+    )
+    if problems and not force:
+        fail(f"ENTRY не перезагружен: подготовка не пройдена ({'; '.join(problems)}).")
     print("ENTRY перезагрузится через 15 секунд. Результат проверки после загрузки: cascade-reboot status")
     schedule_entry_reboot()
 
 
-def cascade_reboot_status() -> None:
+class AutoRebootSettings(NamedTuple):
+    enabled: bool = True
+    min_interval_days: int = DEFAULT_AUTO_REBOOT_INTERVAL_DAYS
+
+
+def auto_reboot_settings(production: Path) -> AutoRebootSettings:
+    all_path = production / "group_vars" / "all" / "main.yml"
+    all_vars = load_yaml(all_path) if all_path.is_file() else {}
+    try:
+        interval = int(all_vars.get("awg_auto_reboot_min_interval_days", DEFAULT_AUTO_REBOOT_INTERVAL_DAYS))
+    except (TypeError, ValueError):
+        interval = DEFAULT_AUTO_REBOOT_INTERVAL_DAYS
+    return AutoRebootSettings(
+        enabled=bool(all_vars.get("awg_auto_reboot_enabled", True)), min_interval_days=max(interval, 0)
+    )
+
+
+class AutoRebootDecision(NamedTuple):
+    """Решение автоматики: reboot, none (не требуется), deferred, blocked или disabled."""
+
+    action: str
+    reason: str = ""
+    groups: tuple[str, ...] = ()
+
+    def line(self) -> str:
+        names = ", ".join(SERVER_NAMES.get(group, group) for group in self.groups)
+        if self.action == "reboot":
+            return f"выполняется сейчас: {names}" + (f" ({self.reason})" if self.reason else "")
+        if self.action == "none":
+            return "не требуется"
+        if self.action == "blocked":
+            return f"остановлена после неудачи - {self.reason}; возобновить: cascade-reboot auto on"
+        if self.action == "disabled":
+            return self.reason
+        return f"требуется, отложена - {self.reason}"
+
+
+def read_cascade_rows() -> tuple[int, list[tuple[str, ...]]]:
+    """Строки cascade-check --tsv: (сегмент, статус, проверка, значение, рекомендация, мс)."""
+    if not CASCADE_CHECK_PATH.is_file():
+        return 1, []
+    try:
+        result = subprocess.run(
+            [str(CASCADE_CHECK_PATH), "--tsv"], capture_output=True, text=True, check=False, timeout=900
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, []
+    rows = [tuple(line.split("\t")) for line in result.stdout.splitlines() if line.count("\t") == 5]
+    return result.returncode, rows
+
+
+def cascade_failures(rows: list[tuple[str, ...]]) -> list[str]:
+    return [
+        f"{seg}: {label}" + (f": {value}" if value else "")
+        for seg, status, label, value, _hint, _ms in rows
+        if status == "FAIL"
+    ]
+
+
+CASCADE_CONFIRM_ATTEMPTS = 3
+CASCADE_CONFIRM_SECONDS = 90
+
+
+def read_confirmed_cascade_rows() -> tuple[int, list[tuple[str, ...]]]:
+    """Отчёт cascade-check, в котором ошибка подтверждена повторными запусками.
+
+    Одна проверка может не пройти разово (потерянный ответ DNS через прокси). По
+    единственному запуску автоматика отложила бы перезагрузку на неделю, а
+    сводка сообщила бы «работа каскада нарушена» при исправном каскаде.
+    """
+    code, rows = read_cascade_rows()
+    for _ in range(CASCADE_CONFIRM_ATTEMPTS - 1):
+        if rows and not cascade_failures(rows):
+            break
+        time.sleep(CASCADE_CONFIRM_SECONDS)
+        code, rows = read_cascade_rows()
+    return code, rows
+
+
+def write_auto_state(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def decide_auto_reboot(
+    repo: Path,
+    hosts_path: Path,
+    vault_password: Path,
+    plan: list[str],
+    settings: AutoRebootSettings,
+    cascade_rows: list[tuple[str, ...]],
+    *,
+    now: float | None = None,
+) -> AutoRebootDecision:
+    """Нужна ли автоматическая перезагрузка и можно ли выполнить её сейчас.
+
+    Перезагрузка начинается, только если на каждом перезагружаемом сервере
+    пройдены все предохранители и в отчёте cascade-check нет ошибок: исправный
+    каскад не должен стать неисправным из-за планового обновления.
+    """
+    now = time.time() if now is None else now
+    if not settings.enabled:
+        return AutoRebootDecision("disabled", "автоматическая перезагрузка выключена в настройках каскада")
+    if AUTO_OFF_FILE.exists():
+        return AutoRebootDecision("disabled", "автоматическая перезагрузка выключена командой cascade-reboot auto off")
+    if AUTO_BLOCK_FILE.exists():
+        reason = AUTO_BLOCK_FILE.read_text(encoding="utf-8").strip().splitlines()
+        return AutoRebootDecision("blocked", reason[0] if reason else "причина не записана")
+
+    reports: dict[str, GuardReport] = {}
+    for attempt in range(1, GUARD_WAIT_ATTEMPTS + 1):
+        reports = {
+            group: run_reboot_guard(repo, hosts_path, vault_password, group, "check") for group in plan
+        }
+        waiting = any(report.problems("WAIT") for report in reports.values())
+        if not waiting or attempt == GUARD_WAIT_ATTEMPTS:
+            break
+        # Идёт ночное обслуживание или обновление списков пакетов: это минуты.
+        time.sleep(GUARD_WAIT_SECONDS)
+
+    silent = [SERVER_NAMES.get(group, group) for group in plan if not reports[group].answered]
+    if silent:
+        return AutoRebootDecision("deferred", f"предохранители не ответили: {', '.join(silent)}")
+    needed = tuple(group for group in plan if reports[group].need)
+    if not needed:
+        return AutoRebootDecision("none")
+    try:
+        last = float(AUTO_LAST_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        last = 0.0
+    days_since = (now - last) / 86400
+    if last > 0 and 0 <= days_since < settings.min_interval_days:
+        return AutoRebootDecision(
+            "deferred",
+            f"предыдущая автоматическая перезагрузка была {int(days_since)} дн. назад, "
+            f"интервал {settings.min_interval_days} дн.",
+            needed,
+        )
+    blockers = [
+        f"{SERVER_NAMES.get(group, group)}: {problem}"
+        for group in needed
+        for problem in guard_blockers(reports[group], automatic=True)
+    ]
+    if blockers:
+        return AutoRebootDecision("deferred", "; ".join(blockers), needed)
+    failures = cascade_failures(cascade_rows)
+    if failures:
+        return AutoRebootDecision(
+            "deferred", "в отчёте cascade-check есть ошибки: " + "; ".join(failures[:4]), needed
+        )
+    reasons = sorted({reports[group].need_reason for group in needed if reports[group].need_reason})
+    return AutoRebootDecision("reboot", "; ".join(reasons)[:200], needed)
+
+
+def weekly_digest(rows: list[tuple[str, ...]], reboot_line: str) -> str:
+    """Еженедельная сводка для Telegram по строкам cascade-check.
+
+    Сводка приходит и тогда, когда всё исправно: молчание исправного каскада
+    иначе не отличить от сломанной доставки уведомлений.
+    """
+    counts = {"OK": 0, "WARN": 0, "FAIL": 0}
+    problems: list[str] = []
+    healing: list[str] = []
+    updates: list[str] = []
+    for seg, status, label, value, _hint, _ms in rows:
+        if status in counts:
+            counts[status] += 1
+        if label.startswith("самовосстановление: "):
+            text = label.removeprefix("самовосстановление: ")
+            if status != "OK" and value:
+                text += f" - {value}"
+            healing.append(f"  {seg}: {text}")
+        elif label.startswith("обновление компонента: "):
+            text = label.removeprefix("обновление компонента: ") + (f" → {value}" if value else "")
+            if text not in updates:
+                updates.append(text)
+        elif status in ("WARN", "FAIL"):
+            problems.append(f"  {status} {seg}: {label}" + (f": {value}" if value else ""))
+    if not rows:
+        verdict = "отчёт cascade-check не получен"
+    elif counts["FAIL"]:
+        verdict = "работа каскада нарушена"
+    elif counts["WARN"]:
+        verdict = "каскад работает, есть замечания"
+    else:
+        verdict = "все проверки пройдены"
+    lines = [
+        "AWG ENTRY: еженедельная сводка каскада",
+        f"Состояние: {verdict} (OK {counts['OK']} · WARN {counts['WARN']} · FAIL {counts['FAIL']})",
+    ]
+    lines += problems[:8]
+    if len(problems) > 8:
+        lines.append(f"  … и ещё замечаний: {len(problems) - 8}; подробности: cascade-check")
+    lines.append("Самовосстановление:")
+    lines += healing or ["  сведений нет"]
+    lines.append("Обновления компонентов: " + ("нет" if not updates else ""))
+    lines += [f"  {text}" for text in updates]
+    lines.append(f"Перезагрузка: {reboot_line}")
+    return "\n".join(lines)
+
+
+def block_auto_reboot(reason: str) -> None:
+    """Остановить автоматическую перезагрузку до команды cascade-reboot auto on.
+
+    После неудачи автоматика не повторяет попытку сама: сервер, не вернувшийся
+    после перезагрузки, требует человека, а повтор мог бы вывести из строя и
+    остальные серверы.
+    """
+    write_auto_state(AUTO_BLOCK_FILE, f"{utc_now_text()}: {reason}")
+    write_auto_state(AUTO_STATUS_FILE, f"{utc_now_text()}: остановлена - {reason}")
+    telegram_notify(
+        "AWG ENTRY: автоматическая перезагрузка каскада остановлена\n"
+        f"{reason}\n"
+        "Остальные серверы не перезагружались. Возобновить после устранения причины: "
+        "cascade-reboot auto on"
+    )
+    print(f"Автоматическая перезагрузка остановлена: {reason}")
+
+
+def execute_auto_reboot(
+    repo: Path, hosts_path: Path, vault_password: Path, groups: tuple[str, ...]
+) -> None:
+    """Перезагрузить серверы по одному; остановиться на первой неудаче."""
+    write_auto_state(AUTO_LAST_FILE, str(int(time.time())))
+    done: list[str] = []
+    for group in groups:
+        name = SERVER_NAMES.get(group, group)
+        problems = guard_blockers(
+            run_reboot_guard(repo, hosts_path, vault_password, group, "prepare"), automatic=True
+        )
+        if problems:
+            # Сервер ещё не тронут: это отсрочка, а не неудача перезагрузки.
+            reason = f"{name}: подготовка не пройдена - {'; '.join(problems)}"
+            write_auto_state(AUTO_STATUS_FILE, f"{utc_now_text()}: отложена - {reason}")
+            telegram_notify(
+                "AWG ENTRY: автоматическая перезагрузка каскада отложена\n"
+                f"{reason}\n"
+                + (f"Перезагружены: {', '.join(done)}." if done else "Ни один сервер не перезагружался.")
+            )
+            print(f"Автоматическая перезагрузка отложена: {reason}")
+            return
+        if group == "entry":
+            write_auto_state(AUTO_PENDING_FILE, utc_now_text())
+            print("ENTRY перезагрузится через 15 секунд; итог придёт после проверки каскада.")
+            schedule_entry_reboot()
+            return
+        boot_before = read_boot_id(repo, hosts_path, vault_password, group)
+        if boot_before is None:
+            block_auto_reboot(f"{name} перестал отвечать перед перезагрузкой")
+            return
+        if not schedule_host_reboot(repo, hosts_path, vault_password, group):
+            block_auto_reboot(f"не удалось запланировать перезагрузку {name}")
+            return
+        if not wait_for_host_reboot(repo, hosts_path, vault_password, group, boot_before):
+            block_auto_reboot(f"{name} не вернулся после перезагрузки")
+            return
+        if not wait_for_cascade():
+            block_auto_reboot(f"после перезагрузки {name} каскад не прошёл проверку: cascade-check")
+            return
+        done.append(name)
+    write_auto_state(AUTO_STATUS_FILE, f"{utc_now_text()}: выполнена ({', '.join(done)}), каскад исправен")
+    telegram_notify(
+        f"AWG ENTRY: автоматическая перезагрузка каскада завершена ({', '.join(done)}); каскад исправен"
+    )
+
+
+def run_cascade_weekly(repo: Path, production: Path, vault_password: Path) -> None:
+    """Еженедельное окно ENTRY: сводка в Telegram и перезагрузка, если она нужна."""
+    hosts_path = production / "hosts.yml"
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not hosts_path.is_file() or not vault_path.is_file() or not vault_password.is_file():
+        fail("Не найден production inventory или внешний пароль Ansible Vault")
+    plan = cascade_reboot_plan(load_yaml(hosts_path))
+    settings = auto_reboot_settings(production)
+    _code, rows = read_confirmed_cascade_rows()
+    try:
+        decision = decide_auto_reboot(repo, hosts_path, vault_password, plan, settings, rows)
+    except SystemExit as error:
+        decision = AutoRebootDecision("deferred", f"проверка серверов прервана: {error}")
+    print(f"Перезагрузка: {decision.line()}")
+    if decision.action != "blocked":
+        write_auto_state(AUTO_STATUS_FILE, f"{utc_now_text()}: {decision.line()}")
+    telegram_notify(weekly_digest(rows, decision.line()))
+    if decision.action != "reboot":
+        return
+    try:
+        execute_auto_reboot(repo, hosts_path, vault_password, decision.groups)
+    except SystemExit as error:
+        # Прервано посреди перезагрузки: состояние неизвестно, повторять нельзя.
+        block_auto_reboot(f"перезагрузка прервана: {error}")
+
+
+def set_auto_reboot(enabled: bool) -> None:
+    """cascade-reboot auto on|off: включить автоматику (и снять остановку) или выключить."""
+    CASCADE_VERIFY_DIR.mkdir(parents=True, exist_ok=True)
+    if enabled:
+        AUTO_OFF_FILE.unlink(missing_ok=True)
+        AUTO_BLOCK_FILE.unlink(missing_ok=True)
+        write_auto_state(AUTO_STATUS_FILE, f"{utc_now_text()}: включена командой cascade-reboot auto on")
+        print("Автоматическая перезагрузка каскада включена. Состояние: cascade-reboot status")
+    else:
+        write_auto_state(AUTO_OFF_FILE, utc_now_text())
+        print("Автоматическая перезагрузка каскада выключена. Включить: cascade-reboot auto on")
+
+
+def auto_reboot_status_lines(production: Path) -> list[str]:
+    settings = auto_reboot_settings(production)
+    if not settings.enabled:
+        state = "выключена в настройках каскада (awg_auto_reboot_enabled: false)"
+    elif AUTO_OFF_FILE.exists():
+        state = "выключена командой cascade-reboot auto off; включить: cascade-reboot auto on"
+    elif AUTO_BLOCK_FILE.exists():
+        reason = AUTO_BLOCK_FILE.read_text(encoding="utf-8").strip()
+        state = f"остановлена после неудачи - {reason}; возобновить: cascade-reboot auto on"
+    else:
+        state = "включена"
+    lines = [f"Автоматическая перезагрузка: {state}"]
+    if AUTO_STATUS_FILE.is_file():
+        lines.append(f"Последнее решение: {AUTO_STATUS_FILE.read_text(encoding='utf-8').strip()}")
+    window = timer_property("NextElapseUSecRealtime")
+    if window:
+        # Время показано в часовом поясе сервера, расписание - в поясе ночного
+        # обслуживания: «воскресенье 03:50 Asia/Manila» - это ещё суббота по UTC.
+        schedule = re.search(r"OnCalendar=(.*?)\s*;", timer_property("TimersCalendar"))
+        lines.append(
+            f"Следующее еженедельное окно: {window}"
+            + (f" (расписание: {schedule.group(1)})" if schedule else "")
+        )
+    return lines
+
+
+def timer_property(name: str) -> str:
+    try:
+        return subprocess.run(
+            ["systemctl", "show", WEEKLY_TIMER, "-p", name, "--value"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        return ""
+
+
+def last_verify_lines(report: Path) -> list[str]:
+    """Итог проверки после последней перезагрузки ENTRY в несколько строк.
+
+    Раньше команда печатала отчёт cascade-check целиком: сотни строк, за которыми
+    не было видно состояния автоматики.
+    """
+    text = report.read_text(encoding="utf-8")
+    when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(report.stat().st_mtime))
+    code = re.search(r"^rc=(\d+)\s*$", text, flags=re.MULTILINE)
+    if code is None:
+        verdict = "итог не записан"
+    elif code.group(1) == "0":
+        verdict = "каскад исправен"
+    elif code.group(1) == "3":
+        verdict = "каскад работает, есть замечания"
+    else:
+        verdict = "каскад не прошёл проверку"
+    lines = [f"Проверка после последней перезагрузки ENTRY ({when}): {verdict}"]
+    lines += [f"  {problem}" for problem in cascade_problems(text)[:12]]
+    lines.append(f"Полный отчёт: sudo cat {report}")
+    return lines
+
+
+def cascade_reboot_status(production: Path | None = None) -> None:
+    if production is not None:
+        for line in auto_reboot_status_lines(production):
+            print(line)
     report = CASCADE_VERIFY_DIR / "last-verify.txt"
     if not report.is_file():
-        print("Результата проверки после перезагрузки ENTRY пока нет. Журнал проверки:")
-        subprocess.run(
-            ["journalctl", "-u", f"{CASCADE_VERIFY_UNIT}.service", "--no-pager", "-n", "40"],
-            check=False,
+        # Модуль проверки включён от перезагрузки ENTRY до записи результата.
+        pending = subprocess.run(
+            ["systemctl", "is-enabled", "--quiet", f"{CASCADE_VERIFY_UNIT}.service"], check=False
         )
+        if pending.returncode == 0:
+            print("Проверка после перезагрузки ENTRY ещё идёт: повторите cascade-reboot status через несколько минут.")
+        else:
+            print("Проверки после перезагрузки ENTRY нет: каскад ещё не перезагружался командой cascade-reboot.")
         return
-    print(report.read_text(encoding="utf-8"))
+    for line in last_verify_lines(report):
+        print(line)
 
 
 def main() -> None:
@@ -4231,6 +4808,16 @@ def main() -> None:
         help="показать результат проверки после перезагрузки ENTRY",
     )
     parser.add_argument(
+        "--cascade-reboot-auto",
+        choices=("on", "off"),
+        help="включить автоматическую перезагрузку каскада (и снять остановку после неудачи) или выключить",
+    )
+    parser.add_argument(
+        "--cascade-weekly",
+        action="store_true",
+        help="еженедельное окно: сводка в Telegram и автоматическая перезагрузка, если она нужна",
+    )
+    parser.add_argument(
         "--yes", action="store_true", help="подтвердить перезагрузку для --cascade-reboot"
     )
     parser.add_argument(
@@ -4340,6 +4927,8 @@ def main() -> None:
         args.maintenance_show,
         args.cascade_reboot,
         args.cascade_reboot_status,
+        args.cascade_reboot_auto,
+        args.cascade_weekly,
     ]
     if args.yes and not args.cascade_reboot:
         parser.error("--yes используется только вместе с --cascade-reboot")
@@ -4379,7 +4968,13 @@ def main() -> None:
         )
         return
     if args.cascade_reboot_status:
-        cascade_reboot_status()
+        cascade_reboot_status(production)
+        return
+    if args.cascade_reboot_auto:
+        set_auto_reboot(args.cascade_reboot_auto == "on")
+        return
+    if args.cascade_weekly:
+        run_cascade_weekly(repo, production, vault_password)
         return
     if args.summary:
         if not (production / "hosts.yml").is_file() or not (

@@ -243,6 +243,128 @@ class ProxySetResetTests(CommandCase):
 
 
 class TelegramMessageTests(CommandCase):
+    def script(self, *, configured: bool = True, **variables) -> Path:
+        """Мониторинг с подставными curl и server-audit; результат аудита - в audit.txt и audit.code."""
+        env_file = self.dir / "telegram.env"
+        if configured:
+            env_file.write_text(
+                "TELEGRAM_BOT_TOKEN=123456:test-token-value\nTELEGRAM_CHAT_ID=1\n", encoding="utf-8"
+            )
+        else:
+            env_file.unlink(missing_ok=True)
+        audit = self.dir / "server-audit"
+        audit.write_text(
+            "#!/usr/bin/env bash\n"
+            f"cat {shlex.quote(str(self.dir / 'audit.txt'))}\n"
+            f"exit \"$(cat {shlex.quote(str(self.dir / 'audit.code'))})\"\n",
+            encoding="utf-8",
+        )
+        audit.chmod(0o755)
+        curl = self.fakebin / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            f"[[ ! -e {shlex.quote(str(self.dir / 'curl-fails'))} ]] || exit 22\n"
+            'for argument in "$@"; do\n'
+            f'    [[ "$argument" != text=* ]] || printf \'%s\\n---\\n\' "${{argument#text=}}" >>{shlex.quote(str(self.dir / "sent.txt"))}\n'
+            "done\n",
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+        self.fake(self.fakebin / "sleep")
+        text = render(
+            "telegram-monitor.sh.j2",
+            awg_telegram_monitor_env_path=str(env_file),
+            awg_telegram_monitor_state_dir=str(self.dir / "state"),
+            awg_node_role="entry",
+            entry_ru_proxy_enabled=False,
+            awg_server_audit_path=str(audit),
+            **variables,
+        )
+        return self.install("awg-telegram-monitor", text)
+
+    def audit(self, output: str, code: int) -> None:
+        (self.dir / "audit.txt").write_text(output, encoding="utf-8")
+        (self.dir / "audit.code").write_text(f"{code}\n", encoding="utf-8")
+
+    def sent(self) -> list[str]:
+        path = self.dir / "sent.txt"
+        if not path.exists():
+            return []
+        return [part.strip("\n") for part in path.read_text(encoding="utf-8").split("\n---\n") if part.strip()]
+
+    def test_one_off_failure_raises_no_alarm(self) -> None:
+        # На рабочем каскаде проверка DNS через прокси не прошла один раз и через
+        # 20 секунд прошла. Тревога на каждый такой сбой обесценила бы уведомления.
+        script = self.script()
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        self.audit("FAIL прослушивание российского DoH\n", 1)
+        self.execute(script)
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        self.assertEqual(self.sent(), [])
+        self.assertFalse((self.dir / "state" / "failed-since").exists())
+        self.assertEqual((self.dir / "state" / "status").read_text(encoding="utf-8"), "healthy\n")
+
+    def test_lasting_failure_is_reported_once_and_then_the_recovery(self) -> None:
+        script = self.script()
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        self.audit("FAIL служба dnsmasq\n", 1)
+        self.execute(script)
+        self.assertEqual(self.sent(), [])
+        # Ошибка держится дольше срока, за который её устранило бы самовосстановление.
+        (self.dir / "state" / "failed-since").write_text("1000\n", encoding="utf-8")
+        self.execute(script)
+        self.execute(script)
+        self.assertEqual(self.sent(), ["AWG ENTRY: проверка состояния не пройдена\nFAIL служба dnsmasq"])
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        self.assertEqual(self.sent()[-1], "AWG ENTRY: состояние восстановлено")
+
+    def test_reboot_message_waits_for_the_services_to_start(self) -> None:
+        script = self.script()
+        state = self.dir / "state"
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        (state / "boot-id").write_text("previous-boot\n", encoding="utf-8")
+        # Первая проверка после загрузки: служба ещё не поднялась.
+        self.audit("FAIL служба sing-box\n", 1)
+        self.execute(script)
+        self.assertEqual(self.sent(), [])
+        self.audit("OK   UFW активен\n", 0)
+        self.execute(script)
+        self.assertEqual(self.sent(), ["AWG ENTRY: сервер перезапущен; состояние исправно"])
+
+    def test_label_marks_the_cascade_in_every_message(self) -> None:
+        script = self.script(awg_telegram_label="VK", awg_telegram_monitor_fail_delay=0)
+        self.audit("FAIL служба dnsmasq\n", 1)
+        self.execute(script)
+        self.assertEqual(self.sent(), ["[VK] AWG ENTRY: проверка состояния не пройдена\nFAIL служба dnsmasq"])
+        result = self.execute(script, "--notify", "AWG ENTRY: самовосстановление\nВосстановлено: служба dnsmasq")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sent()[-1], "[VK] AWG ENTRY: самовосстановление\nВосстановлено: служба dnsmasq")
+
+    def test_check_tells_delivery_from_failure_and_from_no_setup(self) -> None:
+        script = self.script()
+        self.assertEqual(self.execute(script, "--check").returncode, 0)
+        self.assertEqual(self.sent(), [])  # проверка ничего не отправляет
+        (self.dir / "curl-fails").write_text("", encoding="utf-8")
+        self.assertEqual(self.execute(script, "--check").returncode, 1)
+        # Код 3 - не настроено: отличается и от доставки, и от отказа API.
+        self.assertEqual(self.execute(self.script(configured=False), "--check").returncode, 3)
+
+    def test_ready_message_without_setup_is_not_counted_as_sent(self) -> None:
+        # Служба самовосстановления считала сообщение доставленным и не повторяла
+        # его, хотя Telegram не был настроен или хранилище секретов было закрыто.
+        script = self.script(configured=False)
+        result = self.execute(script, "--notify", "AWG ENTRY: самовосстановление не устранило ошибку")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(self.sent(), [])
+        # Плановый запуск без настройки по-прежнему тихо завершается.
+        self.assertEqual(self.execute(script).returncode, 0)
+
     def monitor(self, audit_output: str, audit_code: int) -> str:
         """Запустить мониторинг и вернуть текст, переданный в Telegram."""
         env_file = self.dir / "telegram.env"
@@ -271,6 +393,7 @@ class TelegramMessageTests(CommandCase):
             awg_node_role="entry",
             entry_ru_proxy_enabled=False,
             awg_server_audit_path=str(audit),
+            awg_telegram_monitor_fail_delay=0,
         )
         result = self.execute(self.install("awg-telegram-monitor", text))
         self.assertEqual(result.returncode, 0, result.stderr)

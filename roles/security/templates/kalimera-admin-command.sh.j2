@@ -43,7 +43,9 @@ case "$command_name" in
             '--yes') reboot_args=(--cascade-reboot --yes) ;;
             '--yes --force') reboot_args=(--cascade-reboot --yes --force) ;;
             'status') reboot_args=(--cascade-reboot-status) ;;
-            *) echo 'Разрешено: cascade-reboot, cascade-reboot --yes, cascade-reboot --yes --force, cascade-reboot status' >&2; exit 2 ;;
+            'auto on') reboot_args=(--cascade-reboot-auto on) ;;
+            'auto off') reboot_args=(--cascade-reboot-auto off) ;;
+            *) echo 'Разрешено: cascade-reboot, cascade-reboot --yes, cascade-reboot --yes --force, cascade-reboot status, cascade-reboot auto on, cascade-reboot auto off' >&2; exit 2 ;;
         esac
         [[ -x {{ (security_controller_repo_path ~ '/deploy') | quote }} ]] || {
             echo 'Управляющий репозиторий не найден.' >&2
