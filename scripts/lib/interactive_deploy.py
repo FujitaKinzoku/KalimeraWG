@@ -21,6 +21,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.request
@@ -33,6 +34,11 @@ from ansible.parsing.vault import VaultLib, VaultSecret
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+# Соседний модуль: программа запускается как файл, а тесты загружают её по пути,
+# поэтому каталог добавляется в путь поиска явно.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import controller_backup  # noqa: E402
 
 
 def fail(message: str) -> None:
@@ -4688,6 +4694,330 @@ def cascade_reboot_status(production: Path | None = None) -> None:
         print(line)
 
 
+# Резервная копия контроллера. ENTRY - единственное место, где лежат inventory,
+# пароль Vault, ключ оркестратора и состояние клиентов: после потери сервера
+# каскад пришлось бы ставить заново и перевыпускать всех клиентов. Зашифрованная
+# копия хранится на EXIT и FRONT; ключ восстановления знают ENTRY и владелец.
+CONTROLLER_BACKUP_DIR = Path("/var/lib/kalimera/controller-backup")
+CONTROLLER_BACKUP_NAME = "controller.kbk"
+CONTROLLER_BACKUP_STATUS = CONTROLLER_BACKUP_DIR / "status"
+# Ключ лежит в каталоге, который целиком входит в зашифрованное хранилище
+# секретов ENTRY: на диске в открытом виде его нет.
+CONTROLLER_BACKUP_KEY = Path("/etc/awg/controller-backup.key")
+CONTROLLER_BACKUP_PEERS = ("exit", "front")
+# Неизменившаяся копия отправляется заново раз в столько секунд: так обнаруживается
+# сервер, на котором файл пропал.
+CONTROLLER_BACKUP_REFRESH_SECONDS = 6 * 86400
+# Файл для отправки на серверы собирается в tmpfs и удаляется сразу после отправки.
+CONTROLLER_BACKUP_STAGING_DIR = Path("/run")
+CONTROLLER_BACKUP_PUSH_TIMEOUT_SECONDS = 300
+RUNTIME_SECRETS_CONFIG = Path("/etc/kalimera-secrets/config.json")
+SECRETCTL_PATH = Path("/usr/local/sbin/kalimera-secretctl")
+
+
+def local_controller(hosts_document: dict) -> bool:
+    """ENTRY сам управляет каскадом: установщик работает на нём."""
+    hosts = hosts_document.get("all", {}).get("children", {}).get("entry", {}).get("hosts", {})
+    return any(
+        isinstance(values, dict) and values.get("ansible_connection") == "local"
+        for values in hosts.values()
+    )
+
+
+def read_runtime_secrets_config() -> dict | None:
+    try:
+        config = json.loads(RUNTIME_SECRETS_CONFIG.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def controller_recovery_key(*, create: bool) -> bytes | None:
+    """Ключ восстановления из хранилища секретов ENTRY; create - создать, если его нет."""
+    try:
+        return controller_backup.parse_recovery_key(CONTROLLER_BACKUP_KEY.read_text(encoding="ascii"))
+    except controller_backup.BackupError:
+        fail(
+            f"Ключ восстановления в {CONTROLLER_BACKUP_KEY} повреждён. Удалите файл: "
+            "следующая копия создаст новый ключ, и его нужно будет сохранить заново"
+        )
+    except (OSError, UnicodeError):
+        pass
+    if not create:
+        return None
+    if not CONTROLLER_BACKUP_KEY.parent.is_dir():
+        fail(f"Каталог {CONTROLLER_BACKUP_KEY.parent} отсутствует: сначала выполните kalimera-deploy --resume")
+    key = controller_backup.new_recovery_key()
+    secure_write(CONTROLLER_BACKUP_KEY, (controller_backup.format_recovery_key(key) + "\n").encode("ascii"))
+    # Каталог лежит в tmpfs. Без сохранения пакета ключ пропал бы при перезагрузке
+    # ENTRY, а копии, зашифрованные им, стало бы нечем открыть.
+    sealed = subprocess.run([str(SECRETCTL_PATH), "seal"], check=False, capture_output=True, text=True)
+    if sealed.returncode != 0:
+        CONTROLLER_BACKUP_KEY.unlink(missing_ok=True)
+        fail(
+            "Новый ключ восстановления не сохранён в зашифрованный пакет: второй сервер "
+            "не отдал долю ключа. Повторите, когда каскад будет на связи"
+        )
+    print(
+        "Создан ключ восстановления контроллера. Покажите его командой "
+        "'controller-backup key' и сохраните вне серверов каскада: без него копию не открыть."
+    )
+    return key
+
+
+def controller_backup_sources(
+    production: Path, state_root: Path, runtime_root: Path, ssh_private_key: Path
+) -> list[controller_backup.Source]:
+    sources = [controller_backup.Source(production, controller_backup.INVENTORY_DIR)]
+    for child in sorted(runtime_root.iterdir()):
+        if child.name != ".unlocked":
+            sources.append(
+                controller_backup.Source(child, f"{controller_backup.RUNTIME_DIR}/{child.name}")
+            )
+    if state_root.is_dir():
+        for child in sorted(state_root.iterdir()):
+            # Каталог клиентов на управляющем ENTRY - ссылка в хранилище секретов:
+            # он уже вошёл в копию оттуда.
+            if child.is_symlink() or child.name.startswith("."):
+                continue
+            sources.append(
+                controller_backup.Source(child, f"{controller_backup.STATE_DIR}/{child.name}")
+            )
+    public_key = ssh_private_key.with_name(ssh_private_key.name + ".pub")
+    if public_key.is_file() and not public_key.is_symlink():
+        sources.append(
+            controller_backup.Source(public_key, f"{controller_backup.SSH_DIR}/{public_key.name}")
+        )
+    return sources
+
+
+CONTROLLER_BACKUP_STATUS_FIELDS = ("epoch", "time", "digest", "stored", "failed", "pushed")
+
+
+def read_controller_backup_status() -> dict[str, str]:
+    """Итог последней копии: когда проверена, что в ней, где сохранена."""
+    try:
+        fields = CONTROLLER_BACKUP_STATUS.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    except (OSError, IndexError):
+        return {}
+    if len(fields) != len(CONTROLLER_BACKUP_STATUS_FIELDS):
+        return {}
+    return dict(zip(CONTROLLER_BACKUP_STATUS_FIELDS, fields))
+
+
+def write_controller_backup_status(
+    digest: str, stored: list[str], failed: list[str], pushed: int
+) -> None:
+    CONTROLLER_BACKUP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    line = "\t".join(
+        (str(int(time.time())), utc_now_text(), digest, ",".join(stored), ",".join(failed), str(pushed))
+    )
+    temporary = CONTROLLER_BACKUP_STATUS.with_name(f".{CONTROLLER_BACKUP_STATUS.name}.tmp")
+    temporary.write_text(line + "\n", encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, CONTROLLER_BACKUP_STATUS)
+
+
+def push_controller_backup(
+    repo: Path, hosts_path: Path, vault_password: Path, document: bytes, groups: list[str]
+) -> tuple[list[str], list[str]]:
+    """Сохранить файл копии на серверах; возвращает (где сохранён, где нет)."""
+    stored: list[str] = []
+    failed: list[str] = []
+    staging = CONTROLLER_BACKUP_STAGING_DIR / f"kalimera-controller-backup.{secrets.token_hex(6)}"
+    secure_write(staging, document)
+    try:
+        for group in groups:
+            result = ansible_adhoc(
+                repo,
+                hosts_path,
+                vault_password,
+                group,
+                "ansible.builtin.copy",
+                f"src={staging} dest={CONTROLLER_BACKUP_DIR / CONTROLLER_BACKUP_NAME} "
+                "owner=root group=root mode=0600",
+                become=True,
+                # Файл в несколько мегабайт по каналу за границу идёт дольше команды.
+                timeout=CONTROLLER_BACKUP_PUSH_TIMEOUT_SECONDS,
+            )
+            if result is not None and result.returncode == 0:
+                stored.append(group)
+            else:
+                failed.append(group)
+    finally:
+        staging.unlink(missing_ok=True)
+    return stored, failed
+
+
+def run_controller_backup(
+    repo: Path, production: Path, vault_password: Path, *, force: bool = False
+) -> bool:
+    """Создать копию состояния контроллера и сохранить её на EXIT и FRONT."""
+    hosts_path = production / "hosts.yml"
+    hosts_document = load_yaml(hosts_path)
+    if not local_controller(hosts_document):
+        print(
+            "Резервная копия контроллера создаётся, когда ENTRY сам управляет каскадом. "
+            "Здесь управляющий компьютер отдельный: сохраните каталог inventory/production "
+            "и пароль Ansible Vault сами."
+        )
+        return False
+    config = read_runtime_secrets_config()
+    if config is None:
+        print("Хранилище секретов на ENTRY не настроено: резервная копия контроллера не создаётся.")
+        return False
+    runtime_root = Path(str(config.get("runtime_root", "")))
+    cluster_id = str(config.get("cluster_id", ""))
+    if not (runtime_root / ".unlocked").is_file():
+        fail(
+            "Хранилище секретов ENTRY закрыто: копировать нечего. "
+            "Состояние: sudo kalimera-secretctl status"
+        )
+    children = hosts_document["all"]["children"]
+    groups = [group for group in CONTROLLER_BACKUP_PEERS if children.get(group, {}).get("hosts")]
+    key = controller_recovery_key(create=True)
+    assert key is not None
+    state_root = Path.home() / ".local" / "share" / "awg-iac" / "production"
+    ssh_private_key = Path.home() / ".ssh" / "awg-iac-production"
+    release = (repo / "VERSION").read_text(encoding="utf-8").strip()
+    created = utc_now_text()
+    manifest = {
+        "created": created,
+        "created_epoch": int(time.time()),
+        "release": release,
+        "cluster_id": cluster_id,
+        "hostname": socket.gethostname(),
+        "mappings": [
+            {"source": str(mapping["source"]), "target": str(mapping["target"])}
+            for mapping in config.get("mappings", [])
+            if isinstance(mapping, dict) and mapping.get("source") and mapping.get("target")
+        ],
+    }
+    try:
+        plaintext, digest = controller_backup.build_archive(
+            manifest,
+            controller_backup_sources(production, state_root, runtime_root, ssh_private_key),
+        )
+    except (controller_backup.BackupError, OSError) as error:
+        fail(f"Резервная копия контроллера не собрана: {error}")
+    previous = read_controller_backup_status()
+    now = int(time.time())
+    unchanged = (
+        previous.get("digest") == digest
+        and not previous.get("failed")
+        and set(filter(None, previous.get("stored", "").split(","))) == set(groups)
+        and previous.get("pushed", "").isdigit()
+        and now - int(previous["pushed"]) < CONTROLLER_BACKUP_REFRESH_SECONDS
+    )
+    if unchanged and not force:
+        write_controller_backup_status(digest, groups, [], int(previous["pushed"]))
+        print("Резервная копия контроллера актуальна: состояние не менялось.")
+        return True
+    document = controller_backup.encrypt(plaintext, key, cluster_id, created, release)
+    stored, failed = push_controller_backup(repo, hosts_path, vault_password, document, groups)
+    write_controller_backup_status(digest, stored, failed, now if stored else 0)
+    names = lambda items: ", ".join(item.upper() for item in items)  # noqa: E731
+    if stored:
+        print(f"Резервная копия контроллера сохранена: {names(stored)}.")
+    if failed:
+        print(
+            f"Резервная копия контроллера не сохранена: {names(failed)}. "
+            "Проверьте связь с сервером и повторите: controller-backup"
+        )
+    return bool(stored) and not failed
+
+
+def show_controller_backup_key() -> None:
+    """Показать ключ восстановления владельцу: без него копия бесполезна."""
+    key = controller_recovery_key(create=True)
+    assert key is not None
+    print("Ключ восстановления контроллера:")
+    print()
+    print(f"  {controller_backup.format_recovery_key(key)}")
+    print()
+    print(
+        "Сохраните его вне серверов каскада, например в менеджере паролей. Копия "
+        "состояния контроллера лежит на EXIT и FRONT зашифрованной этим ключом; после "
+        "потери ENTRY каскад восстанавливается командой ./deploy --restore-entry ФАЙЛ "
+        "на новом сервере, и она спросит этот ключ. Без ключа копию не открыть никому."
+    )
+
+
+def restore_entry(
+    repo: Path, production: Path, vault_password: Path, capsule: Path, key_file: Path | None
+) -> None:
+    """Разложить состояние контроллера из копии на новом ENTRY."""
+    if os.geteuid() != 0:
+        fail("Восстановление ENTRY выполняется от root на новом сервере")
+    if production.exists():
+        fail(
+            "inventory/production уже существует: восстановление выполняется на чистом "
+            "сервере. Если состояние уже восстановлено, продолжайте './deploy --resume'"
+        )
+    try:
+        document = capsule.read_bytes()
+    except OSError as error:
+        fail(f"Файл копии не читается: {error}")
+    state_root = Path.home() / ".local" / "share" / "awg-iac" / "production"
+    ssh_private_key = Path.home() / ".ssh" / "awg-iac-production"
+    # Распаковка идёт в tmpfs: на диск попадает только уже разложенное состояние.
+    work = Path(tempfile.mkdtemp(prefix="kalimera-restore.", dir=str(CONTROLLER_BACKUP_STAGING_DIR)))
+    try:
+        header = controller_backup.read_header(document)
+        print(
+            f"Копия контроллера от {header.get('created', '?')}, "
+            f"выпуск KalimeraWG {header.get('release', '?')}."
+        )
+        if key_file is not None:
+            key_text = key_file.read_text(encoding="utf-8")
+        else:
+            key_text = getpass.getpass("Ключ восстановления (ввод не отображается): ")
+        plaintext = controller_backup.decrypt(document, controller_backup.parse_recovery_key(key_text))
+        manifest = controller_backup.extract(plaintext, work / "content")
+        release = (repo / "VERSION").read_text(encoding="utf-8").strip()
+        if str(manifest.get("release", "")) != release:
+            print(
+                f"Копия создана выпуском {manifest.get('release', '?')}, а здесь выпуск {release}. "
+                "Надёжнее восстанавливать тем же выпуском: git switch --detach vВЕРСИЯ."
+            )
+            if not prompt_bool("Продолжить этим выпуском", False):
+                fail("Восстановление остановлено: состояние сервера не менялось")
+        restored = controller_backup.restore_layout(
+            work / "content",
+            manifest,
+            controller_backup.RestorePaths(production, vault_password, ssh_private_key, state_root),
+        )
+    except (controller_backup.BackupError, OSError) as error:
+        fail(f"Восстановление не выполнено: {error}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    print("Восстановлено из копии: " + ", ".join(restored) + ".")
+
+
+def require_restored_access(hosts_document: dict) -> None:
+    """После восстановления: EXIT и FRONT должны принимать ключ оркестратора отсюда."""
+    refused: list[str] = []
+    children = hosts_document["all"]["children"]
+    for group in ("exit", "front"):
+        for name, variables in children.get(group, {}).get("hosts", {}).items():
+            if not ssh_connection_works(
+                str(variables["ansible_host"]),
+                str(variables["ansible_user"]),
+                int(variables["ansible_port"]),
+                Path(str(variables["ansible_ssh_private_key_file"])),
+            ):
+                refused.append(f"{name} ({variables['ansible_host']})")
+    if refused:
+        fail(
+            "Серверы не принимают ключ оркестратора с этого сервера: "
+            + ", ".join(refused)
+            + ".\nEXIT и FRONT разрешают его только с прежнего публичного адреса ENTRY. "
+            "Назначьте новому серверу прежний адрес (зарезервированный IP в панели "
+            "облака) и выполните './deploy --resume'. Состояние контроллера уже "
+            "восстановлено: повторять --restore-entry не нужно."
+        )
+
+
 def main() -> None:
     configure_line_editing()
     parser = argparse.ArgumentParser()
@@ -4825,6 +5155,28 @@ def main() -> None:
         action="store_true",
         help="продолжать перезагрузку, даже если проверка после шага нашла ошибки (ошибки выводятся)",
     )
+    parser.add_argument(
+        "--controller-backup",
+        action="store_true",
+        help="создать зашифрованную копию состояния контроллера и сохранить её на EXIT и FRONT",
+    )
+    parser.add_argument(
+        "--controller-backup-key",
+        action="store_true",
+        help="показать ключ восстановления контроллера",
+    )
+    parser.add_argument(
+        "--restore-entry",
+        metavar="ФАЙЛ",
+        type=Path,
+        help="на новом сервере: восстановить ENTRY из копии состояния контроллера",
+    )
+    parser.add_argument(
+        "--recovery-key-file",
+        metavar="ФАЙЛ",
+        type=Path,
+        help="файл с ключом восстановления для --restore-entry; без него ключ запрашивается",
+    )
     args = parser.parse_args()
     update_flags = [
         name
@@ -4929,7 +5281,25 @@ def main() -> None:
         args.cascade_reboot_status,
         args.cascade_reboot_auto,
         args.cascade_weekly,
+        args.controller_backup,
+        args.controller_backup_key,
     ]
+    if args.recovery_key_file and not args.restore_entry:
+        parser.error("--recovery-key-file используется только вместе с --restore-entry")
+    if args.restore_entry and (
+        any(service_commands)
+        or args.resume
+        or args.summary
+        or args.terminal_only
+        or update_flags
+        or feature_flags
+        or args.enable_mobile
+        or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
+    ):
+        parser.error("--restore-entry выполняется отдельно, на новом сервере")
     if args.yes and not args.cascade_reboot:
         parser.error("--yes используется только вместе с --cascade-reboot")
     if args.force and not (args.cascade_reboot and args.yes):
@@ -4976,6 +5346,19 @@ def main() -> None:
     if args.cascade_weekly:
         run_cascade_weekly(repo, production, vault_password)
         return
+    if args.controller_backup:
+        if not run_controller_backup(repo, production, vault_password):
+            raise SystemExit(1)
+        return
+    if args.controller_backup_key:
+        show_controller_backup_key()
+        return
+    restoring = False
+    if args.restore_entry:
+        restore_entry(repo, production, vault_password, args.restore_entry, args.recovery_key_file)
+        print("Применяю восстановленную конфигурацию к новому ENTRY...")
+        args.resume = True
+        restoring = True
     if args.summary:
         if not (production / "hosts.yml").is_file() or not (
             production / "group_vars" / "entry.yml"
@@ -5082,6 +5465,8 @@ def main() -> None:
             all_vars["security_require_admin_authorized_key"] = True
             yaml_write(all_vars_path, all_vars)
         hosts_document = load_yaml(hosts_path)
+        if restoring:
+            require_restored_access(hosts_document)
         recover_saved_admin_access(
             hosts_document,
             hosts_path,
@@ -5273,6 +5658,12 @@ def main() -> None:
         seal_local_controller_state(production)
         cleanup_deployment(repo, hosts_path, vault_password)
         atexit.unregister(cleanup_callback)
+        # Копия состояния контроллера обновляется после каждого применения. Её
+        # неудача не отменяет успешный deploy: о ней сообщит cascade-check.
+        try:
+            run_controller_backup(repo, production, vault_password)
+        except SystemExit as backup_error:
+            print(f"Резервная копия контроллера не обновлена: {backup_error}")
         if args.rollback_front_replacement:
             (_front_replacement_state_root() / "current.json").unlink(missing_ok=True)
             print("Откат FRONT применён и проверен; маркер восстановления удалён.")
@@ -6480,6 +6871,10 @@ def main() -> None:
     seal_local_controller_state(production)
     cleanup_deployment(repo, hosts_path, vault_password)
     atexit.unregister(cleanup_callback)
+    try:
+        run_controller_backup(repo, production, vault_password)
+    except SystemExit as backup_error:
+        print(f"Резервная копия контроллера не создана: {backup_error}")
 
     ui_success("Все активные серверы настроены, проверены и готовы к работе.")
     show_deployment_summary(production)

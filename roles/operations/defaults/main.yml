@@ -79,6 +79,18 @@ awg_oom_protected_units_by_role:
     - "{{ front_xray_service_name | default('xray.service') }}"
     - nginx.service
 awg_oom_protected_units: "{{ awg_oom_protected_units_by_role[awg_node_role | default('')] | default([]) }}"
+# Резервная копия состояния контроллера. ENTRY раз в сутки (и после каждого
+# deploy) собирает inventory, пароль Vault, ключ оркестратора и состояние
+# клиентов в один зашифрованный файл и сохраняет его на EXIT и FRONT. Ключ
+# восстановления показывает команда controller-backup key. Копия создаётся, когда
+# ENTRY сам управляет каскадом.
+awg_controller_backup_dir: /var/lib/kalimera/controller-backup
+awg_controller_backup_calendar: "*-*-* 06:40:00"
+# Копия старше стольких суток даёт замечание в cascade-check.
+awg_controller_backup_stale_days: 3
+awg_controller_backup_enabled: >-
+  {{ (runtime_secrets_enabled | default(false) | bool) and
+     ((runtime_secrets_controller_vault_password_path | default('')) | length > 0) }}
 awg_domain_policy_dir: /etc/awg/domain-policy
 awg_client_output_dir: /root/awg-client-configs
 entry_ru_proxy_capability_path: /usr/local/sbin/ru-proxy-capability

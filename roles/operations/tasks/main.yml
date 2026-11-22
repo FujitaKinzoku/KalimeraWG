@@ -112,6 +112,31 @@
   when: awg_node_role == 'entry'
   notify: Перезагрузить модули systemd для администрирования
 
+# Копия состояния контроллера. Каталог есть на каждом сервере: EXIT и FRONT
+# хранят в нём зашифрованный файл, ENTRY - итог последней копии.
+- name: "Создание каталога резервной копии состояния контроллера"
+  ansible.builtin.file:
+    path: "{{ awg_controller_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: "Установка модулей systemd резервной копии контроллера"
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kalimera-controller-backup.service
+    - kalimera-controller-backup.timer
+  when:
+    - awg_node_role == 'entry'
+    - awg_controller_backup_enabled | bool
+  notify: Перезагрузить модули systemd для администрирования
+
 - name: "Проверка готовности AmneziaWG к текущему и следующему ядру"
   ansible.builtin.command: /usr/local/sbin/awg-kernel-guard
   changed_when: false
@@ -456,6 +481,16 @@
     state: restarted
     daemon_reload: true
   when: awg_node_role == 'entry'
+
+- name: Включение ежедневной резервной копии контроллера
+  ansible.builtin.systemd_service:
+    name: kalimera-controller-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - awg_node_role == 'entry'
+    - awg_controller_backup_enabled | bool
 
 - name: "Отказоустойчивость сервера: сторож зависания и нехватка памяти"
   ansible.builtin.import_tasks: resilience.yml

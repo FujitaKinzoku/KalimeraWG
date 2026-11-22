@@ -271,6 +271,7 @@ table at login. Full reference: `kalimera-help`.
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 | Maintenance time | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (ENTRY only) |
 | Cascade reboot (ENTRY only) | `cascade-reboot`: check without rebooting; `cascade-reboot --yes`; `cascade-reboot status`: automation, next window, result; `cascade-reboot auto on`, `auto off` |
+| Controller state backup | on ENTRY: `controller-backup`, `controller-backup key`; on EXIT or FRONT: `controller-backup export > controller.kbk` |
 | Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
@@ -373,6 +374,7 @@ The cascade can be left alone for months. What happens without a human:
 | FRONT certificate | when due | certbot, saved into the encrypted bundle |
 | CDN certificate expiry | once a day | FRONT looks at the certificate the domain actually serves; a note and a Telegram message when the renewal did not happen |
 | Hung kernel | at once | the server reboots itself after a panic; a hung system is rebooted by the watchdog, when the kernel has one |
+| Controller state backup | once a day and after a deploy | an encrypted file on EXIT and FRONT: ENTRY is restored from it on a new server |
 | Telegram digest | once a week | cascade state, self-healing count, new versions, reboot |
 
 **Reboot guards.** A server is not rebooted if it might not come back or not
@@ -437,6 +439,43 @@ expiry, Telegram delivery, hang watchdog, memory shortage).
   internet from the ENTRY address: the EXIT routing table keeps an
   `unreachable` backstop route, and a filter rule does not let such a packet
   out through WAN even when the policy routing rule itself is gone.
+
+**Losing ENTRY.** ENTRY is the only place that holds the cascade inventory, the
+Ansible Vault password, the orchestrator key and the client keys. Once a day
+and after every `kalimera-deploy --resume` it packs all of that into one
+encrypted file and stores it on EXIT and FRONT. The file is encrypted with a
+recovery key those servers do not have: the server that keeps the copy learns
+nothing from it.
+
+Do two things in advance:
+
+1. Save the recovery key outside the cascade servers, for example in a password
+   manager. On ENTRY: `controller-backup key`. Nobody can open the copy without
+   it.
+2. Pin the public address of ENTRY to your account in the cloud console
+   (a reserved or static address). EXIT and FRONT accept control only from that
+   address, and the AmneziaWG client configs carry it too.
+
+Restoring on a new Ubuntu 24.04 server with the same public address:
+
+```bash
+ssh -p PORT kalimera@EXIT 'sudo -n /usr/local/libexec/kalimera-admin-command controller-backup export' > controller.kbk
+scp controller.kbk root@NEW_ENTRY:/root/
+```
+
+Then on the new server, with the same KalimeraWG release that made the copy:
+
+```bash
+git clone --depth 1 --branch vVERSION https://github.com/FujitaKinzoku/KalimeraWG /root/KalimeraWG
+cd /root/KalimeraWG && ./deploy --restore-entry /root/controller.kbk
+```
+
+The command asks for the recovery key, lays the state out and applies it with
+the usual `--resume`: server and client keys are the same, client configs keep
+working. The new ENTRY gets a new SSH host key: your SSH client will warn about
+the change on first login. Restoring to a server with a different public
+address is not supported: the command stops and explains that the address has
+to be brought back.
 
 **What the cascade will not do by itself.** It does not pay for servers, the
 domain, the proxy or the CDN. It does not bring back a server that failed to

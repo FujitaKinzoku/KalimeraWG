@@ -58,6 +58,35 @@ case "$command_name" in
         exit 2
 {% endif %}
         ;;
+    controller-backup)
+{% if awg_node_role == 'entry' %}
+        case "${*:-}" in
+            '') backup_args=(--controller-backup) ;;
+            'key') backup_args=(--controller-backup-key) ;;
+            *) echo 'Разрешено: controller-backup (создать копию и сохранить на EXIT и FRONT), controller-backup key (показать ключ восстановления)' >&2; exit 2 ;;
+        esac
+        [[ -x {{ (security_controller_repo_path ~ '/deploy') | quote }} ]] || {
+            echo 'Управляющий репозиторий не найден.' >&2
+            exit 127
+        }
+        cd {{ security_controller_repo_path | quote }}
+        exec {{ (security_controller_repo_path ~ '/deploy') | quote }} "${backup_args[@]}"
+{% else %}
+        # Файл копии зашифрован ключом восстановления, которого на этом сервере нет.
+        # Команда печатает его как есть: так владелец забирает копию после потери ENTRY.
+        if [[ "${*:-}" != export ]]; then
+            echo 'Разрешено: controller-backup export > ФАЙЛ (забрать зашифрованную копию состояния контроллера)' >&2
+            exit 2
+        fi
+        backup_file={{ ((awg_controller_backup_dir | default('/var/lib/kalimera/controller-backup')) ~ '/controller.kbk') | quote }}
+        [[ -s "$backup_file" ]] || { echo 'Копии состояния контроллера на этом сервере нет.' >&2; exit 1; }
+        if [[ -t 1 ]]; then
+            echo 'Перенаправьте вывод в файл: controller-backup export > controller.kbk' >&2
+            exit 2
+        fi
+        exec cat -- "$backup_file"
+{% endif %}
+        ;;
     maintenance-time)
 {% if awg_node_role == 'entry' %}
         if [[ $# -eq 1 && $1 == show ]]; then
