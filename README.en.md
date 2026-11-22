@@ -195,10 +195,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.7.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.8.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.7.0` release rather than the moving `main`
+The command installs the pinned `v3.8.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -210,7 +210,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.7.0 --depth 1 \
+git clone --branch v3.8.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -475,7 +475,8 @@ the usual `--resume`: server and client keys are the same, client configs keep
 working. The new ENTRY gets a new SSH host key: your SSH client will warn about
 the change on first login. Restoring to a server with a different public
 address is not supported: the command stops and explains that the address has
-to be brought back.
+to be brought back. The state layout is covered by tests; the whole restore has
+not yet been run on a real server.
 
 **What the cascade will not do by itself.** It does not pay for servers, the
 domain, the proxy or the CDN. It does not bring back a server that failed to
@@ -495,7 +496,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.7.0
+sudo git -C /root/KalimeraWG switch --detach v3.8.0
 kalimera-deploy --resume
 ```
 
@@ -522,6 +523,7 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.8.0:** failures of the server itself. A server reboots by itself after a kernel panic, the kernel watchdog reboots a hung one, and under memory pressure the services that carry traffic are killed last. When the tunnel to EXIT is lost, foreign traffic is rejected instead of leaving from the ENTRY address. `cascade-check` shows the expiry of every TLS certificate of the cascade and warns 10 days ahead. Once a day ENTRY stores an encrypted copy of its state on EXIT and FRONT; `./deploy --restore-entry` restores it on a new server.
 - **v3.7.0:** unattended operation. Once a week ENTRY reboots the cascade servers one at a time when an update requires it, and does not start a reboot if a server might not come back. Telegram sends a weekly digest, announces new AmneziaWG and Xray versions and warns about domain expiry ahead of time. `cascade-check` shows the self-healing total for the whole cascade and available updates. Nightly maintenance finishes an interrupted package installation by itself and no longer fails because a mirror was unreachable once.
 - **v3.6.0:** self-healing. Every five minutes each server checks itself and fixes a local fault with the action for that exact fault; configuration drift and causes outside the server are named, not fixed. `cascade-check` shows a 24-hour summary: how many faults there were, how many were repaired and what is left. Nightly maintenance records why it failed and no longer fails because of a one-off error.
 - **v3.5.2:** a fix release after a review of the whole code base. Changes to the domain, address and port lists survive an ENTRY reboot. The daily audit and Telegram monitoring pass on schedule. Routing rules are applied without gaps, and a cascade update no longer restarts the routing service. Command messages match the outcome.
