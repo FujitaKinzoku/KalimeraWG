@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import shlex
@@ -226,7 +227,7 @@ class CascadeCheckTests(unittest.TestCase):
         # Заголовки разделов в деталях похожи на группы сводки ("DNS: ..."),
         # поэтому поиск идёт от начала сводки.
         start = plain.index("СЕРВЕРЫ")
-        titles = ("СЕРВЕРЫ", "САМОВОССТАНОВЛЕНИЕ", "СВЯЗИ И ЗАДЕРЖКИ", "DNS", "ИТОГ")
+        titles = ("СЕРВЕРЫ", "САМОВОССТАНОВЛЕНИЕ", "СВЯЗИ И ЗАДЕРЖКИ", "СЕРТИФИКАТЫ", "DNS", "ИТОГ")
         positions = [plain.index(title, start) for title in titles]
         self.assertEqual(positions, sorted(positions), plain)
 
@@ -503,6 +504,68 @@ class CascadeCheckTests(unittest.TestCase):
         self.assertLess(plain.index("\nСВЯЗИ И ЗАДЕРЖКИ\n"), group)
         self.assertLess(group, plain.index("\nDNS\n"))
 
+    def certificates_block(self, rows: str) -> tuple[str, str]:
+        """Группа «СЕРТИФИКАТЫ» сводки и вся сводка без оформления."""
+        self.rows.write_text(rows, encoding="utf-8")
+        result = self.run_body("render\n")
+        plain = ANSI.sub("", result.stdout)
+        start = plain.index("\nСЕРТИФИКАТЫ\n")
+        return plain[start:plain.index("\nDNS\n", start) + 1], plain
+
+    def test_every_certificate_is_listed_with_its_expiry(self) -> None:
+        # Срок виден всегда, а не только при замечании: раньше действующий
+        # сертификат в отчёт не попадал вовсе.
+        group, plain = self.certificates_block(
+            row("FRONT", "OK", "сертификат origin-домена FRONT origin.example.uk", "действует до 2027-01-20, осталось 59 дн.")
+            + row("FRONT", "OK", "сертификат CDN-домена www.example.uk", "действует до 2027-02-08, осталось 78 дн.")
+            + row("FRONT", "OK", "TLS endpoint CDN доступен")
+        )
+        self.assertIn("сертификат origin-домена FRONT origin.example.uk: действует до 2027-01-20, осталось 59 дн.\n", group)
+        self.assertIn("сертификат CDN-домена www.example.uk: действует до 2027-02-08, осталось 78 дн.\n", group)
+        # Группа стоит после CDN, и сертификат CDN в группе CDN не повторяется.
+        cdn = plain[plain.index("\nCDN\n"):plain.index("\nСЕРТИФИКАТЫ\n")]
+        self.assertIn("TLS endpoint CDN доступен", cdn)
+        self.assertNotIn("сертификат", cdn)
+        # В группе «ИТОГ» - сколько сертификатов и какой истекает первым.
+        total = plain[plain.index("\nИТОГ\n"):]
+        self.assertIn("сертификаты: 2, ближайший срок 2027-01-20 (осталось 59 дн.) · статус OK\n", total)
+        # Строки есть и в разделе FRONT выше сводки.
+        self.assertIn("сертификат CDN-домена www.example.uk", plain[:plain.index("\nСЕРВЕРЫ\n")])
+
+    def test_expiring_certificate_is_a_warning_with_the_way_to_renew(self) -> None:
+        self.rows.write_text(
+            row("FRONT", "OK", "сертификат origin-домена FRONT origin.example.uk", "действует до 2027-01-20, осталось 59 дн.")
+            + row(
+                "FRONT", "WARN", "сертификат CDN-домена www.example.uk", "истекает 2026-12-01, осталось 9 дн.",
+                "сертификат выпускает CDN: в личном кабинете CDN откройте ресурс и перевыпустите сертификат",
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_body('render\nexit "$exit_code"\n')
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        plain = ANSI.sub("", result.stdout)
+        self.assertIn("сертификат CDN-домена www.example.uk: истекает 2026-12-01, осталось 9 дн.\n", plain)
+        self.assertIn("→ сертификат выпускает CDN: в личном кабинете CDN откройте ресурс и перевыпустите сертификат", plain)
+        self.assertIn("сертификаты: 2, ближайший срок 2026-12-01 (осталось 9 дн.) · статус WARN\n", plain)
+
+    def test_unknown_expiry_and_missing_data_are_said_plainly(self) -> None:
+        group, plain = self.certificates_block(
+            row("FRONT", "WARN", "срок сертификата CDN-домена www.example.uk не определён: домен не ответил по TLS", "", "повторить: на FRONT kalimera-updates")
+        )
+        self.assertIn("срок сертификата CDN-домена www.example.uk не определён", group)
+        self.assertIn("сертификаты: 1 · статус WARN\n", plain)
+        group, plain = self.certificates_block(row("FRONT", "OK", "служба"))
+        self.assertIn("сведений нет: проверка на FRONT ещё не выполнялась", group)
+        self.assertNotIn("сертификаты:", plain[plain.index("\nИТОГ\n"):])
+
+    def test_cascade_without_front_has_no_certificates(self) -> None:
+        text = self.script.read_text(encoding="utf-8")
+        self.script.write_text(
+            text.replace("readonly front_present=true", "readonly front_present=false"), encoding="utf-8"
+        )
+        group, _plain = self.certificates_block(row("ENTRY", "OK", "служба"))
+        self.assertIn("в каскаде без FRONT TLS-сертификатов нет", group)
+
     def test_cdn_group_says_when_cdn_is_not_used(self) -> None:
         text = self.script.read_text(encoding="utf-8")
         self.assertIn("readonly cdn_enabled=true", text)
@@ -677,6 +740,93 @@ class KalimeraReportTests(unittest.TestCase):
         self.assertIn("cascade-reboot auto on", output)
         output = self.run_report("check_reboot\n", awg_node_role="exit")
         self.assertEqual(output, row("EXIT", "OK", "перезагрузка не требуется"))
+
+    def test_watchdog_row_says_what_the_server_really_has(self) -> None:
+        sysfs = self.dir / "watchdog0"
+        variables = {"awg_watchdog_sysfs_dir": str(sysfs)}
+        # Модуля softdog нет в части облачных ядер: это не замечание, исправить нечем.
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания недоступен", "в ядре нет устройства сторожа и модуля softdog"),
+        )
+        sysfs.mkdir()
+        (sysfs / "identity").write_text("Software Watchdog\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания установлен", "Software Watchdog; состояние ядро не сообщает"),
+        )
+        (sysfs / "timeout").write_text("120\n", encoding="utf-8")
+        (sysfs / "state").write_text("active\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания взведён", "Software Watchdog, 120 с"),
+        )
+        # Устройство есть, но systemd в нём не отмечается: зависший сервер не перезагрузится.
+        (sysfs / "state").write_text("inactive\n", encoding="utf-8")
+        output = self.run_report("check_watchdog\n", **variables)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tсторож зависания не взведён\tSoftware Watchdog\t"), output)
+        self.assertIn("systemctl daemon-reexec", output)
+        self.assertEqual(self.run_report("check_watchdog\n", awg_watchdog_enabled=False, **variables), "")
+
+    def test_memory_shortage_is_reported_from_the_kernel_counter(self) -> None:
+        vmstat = self.dir / "vmstat"
+        meminfo = self.dir / "meminfo"
+        variables = {"awg_memory_vmstat_path": str(vmstat), "awg_memory_meminfo_path": str(meminfo)}
+        meminfo.write_text(
+            "MemTotal:        2013456 kB\nMemFree:          788480 kB\nMemAvailable:    1593344 kB\n", encoding="utf-8"
+        )
+        vmstat.write_text("nr_free_pages 197120\noom_kill 0\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_memory\n", **variables),
+            row("ENTRY", "OK", "нехватки памяти с загрузки сервера не было", "доступно 1556 из 1966 МБ"),
+        )
+        # Журнал в RAM к моменту проверки вытеснен, а счётчик ядра остаётся.
+        vmstat.write_text("nr_free_pages 197120\noom_kill 3\n", encoding="utf-8")
+        output = self.run_report("check_memory\n", **variables)
+        self.assertTrue(
+            output.startswith(
+                "ENTRY\tWARN\tядро завершало процессы из-за нехватки памяти\t"
+                "с загрузки сервера: 3; сейчас доступно 1556 из 1966 МБ\t"
+            ),
+            output,
+        )
+        self.assertIn("увеличьте память сервера", output)
+        # Ядро без счётчика: строки нет, а не замечание.
+        vmstat.write_text("nr_free_pages 197120\n", encoding="utf-8")
+        self.assertEqual(self.run_report("check_memory\n", **variables), "")
+
+    def test_every_certificate_becomes_a_row_with_the_days_left(self) -> None:
+        # Срок сертификата виден всегда, а не только при замечании. Остаток дней
+        # считается на момент отчёта: итог проверки на FRONT хранится сутки.
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        valid = (today + datetime.timedelta(days=78)).isoformat()
+        soon = (today + datetime.timedelta(days=9)).isoformat()
+        past = (today - datetime.timedelta(days=2)).isoformat()
+        updates = self.dir / "updates"
+        updates.mkdir()
+        (updates / "state").write_text(
+            "#checked\t2026-11-22 06:10 UTC\n"
+            f"OK\tcert\tсертификат origin-домена FRONT origin.example.uk действует до {valid}\tна FRONT: sudo systemctl start certbot.service\n"
+            f"WARN\tcert\tсертификат CDN-домена www.example.uk истекает {soon} (через 8 дн.)\tперевыпустите сертификат в кабинете CDN\n"
+            f"WARN\tcert\tсертификат CDN-домена old.example.uk истёк {past}\tперевыпустите сертификат в кабинете CDN\n"
+            "INFO\tcert\tсрок сертификата CDN-домена new.example.uk не определён: домен не ответил по TLS\tповторить: на FRONT kalimera-updates\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.run_report("check_updates\n", awg_node_role="front"),
+            # Команда продления действующему сертификату не нужна: в строке её нет.
+            row("FRONT", "OK", "сертификат origin-домена FRONT origin.example.uk", f"действует до {valid}, осталось 78 дн.")
+            + row(
+                "FRONT", "WARN", "сертификат CDN-домена www.example.uk", f"истекает {soon}, осталось 9 дн.",
+                "перевыпустите сертификат в кабинете CDN",
+            )
+            + row("FRONT", "WARN", "сертификат CDN-домена old.example.uk", f"истёк {past}", "перевыпустите сертификат в кабинете CDN")
+            # Сертификат без известного срока - замечание: ради срока строка и существует.
+            + row(
+                "FRONT", "WARN", "срок сертификата CDN-домена new.example.uk не определён: домен не ответил по TLS", "",
+                "повторить: на FRONT kalimera-updates",
+            ),
+        )
 
     def test_component_updates_become_rows_without_a_warning(self) -> None:
         updates = self.dir / "updates"

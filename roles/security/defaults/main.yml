@@ -1,5 +1,8 @@
 ---
 security_sysctl_file: /etc/sysctl.d/90-awg-managed.conf
+# Через сколько секунд после panic ядро перезагружает сервер. 0 - не перезагружать
+# (поведение Ubuntu по умолчанию: сервер висит до ручного сброса).
+security_kernel_panic_reboot_seconds: 10
 security_disable_ipv6: true
 security_ifupdown_backup_dir: "{{ awg_backup_root }}/security/network"
 security_disable_unmanaged_networkd_wait_online: true

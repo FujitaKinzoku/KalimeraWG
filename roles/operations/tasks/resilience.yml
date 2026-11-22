@@ -1,0 +1,126 @@
+---
+# Отказоустойчивость самого сервера: сторож зависания и порядок, в котором ядро
+# завершает процессы при нехватке памяти. Перезагрузку после panic задаёт
+# kernel.panic в роли security.
+
+- name: "Проверка параметров сторожа зависания"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - awg_watchdog_runtime_seconds | int >= 30
+      - awg_watchdog_reboot_seconds | int >= 60
+      - awg_oom_score_adjust | int >= -1000
+      - awg_oom_score_adjust | int <= 0
+    fail_msg: >-
+      Сторож зависания: не меньше 30 секунд в работе и 60 при перезагрузке;
+      приоритет при нехватке памяти - от -1000 до 0.
+
+- name: "Установка службы программного сторожа ядра"
+  ansible.builtin.template:
+    src: kalimera-watchdog.service.j2
+    dest: "/etc/systemd/system/{{ awg_watchdog_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg_watchdog_enabled | bool
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Каталог настроек диспетчера systemd"
+  ansible.builtin.file:
+    path: "{{ awg_watchdog_dropin_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: awg_watchdog_enabled | bool
+
+- name: "Настройка сторожа зависания в systemd"
+  ansible.builtin.template:
+    src: kalimera-watchdog.conf.j2
+    dest: "{{ awg_watchdog_dropin_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: awg_watchdog_enabled | bool
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Отключение сторожа зависания: настройка systemd"
+  ansible.builtin.file:
+    path: "{{ awg_watchdog_dropin_path }}"
+    state: absent
+  when: not (awg_watchdog_enabled | bool)
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Каталоги настроек служб каскада"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ awg_oom_protected_units }}"
+
+- name: "Службы каскада завершаются последними при нехватке памяти"
+  ansible.builtin.template:
+    src: kalimera-oom.conf.j2
+    dest: "/etc/systemd/system/{{ item }}.d/90-kalimera-oom.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ awg_oom_protected_units }}"
+  notify: Перезагрузить модули systemd для администрирования
+
+- name: "Установка программы применения приоритета к работающим службам"
+  ansible.builtin.copy:
+    src: kalimera-oom-apply.sh
+    dest: "{{ awg_oom_apply_path }}"
+    owner: root
+    group: root
+    mode: "0750"
+
+# Модули перечитываются здесь: служба сторожа должна быть известна systemd до
+# включения, а настройка диспетчера применяется при перечитывании.
+- name: "Применение настроек отказоустойчивости"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Включение программного сторожа ядра"
+  ansible.builtin.systemd_service:
+    name: "{{ awg_watchdog_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: awg_watchdog_enabled | bool
+
+- name: "Чтение состояния сторожа зависания"
+  ansible.builtin.command:
+    argv: [/bin/cat, /sys/class/watchdog/watchdog0/state]
+  register: operations_watchdog_state
+  changed_when: false
+  failed_when: false
+  when: awg_watchdog_enabled | bool
+
+# Устройство сторожа появилось после запуска systemd, и перечитывание модулей его
+# не открыло. Перезапуск диспетчера читает настройку заново и открывает устройство;
+# работающие службы он не трогает.
+- name: "Взведение сторожа зависания перезапуском диспетчера systemd"
+  ansible.builtin.systemd_service:
+    daemon_reexec: true
+  when:
+    - awg_watchdog_enabled | bool
+    - operations_watchdog_state.rc | default(1) | int == 0
+    - (operations_watchdog_state.stdout | default('') | trim) == 'inactive'
+
+- name: "Отключение программного сторожа ядра"
+  ansible.builtin.systemd_service:
+    name: "{{ awg_watchdog_service_name }}"
+    enabled: false
+  failed_when: false
+  when: not (awg_watchdog_enabled | bool)
+
+# Настройка systemd действует с запуска службы. Работающим службам приоритет
+# выставляется сразу, без их перезапуска.
+- name: "Применение приоритета при нехватке памяти к работающим службам"
+  ansible.builtin.command:
+    argv: "{{ [awg_oom_apply_path, awg_oom_score_adjust | string] + awg_oom_protected_units }}"
+  register: operations_oom_apply
+  changed_when: (operations_oom_apply.stdout | default('0') | trim) != '0'

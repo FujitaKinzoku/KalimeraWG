@@ -26,6 +26,9 @@ kernel.kptr_restrict = 1
 kernel.dmesg_restrict = 1
 kernel.unprivileged_bpf_disabled = 1
 kernel.yama.ptrace_scope = 1
+# После panic ядро перезагружается само. Значение Ubuntu по умолчанию 0 оставляет
+# сервер висеть до ручного сброса в панели хостера.
+kernel.panic = {{ security_kernel_panic_reboot_seconds | int }}
 {% if security_disable_ipv6 | bool %}
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1

@@ -64,6 +64,9 @@ case "$name" in
             echo "7: $5: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1380"
         elif [[ "$1" == rule && "$2" == del ]]; then
             exit 1
+        elif [[ "$1" == -4 && "$2" == rule && "$3" == show ]]; then
+            # Уже стоящие правила policy routing задаёт тест файлом policy-rules.
+            [[ ! -e "$state/policy-rules" ]] || cat "$state/policy-rules"
         fi
         ;;
     iptables)
@@ -339,6 +342,74 @@ class RoutingChainTests(ShellCase):
         ):
             self.assertTrue([line for line in calls if fragment in line], fragment)
         self.assertFalse([line for line in calls if " -D " in f" {line} "])
+
+    def test_exit_table_keeps_a_route_that_rejects_without_the_tunnel(self) -> None:
+        # Когда интерфейс до EXIT исчезает, ядро удаляет маршрут через него. В пустой
+        # таблице пакет с меткой EXIT не находил маршрута и уходил по основной
+        # таблице, то есть в интернет с адреса ENTRY.
+        self.routing(enabled=False)
+        routes = self.call_lines("ip route replace ")
+        backstop = "ip route replace unreachable default metric 4294967295 table 100"
+        tunnel = "ip route replace default dev awg3 table 100"
+        self.assertIn(backstop, routes)
+        self.assertIn(tunnel, routes)
+        # Запасной маршрут ставится первым: таблица ни на миг не остаётся пустой.
+        self.assertLess(routes.index(backstop), routes.index(tunnel))
+
+    def test_marked_traffic_is_rejected_on_the_wan_interface(self) -> None:
+        # Вторая защита не зависит от таблиц: пакет с меткой EXIT отклоняется на
+        # выходе через WAN, даже если правило policy routing пропало.
+        self.routing(enabled=False)
+        calls = self.calls.read_text(encoding="utf-8").splitlines()
+        guard = "-o eth0 -m mark --mark 0x1 -j REJECT --reject-with icmp-net-unreachable"
+        for chain in ("FORWARD", "OUTPUT"):
+            self.assertIn(f"iptables -w 10 -I {chain} 1 {guard}", calls)
+        # Защита стоит раньше, чем меняются маршруты и правила.
+        first_change = next(i for i, line in enumerate(calls) if line.startswith(("ip route replace", "ip rule add")))
+        self.assertLess(calls.index(f"iptables -w 10 -I OUTPUT 1 {guard}"), first_change)
+
+    def test_present_policy_rule_is_not_removed_and_added_again(self) -> None:
+        # Раньше правило удалялось и добавлялось при каждом применении: между двумя
+        # командами пакеты с меткой шли по основной таблице.
+        (self.dir / "policy-rules").write_text(
+            "0:\tfrom all lookup local\n"
+            "100:\tfrom all fwmark 0x1 lookup 100\n"
+            "110:\tfrom all fwmark 0x2 lookup 200\n"
+            "32766:\tfrom all lookup main\n",
+            encoding="utf-8",
+        )
+        self.routing(enabled=True, scope="selected")
+        self.assertFalse(self.call_lines("ip rule del"))
+        self.assertFalse(self.call_lines("ip rule add"))
+
+    def test_missing_or_repeated_policy_rule_is_rebuilt(self) -> None:
+        for rules in (
+            "",
+            "100:\tfrom all fwmark 0x1 lookup 100\n100:\tfrom all fwmark 0x1 lookup 100\n",
+            # Чужое правило с похожей меткой и таблицей своим не считается.
+            "100:\tfrom all fwmark 0x10 lookup 100\n100:\tfrom all fwmark 0x1 lookup 1000\n",
+        ):
+            with self.subTest(rules=rules):
+                (self.dir / "policy-rules").write_text(rules, encoding="utf-8")
+                self.calls.write_text("", encoding="utf-8")
+                self.flag("missing-sb-ru")
+                self.routing(enabled=False)
+                self.assertTrue(self.call_lines("ip rule del fwmark 0x1 table 100 priority 100"))
+                self.assertEqual(
+                    self.call_lines("ip rule add"), ["ip rule add fwmark 0x1 table 100 priority 100"]
+                )
+
+    def test_removal_takes_the_protection_away_with_everything_else(self) -> None:
+        self.routing(enabled=False)
+        self.calls.write_text("", encoding="utf-8")
+        # Подставной iptables отвечает на -C "не найдено": каждое правило проверяется раз.
+        result = self.execute(self.dir / "awg-entry-routing", "remove")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        checked = self.call_lines("iptables -w 10 -t filter -C ")
+        guard = "-o eth0 -m mark --mark 0x1 -j REJECT --reject-with icmp-net-unreachable"
+        for chain in ("FORWARD", "OUTPUT"):
+            self.assertIn(f"iptables -w 10 -t filter -C {chain} {guard}", checked)
+        self.assertTrue(self.call_lines("ip route flush table 100"))
 
     def test_sets_exist_even_without_the_proxy(self) -> None:
         self.flag("missing-sb-ru")
