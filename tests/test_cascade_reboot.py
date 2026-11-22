@@ -1195,8 +1195,10 @@ class CommandWiringTests(unittest.TestCase):
         # программа запускается из окружения, установленного последним deploy.
         script = (ROOT / "roles" / "operations" / "templates" / "kalimera-weekly.sh.j2").read_text(encoding="utf-8")
         direct = script.index('exec "$venv/bin/python"')
-        self.assertLess(direct, script.index('exec "$repo/deploy" --cascade-weekly'))
-        self.assertIn("--cascade-weekly", script[direct:])
+        self.assertLess(direct, script.index('exec "$repo/deploy" "$mode"'))
+        # Без аргумента обёртка запускает еженедельное окно: так её вызывает таймер.
+        self.assertIn('mode="${1:---cascade-weekly}"', script[:direct])
+        self.assertIn('"$mode"', script[direct:])
 
     def test_missed_window_is_not_caught_up(self) -> None:
         # Перезагрузка в случайное время после включения сервера хуже, чем через неделю.

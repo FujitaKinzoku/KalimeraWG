@@ -31,6 +31,9 @@ readonly watchdog_enabled={{ 'true' if (awg_watchdog_enabled | default(true) | b
 readonly watchdog_sysfs={{ (awg_watchdog_sysfs_dir | default('/sys/class/watchdog/watchdog0')) | quote }}
 readonly vmstat_file={{ (awg_memory_vmstat_path | default('/proc/vmstat')) | quote }}
 readonly meminfo_file={{ (awg_memory_meminfo_path | default('/proc/meminfo')) | quote }}
+readonly controller_backup={{ 'true' if ((runtime_secrets_enabled | default(false) | bool) and ((runtime_secrets_controller_vault_password_path | default('')) | length > 0)) else 'false' }}
+readonly controller_backup_status={{ ((awg_controller_backup_dir | default('/var/lib/kalimera/controller-backup')) ~ '/status') | quote }}
+readonly controller_backup_stale_days={{ (awg_controller_backup_stale_days | default(3)) | int }}
 
 {% raw %}
 usage() { echo 'Использование: kalimera-report --tsv'; }
@@ -202,6 +205,43 @@ check_memory() {
     else
         add WARN 'ядро завершало процессы из-за нехватки памяти' "с загрузки сервера: $kills; сейчас $now_text" \
             'службы каскада перезапускаются сами; если повторяется - увеличьте память сервера. Отметка снимается перезагрузкой'
+    fi
+}
+
+# Резервная копия состояния контроллера. ENTRY - единственное место, где лежат
+# inventory, пароль Vault и состояние клиентов; копия на EXIT и FRONT позволяет
+# восстановить его на новом сервере. Строка есть только на ENTRY, который сам
+# управляет каскадом. Поля итога разделены табуляцией и никогда не пусты подряд,
+# кроме двух списков: они разбираются отдельно от времени.
+check_controller_backup() {
+    local line epoch when stored failed rest age_days
+    [[ "$controller_backup" == true ]] || return 0
+    line="$(head -n 1 "$controller_backup_status" 2>/dev/null || true)"
+    epoch="${line%%$'\t'*}"
+    if [[ ! "$epoch" =~ ^[0-9]+$ ]]; then
+        add WARN 'резервная копия состояния контроллера не создана' '' \
+            'на ENTRY: controller-backup; затем сохраните ключ: controller-backup key'
+        return 0
+    fi
+    rest="${line#*$'\t'}"
+    when="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    rest="${rest#*$'\t'}"
+    stored="${rest%%$'\t'*}"
+    rest="${rest#*$'\t'}"
+    failed="${rest%%$'\t'*}"
+    stored="${stored^^}"
+    failed="${failed^^}"
+    age_days=$(( ($(date +%s) - epoch) / 86400 ))
+    if [[ -n "$failed" || -z "$stored" ]]; then
+        add WARN 'резервная копия состояния контроллера сохранена не на всех серверах' \
+            "$when: нет на ${failed//,/, }" \
+            'проверьте связь с сервером, затем на ENTRY: controller-backup'
+    elif (( age_days >= controller_backup_stale_days )); then
+        add WARN 'резервная копия состояния контроллера устарела' "$when" \
+            'на ENTRY: controller-backup; причина: sudo systemctl --no-pager status kalimera-controller-backup.service'
+    else
+        add OK 'резервная копия состояния контроллера сохранена' "$when: ${stored//,/, }"
     fi
 }
 
@@ -459,6 +499,7 @@ main() {
     check_audit
     case "$segment" in
         ENTRY)
+            check_controller_backup
             check_ru_proxy
             check_dns
             check_tunnel

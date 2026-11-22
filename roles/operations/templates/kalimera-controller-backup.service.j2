@@ -1,0 +1,15 @@
+[Unit]
+Description=Резервная копия состояния контроллера KalimeraWG на EXIT и FRONT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ kalimera_weekly_path | default('/usr/local/libexec/kalimera-weekly') }} --controller-backup
+Environment=HOME=/root
+# Код 1 - копия не сохранена на одном из серверов. Это не отказ службы: итог
+# показывает cascade-check, а устаревшая копия даёт в нём замечание.
+SuccessExitStatus=1
+TimeoutStartSec=15min
+Nice=5
+UMask=0077

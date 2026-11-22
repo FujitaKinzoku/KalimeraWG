@@ -44,6 +44,8 @@ managed_files() {
 {{ kalimera_weekly_path | default('/usr/local/libexec/kalimera-weekly') }}
 /etc/systemd/system/kalimera-weekly.service
 /etc/systemd/system/kalimera-weekly.timer
+/etc/systemd/system/kalimera-controller-backup.service
+/etc/systemd/system/kalimera-controller-backup.timer
 /etc/systemd/system/{{ awg_watchdog_service_name | default('kalimera-watchdog.service') }}
 {{ awg_watchdog_dropin_path | default('/etc/systemd/system.conf.d/90-kalimera-watchdog.conf') }}
 {{ awg_oom_apply_path | default('/usr/local/libexec/kalimera-oom-apply') }}

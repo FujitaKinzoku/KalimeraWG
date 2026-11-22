@@ -1,0 +1,11 @@
+[Unit]
+Description=Ежедневная резервная копия состояния контроллера KalimeraWG
+
+[Timer]
+OnCalendar={{ awg_controller_backup_calendar }}
+# Пропущенный запуск (сервер был выключен) выполняется после загрузки.
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

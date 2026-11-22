@@ -195,10 +195,10 @@ By then the installer's settings already take precedence over this file.
 On ENTRY as root (`sudo -i` if you logged in as a regular user):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.7.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FujitaKinzoku/KalimeraWG/v3.8.0/install.sh | bash
 ```
 
-The command installs the pinned `v3.7.0` release rather than the moving `main`
+The command installs the pinned `v3.8.0` release rather than the moving `main`
 branch. The installer asks for server addresses and SSH ports, your public SSH
 key, the routing mode for Russian traffic, DNS, and whether you want SOCKS5,
 Telegram and FRONT. Enter EXIT and FRONT addresses as IPv4, not DNS names.
@@ -210,7 +210,7 @@ Never paste a private key.
 ```bash
 apt-get -o DPkg::Lock::Timeout=600 update
 apt-get -o DPkg::Lock::Timeout=600 install -y git
-git clone --branch v3.7.0 --depth 1 \
+git clone --branch v3.8.0 --depth 1 \
   https://github.com/FujitaKinzoku/KalimeraWG.git /root/KalimeraWG
 cd /root/KalimeraWG
 ./deploy
@@ -271,6 +271,7 @@ table at login. Full reference: `kalimera-help`.
 | Maintenance | `maintenance`, `update-all`, `kalimera-deploy --resume` |
 | Maintenance time | `maintenance-time 02:20 Asia/Manila`, `maintenance-time show` (ENTRY only) |
 | Cascade reboot (ENTRY only) | `cascade-reboot`: check without rebooting; `cascade-reboot --yes`; `cascade-reboot status`: automation, next window, result; `cascade-reboot auto on`, `auto off` |
+| Controller state backup | on ENTRY: `controller-backup`, `controller-backup key`; on EXIT or FRONT: `controller-backup export > controller.kbk` |
 | Updates | `kalimera-updates`, `kalimera-updates install kernel`, `kalimera-deploy --resume --update-amneziawg`, `--update-xray` |
 | Replacing FRONT | `kalimera-deploy --resume --replace-front`, then `--commit-front-replacement` |
 
@@ -373,6 +374,7 @@ The cascade can be left alone for months. What happens without a human:
 | FRONT certificate | when due | certbot, saved into the encrypted bundle |
 | TLS certificate expiry | once a day | FRONT looks at the certificates served by the origin domain and the CDN domain; `cascade-check` shows the expiry of each, and with less than 10 days left gives a note with the renewal command and a Telegram message |
 | Hung kernel | at once | the server reboots itself after a panic; a hung system is rebooted by the watchdog, when the kernel has one |
+| Controller state backup | once a day and after a deploy | an encrypted file on EXIT and FRONT: ENTRY is restored from it on a new server |
 | Telegram digest | once a week | cascade state, self-healing count, new versions, reboot |
 
 **Reboot guards.** A server is not rebooted if it might not come back or not
@@ -438,6 +440,44 @@ expiry, Telegram delivery, hang watchdog, memory shortage).
   `unreachable` backstop route, and a filter rule does not let such a packet
   out through WAN even when the policy routing rule itself is gone.
 
+**Losing ENTRY.** ENTRY is the only place that holds the cascade inventory, the
+Ansible Vault password, the orchestrator key and the client keys. Once a day
+and after every `kalimera-deploy --resume` it packs all of that into one
+encrypted file and stores it on EXIT and FRONT. The file is encrypted with a
+recovery key those servers do not have: the server that keeps the copy learns
+nothing from it.
+
+Do two things in advance:
+
+1. Save the recovery key outside the cascade servers, for example in a password
+   manager. On ENTRY: `controller-backup key`. Nobody can open the copy without
+   it.
+2. Pin the public address of ENTRY to your account in the cloud console
+   (a reserved or static address). EXIT and FRONT accept control only from that
+   address, and the AmneziaWG client configs carry it too.
+
+Restoring on a new Ubuntu 24.04 server with the same public address:
+
+```bash
+ssh -p PORT kalimera@EXIT 'sudo -n /usr/local/libexec/kalimera-admin-command controller-backup export' > controller.kbk
+scp controller.kbk root@NEW_ENTRY:/root/
+```
+
+Then on the new server, with the same KalimeraWG release that made the copy:
+
+```bash
+git clone --depth 1 --branch vVERSION https://github.com/FujitaKinzoku/KalimeraWG /root/KalimeraWG
+cd /root/KalimeraWG && ./deploy --restore-entry /root/controller.kbk
+```
+
+The command asks for the recovery key, lays the state out and applies it with
+the usual `--resume`: server and client keys are the same, client configs keep
+working. The new ENTRY gets a new SSH host key: your SSH client will warn about
+the change on first login. Restoring to a server with a different public
+address is not supported: the command stops and explains that the address has
+to be brought back. The state layout is covered by tests; the whole restore has
+not yet been run on a real server.
+
 **What the cascade will not do by itself.** It does not pay for servers, the
 domain, the proxy or the CDN. It does not bring back a server that failed to
 boot. It does not update AmneziaWG and Xray. FRONT warns about the domain
@@ -456,7 +496,7 @@ Move to a new release:
 
 ```bash
 sudo git -C /root/KalimeraWG fetch origin --tags
-sudo git -C /root/KalimeraWG switch --detach v3.7.0
+sudo git -C /root/KalimeraWG switch --detach v3.8.0
 kalimera-deploy --resume
 ```
 
@@ -483,6 +523,7 @@ full AmneziaWG 3.1 (0.85% loss on the channel instead of 6–8%), added the FRON
 role with a CDN fallback, and made the profile structure random for every
 installation.
 
+- **v3.8.0:** failures of the server itself. A server reboots by itself after a kernel panic, the kernel watchdog reboots a hung one, and under memory pressure the services that carry traffic are killed last. When the tunnel to EXIT is lost, foreign traffic is rejected instead of leaving from the ENTRY address. `cascade-check` shows the expiry of every TLS certificate of the cascade and warns 10 days ahead. Once a day ENTRY stores an encrypted copy of its state on EXIT and FRONT; `./deploy --restore-entry` restores it on a new server.
 - **v3.7.0:** unattended operation. Once a week ENTRY reboots the cascade servers one at a time when an update requires it, and does not start a reboot if a server might not come back. Telegram sends a weekly digest, announces new AmneziaWG and Xray versions and warns about domain expiry ahead of time. `cascade-check` shows the self-healing total for the whole cascade and available updates. Nightly maintenance finishes an interrupted package installation by itself and no longer fails because a mirror was unreachable once.
 - **v3.6.0:** self-healing. Every five minutes each server checks itself and fixes a local fault with the action for that exact fault; configuration drift and causes outside the server are named, not fixed. `cascade-check` shows a 24-hour summary: how many faults there were, how many were repaired and what is left. Nightly maintenance records why it failed and no longer fails because of a one-off error.
 - **v3.5.2:** a fix release after a review of the whole code base. Changes to the domain, address and port lists survive an ENTRY reboot. The daily audit and Telegram monitoring pass on schedule. Routing rules are applied without gaps, and a cascade update no longer restarts the routing service. Command messages match the outcome.

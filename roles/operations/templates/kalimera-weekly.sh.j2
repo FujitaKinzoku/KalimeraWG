@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Еженедельное окно ENTRY: сводка в Telegram и автоматическая перезагрузка
-# каскада. Управляющая программа запускается из окружения, установленного
-# последним deploy, без обращения к PyPI и Ansible Galaxy: окно не должно
+# Плановые задания ENTRY, которым нужна управляющая программа: еженедельное окно
+# (сводка в Telegram и автоматическая перезагрузка каскада) и резервная копия
+# состояния контроллера. Программа запускается из окружения, установленного
+# последним deploy, без обращения к PyPI и Ansible Galaxy: задания не должны
 # зависеть от их доступности.
 set -Eeuo pipefail
 
@@ -9,13 +10,19 @@ readonly repo={{ security_controller_repo_path | default('/root/KalimeraWG') | q
 readonly venv={{ kalimera_controller_venv_path | default('/root/.local/share/awg-iac/controller-venv') | quote }}
 export HOME="${HOME:-/root}"
 
+mode="${1:---cascade-weekly}"
+case "$mode" in
+    --cascade-weekly|--controller-backup) [[ $# -le 1 ]] || { echo 'Использование: kalimera-weekly [--cascade-weekly|--controller-backup]' >&2; exit 2; } ;;
+    *) echo 'Использование: kalimera-weekly [--cascade-weekly|--controller-backup]' >&2; exit 2 ;;
+esac
+
 if [[ ! -f "$repo/scripts/lib/interactive_deploy.py" ]]; then
-    echo 'Управляющий репозиторий KalimeraWG не найден: еженедельное окно пропущено.' >&2
+    echo 'Управляющий репозиторий KalimeraWG не найден: задание пропущено.' >&2
     exit 0
 fi
 cd "$repo"
 if [[ -x "$venv/bin/python" && -x "$venv/bin/ansible" ]]; then
     export PATH="$venv/bin:$PATH"
-    exec "$venv/bin/python" "$repo/scripts/lib/interactive_deploy.py" --repo-root "$repo" --cascade-weekly
+    exec "$venv/bin/python" "$repo/scripts/lib/interactive_deploy.py" --repo-root "$repo" "$mode"
 fi
-exec "$repo/deploy" --cascade-weekly
+exec "$repo/deploy" "$mode"

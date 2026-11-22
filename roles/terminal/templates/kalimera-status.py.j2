@@ -572,6 +572,8 @@ def command_panels() -> None:
                 ("cascade-reboot auto on|off", "включить автоматику (и снять остановку) или выключить", "INFO"),
                 ("maintenance-time ЧЧ:ММ ЗОНА", "время ночного обслуживания, например 02:20 Asia/Manila", "INFO"),
                 ("maintenance-time show", "текущее время ночного обслуживания", "INFO"),
+                ("controller-backup", "копия состояния контроллера на EXIT и FRONT", "INFO"),
+                ("controller-backup key", "ключ восстановления: сохранить вне серверов", "INFO"),
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
