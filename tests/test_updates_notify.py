@@ -55,10 +55,16 @@ FAKES = {
     "xray": 'printf "Xray 26.10.31 (Xray, Penetrates Everything.)\\n"',
     # s_client отдаёт вместо сертификата имя домена, x509 по нему находит файл с
     # датами. Домен, для которого файла нет, по TLS не отвечает.
+    # Пауза между попытками чтения сертификата в тестах не выдерживается.
+    "sleep": "exit 0",
     "openssl": (
         'case "$1" in\n'
         "    s_client)\n"
+        "        printf '%s\\n' \"$*\" >>\"$FAKE_DIR/openssl.log\"\n"
         '        while (( $# > 0 )); do [[ "$1" != -servername ]] || name="$2"; shift; done\n'
+        # Первые ответы теряются столько раз, сколько записано в файле tls-failures.
+        '        left="$(cat "$FAKE_DIR/tls-failures" 2>/dev/null || echo 0)"\n'
+        '        if (( left > 0 )); then echo $(( left - 1 )) >"$FAKE_DIR/tls-failures"; exit 1; fi\n'
         '        [[ -e "$FAKE_DIR/cert-$name" ]] || exit 1\n'
         "        printf 'CERT %s\\n' \"$name\"\n"
         "        ;;\n"
@@ -333,9 +339,13 @@ def openssl_date(moment: datetime.datetime) -> str:
     return f"{MONTHS[moment.month - 1]} {moment.day:2d} {moment:%H:%M:%S} {moment.year} GMT"
 
 
-class CertificateExpiryTests(UpdatesCase):
+class CertificateCase(UpdatesCase):
     role = "front"
-    extra = {"front_access_modes": ["cdn"]}
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Сертификат origin-домена исправен, если тест не говорит иного.
+        self.certificate("origin.example.uk", days_left=60)
 
     def certificate(self, name: str, *, days_left: float, lifetime: int = 90) -> str:
         """Сертификат домена: сколько суток осталось и на сколько суток он выдан."""
@@ -346,40 +356,83 @@ class CertificateExpiryTests(UpdatesCase):
         )
         return end.date().isoformat()
 
-    def test_valid_certificate_is_ok_and_silent(self) -> None:
-        date = self.certificate("www.example.uk", days_left=60)
+    def state_rows(self) -> list[list[str]]:
+        return [line.split("\t") for line in self.state().splitlines() if "\tcert\t" in line]
+
+
+class CertificateExpiryTests(CertificateCase):
+    """Срок TLS-сертификатов каскада: origin-домен FRONT и домен CDN."""
+
+    extra = {"front_access_modes": ["cdn"]}
+
+    def test_every_certificate_of_the_cascade_is_recorded_with_the_way_to_renew(self) -> None:
+        # Сертификатов в каскаде два: origin-домена на FRONT и домена CDN. Срок
+        # записывается и для действующего: cascade-check показывает его всегда.
+        origin = self.certificate("origin.example.uk", days_left=59)
+        cdn = self.certificate("www.example.uk", days_left=78)
         output = self.run_updates("--scheduled")
-        self.assertIn(f"OK   сертификат домена www.example.uk действует до {date}", output)
+        self.assertIn(f"OK   сертификат origin-домена FRONT origin.example.uk действует до {origin}", output)
+        self.assertIn(f"OK   сертификат CDN-домена www.example.uk действует до {cdn}", output)
         self.assertNotIn("WARN", output)
         self.assertEqual(self.sent(), [])
+        rows = self.state_rows()
+        self.assertEqual([row[0] for row in rows], ["OK", "OK"])
+        self.assertIn("sudo systemctl start certbot.service", rows[0][3])
+        self.assertIn("sudo systemctl reload nginx", rows[0][3])
+        self.assertIn("в личном кабинете CDN", rows[1][3])
 
-    def test_certificate_that_was_not_renewed_is_a_warning_with_a_notification(self) -> None:
+    def test_origin_certificate_is_read_from_the_local_nginx(self) -> None:
+        # В облаке с внешним адресом через NAT сервер до собственного публичного
+        # адреса не дойдёт: свой сертификат FRONT запрашивает по loopback.
+        self.certificate("www.example.uk", days_left=60)
+        self.run_updates("--scheduled")
+        calls = (self.dir / "openssl.log").read_text(encoding="utf-8").splitlines()
+        self.assertIn("s_client -connect 127.0.0.1:443 -servername origin.example.uk", calls)
+        self.assertIn("s_client -connect www.example.uk:443 -servername www.example.uk", calls)
+
+    def test_less_than_ten_days_is_a_warning_with_a_notification(self) -> None:
         # Сертификат CDN на FRONT не хранится, и его срок раньше не проверялся: об
         # истечении узнавали, когда клиенты переставали подключаться.
-        date = self.certificate("www.example.uk", days_left=10)
+        date = self.certificate("www.example.uk", days_left=9)
         output = self.run_updates("--scheduled")
-        self.assertRegex(output, rf"WARN сертификат домена www\.example\.uk истекает {date} \(через 10 дн\.\)")
+        self.assertRegex(output, rf"WARN сертификат CDN-домена www\.example\.uk истекает {date} \(через 9 дн\.\)")
         self.assertIn("в личном кабинете CDN", output)
         self.assertEqual(len(self.sent()), 1, self.sent())
         self.assertTrue(self.sent()[0].startswith("AWG FRONT: заканчивается срок TLS-сертификата | "), self.sent()[0])
+
+    def test_ten_days_and_more_is_not_a_warning(self) -> None:
+        self.certificate("www.example.uk", days_left=10)
+        output = self.run_updates("--scheduled")
+        self.assertNotIn("WARN", output)
+        self.assertEqual(self.sent(), [])
+
+    def test_origin_certificate_warns_with_the_certbot_advice(self) -> None:
+        self.certificate("origin.example.uk", days_left=5)
+        self.certificate("www.example.uk", days_left=60)
+        output = self.run_updates("--scheduled")
+        self.assertIn("WARN сертификат origin-домена FRONT origin.example.uk истекает", output)
+        self.assertIn("sudo systemctl start certbot.service, затем sudo systemctl reload nginx", output)
+        self.assertNotIn("в личном кабинете CDN", output)
 
     def days_pass(self, days: int) -> None:
         (self.dir / "days-passed").write_text(f"{days}\n", encoding="utf-8")
         self.run_updates("--scheduled")
 
     def test_reminder_repeats_at_thresholds_not_daily(self) -> None:
-        self.certificate("www.example.uk", days_left=12)
+        self.certificate("www.example.uk", days_left=9)
         self.days_pass(0)
         self.days_pass(1)
-        self.assertEqual(len(self.sent()), 1, self.sent())  # порог 14 дней
-        self.days_pass(5)
-        self.days_pass(6)
+        self.assertEqual(len(self.sent()), 1, self.sent())  # первое сообщение
+        self.days_pass(2)
+        self.days_pass(3)
         self.assertEqual(len(self.sent()), 2, self.sent())  # порог 7 дней
-        self.days_pass(11)
-        self.assertEqual(len(self.sent()), 3, self.sent())  # порог 1 день
+        self.days_pass(6)
+        self.assertEqual(len(self.sent()), 3, self.sent())  # порог 3 дня
+        self.days_pass(8)
+        self.assertEqual(len(self.sent()), 4, self.sent())  # порог 1 день
 
     def test_renewed_certificate_clears_the_mark(self) -> None:
-        self.certificate("www.example.uk", days_left=10)
+        self.certificate("www.example.uk", days_left=8)
         self.run_updates("--scheduled")
         self.assertTrue((self.notified / "cert-notified").exists())
         self.certificate("www.example.uk", days_left=89)
@@ -388,23 +441,34 @@ class CertificateExpiryTests(UpdatesCase):
         self.assertEqual(len(self.sent()), 1)
 
     def test_short_lived_certificate_is_judged_by_its_own_lifetime(self) -> None:
-        # Сертификат на 45 дней продлевается, когда осталось около 15: порог в 14
+        # Сертификат на 30 дней продлевается, когда осталось около 10: порог в 10
         # дней давал бы замечание перед каждым исправным продлением.
-        self.certificate("www.example.uk", days_left=12, lifetime=45)
+        self.certificate("www.example.uk", days_left=8, lifetime=30)
         self.assertNotIn("WARN", self.run_updates("--scheduled"))
-        self.certificate("www.example.uk", days_left=8, lifetime=45)
-        self.assertIn("WARN сертификат домена www.example.uk истекает", self.run_updates("--scheduled"))
+        self.certificate("www.example.uk", days_left=5, lifetime=30)
+        self.assertIn("WARN сертификат CDN-домена www.example.uk истекает", self.run_updates("--scheduled"))
 
     def test_expired_certificate_is_named(self) -> None:
         date = self.certificate("www.example.uk", days_left=-2)
-        self.assertIn(f"WARN сертификат домена www.example.uk истёк {date}", self.run_updates())
+        self.assertIn(f"WARN сертификат CDN-домена www.example.uk истёк {date}", self.run_updates())
 
-    def test_unanswering_domain_is_not_a_certificate_warning(self) -> None:
-        # О недоступности домена сообщает awg-health; здесь срок просто не определён.
+    def test_one_lost_answer_does_not_hide_the_certificate(self) -> None:
+        # Итог проверки хранится сутки: один потерянный ответ давал бы на весь день
+        # строку «срок не определён».
+        self.certificate("www.example.uk", days_left=60)
+        (self.dir / "tls-failures").write_text("2\n", encoding="utf-8")
         output = self.run_updates("--scheduled")
-        self.assertIn("INFO срок сертификата домена www.example.uk не определён", output)
+        self.assertIn("OK   сертификат origin-домена FRONT origin.example.uk действует до", output)
+        self.assertNotIn("срок сертификата", output)
+
+    def test_unanswering_domain_has_an_unknown_expiry(self) -> None:
+        # О недоступности домена сообщает awg-health; здесь срок не определён, и
+        # cascade-check показывает это замечанием.
+        output = self.run_updates("--scheduled")
+        self.assertIn("INFO срок сертификата CDN-домена www.example.uk не определён", output)
         self.assertNotIn("WARN", output)
         self.assertEqual(self.sent(), [])
+        self.assertEqual(self.state_rows()[1][0], "INFO")
 
     def test_entry_does_not_check_certificates(self) -> None:
         self.certificate("www.example.uk", days_left=3)
@@ -412,17 +476,17 @@ class CertificateExpiryTests(UpdatesCase):
         self.assertNotIn("cert", self.state())
 
 
-class DirectCertificateTests(CertificateExpiryTests):
-    extra = {"front_access_modes": ["cdn", "direct"], "front_direct_domain": "origin.example.uk"}
+class DirectOnlyCertificateTests(CertificateCase):
+    """FRONT без CDN: сертификат в каскаде один, origin-домена."""
 
-    def test_direct_domain_is_checked_with_its_own_advice(self) -> None:
-        self.certificate("www.example.uk", days_left=60)
-        self.certificate("origin.example.uk", days_left=5)
+    extra = {"front_access_modes": ["direct"]}
+
+    def test_only_the_origin_certificate_exists(self) -> None:
+        self.certificate("www.example.uk", days_left=3)
         output = self.run_updates("--scheduled")
-        self.assertIn("OK   сертификат домена www.example.uk действует до", output)
-        self.assertIn("WARN сертификат домена origin.example.uk истекает", output)
-        self.assertIn("sudo systemctl start certbot.service", output)
-        self.assertNotIn("в личном кабинете CDN", output)
+        self.assertIn("OK   сертификат origin-домена FRONT origin.example.uk действует до", output)
+        self.assertNotIn("CDN-домена", output)
+        self.assertEqual(len(self.state_rows()), 1)
 
 
 if __name__ == "__main__":

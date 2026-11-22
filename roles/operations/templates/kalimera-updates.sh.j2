@@ -27,11 +27,16 @@ readonly ORIGIN_DOMAIN={{ front_origin_domain | default('') | quote }}
 readonly CDN_DOMAIN={{ front_cdn_domain | default('') | quote }}
 readonly DOMAIN_WARN_DAYS={{ kalimera_updates_domain_warn_days | default(30) | int }}
 readonly RDAP_BOOTSTRAP={{ kalimera_updates_rdap_bootstrap | default('https://data.iana.org/rdap/dns.json') | quote }}
-# Сертификаты доменов, по которым подключаются клиенты: домен CDN и, в прямом
-# режиме, домен самого FRONT. Проверяется сертификат, который сервер отдаёт на
-# деле, а не файл на диске: сертификат CDN на FRONT не хранится вовсе.
-readonly -a CERT_DOMAINS=({% if 'cdn' in (front_access_modes | default([])) and (front_cdn_domain | default('')) %}{{ front_cdn_domain | quote }}{% endif %}{% if 'direct' in (front_access_modes | default([])) and (front_direct_domain | default('')) %} {{ front_direct_domain | quote }}{% endif %})
-readonly CERT_WARN_DAYS={{ kalimera_updates_cert_warn_days | default(14) | int }}
+# TLS-сертификаты каскада. Их два: сертификат origin-домена на самом FRONT (его
+# выпускает certbot; им FRONT отвечает CDN и клиентам прямого режима) и сертификат
+# домена CDN (его выпускает CDN, на FRONT он не хранится). Проверяется
+# сертификат, который сервер отдаёт на деле, а не файл на диске. Остальные узлы
+# каскада сертификатов не имеют: AmneziaWG и REALITY работают на ключах.
+readonly CERT_CDN_DOMAIN={% if 'cdn' in (front_access_modes | default([])) %}{{ front_cdn_domain | default('') | quote }}{% else %}''{% endif %}
+
+# Замечание появляется, когда до конца срока осталось меньше стольких дней.
+readonly CERT_WARN_DAYS={{ kalimera_updates_cert_warn_days | default(10) | int }}
+readonly CERT_ATTEMPTS=3
 {% endif %}
 
 {% raw %}
@@ -455,55 +460,70 @@ check_domains() {
     done
 }
 
-# "начало конец" действия сертификата, который домен $1 отдаёт по TLS, в секундах.
+# "начало конец" действия сертификата в секундах. $1 - имя домена (SNI), $2 -
+# адрес, к которому идёт подключение. Попыток несколько: итог проверки хранится
+# сутки, и один потерянный ответ давал бы замечание на весь день.
 served_certificate_dates() {
-    local name="$1" answer dates start end
-    answer="$(timeout 20 openssl s_client -connect "$name:443" -servername "$name" </dev/null 2>/dev/null || true)"
-    dates="$(openssl x509 -noout -startdate -enddate <<<"$answer" 2>/dev/null || true)"
-    start="$(sed -n 's/^notBefore=//p' <<<"$dates")"
-    end="$(sed -n 's/^notAfter=//p' <<<"$dates")"
-    [[ -n "$start" && -n "$end" ]] || return 1
-    start="$(date -u -d "$start" +%s 2>/dev/null || true)"
-    end="$(date -u -d "$end" +%s 2>/dev/null || true)"
-    [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
-    printf '%s %s\n' "$start" "$end"
+    local name="$1" host="$2" attempt answer dates start end
+    for (( attempt = 1; attempt <= CERT_ATTEMPTS; attempt++ )); do
+        (( attempt == 1 )) || sleep 3
+        answer="$(timeout 20 openssl s_client -connect "$host:443" -servername "$name" </dev/null 2>/dev/null || true)"
+        dates="$(openssl x509 -noout -startdate -enddate <<<"$answer" 2>/dev/null || true)"
+        start="$(sed -n 's/^notBefore=//p' <<<"$dates")"
+        end="$(sed -n 's/^notAfter=//p' <<<"$dates")"
+        [[ -n "$start" && -n "$end" ]] || continue
+        start="$(date -u -d "$start" +%s 2>/dev/null || true)"
+        end="$(date -u -d "$end" +%s 2>/dev/null || true)"
+        [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || continue
+        printf '%s %s\n' "$start" "$end"
+        return 0
+    done
+    return 1
 }
 
-# Срок сертификатов, по которым подключаются клиенты. Сертификат CDN продлевает
-# сам CDN, сертификат FRONT - certbot; замечание появляется, когда до конца срока
-# осталось меньше CERT_WARN_DAYS дней, то есть продление уже должно было пройти и
-# не прошло. У короткоживущих сертификатов порог - пятая часть их срока: иначе
-# исправный сертификат на 45 дней давал бы замечание перед каждым продлением.
-# Домен, не ответивший по TLS, - не предмет этой проверки: о недоступности
-# сообщает awg-health.
-check_certificates() {
-    local name dates start end now days limit expiry action
+# Строка о сертификате: $1 - чей он ("CDN-домена ИМЯ"), $2 - имя для TLS, $3 -
+# адрес подключения, $4 - как продлить. Команда продления записывается и для
+# действующего сертификата: cascade-check показывает срок всегда.
+#
+# Замечание появляется, когда до конца срока осталось меньше CERT_WARN_DAYS дней:
+# certbot и CDN продлевают сертификат на 90 дней за месяц до конца срока, поэтому
+# такой остаток значит, что продление не сработало. У короткоживущих сертификатов
+# порог - пятая часть их срока: иначе исправный сертификат на 45 дней давал бы
+# замечание перед каждым продлением.
+check_certificate() {
+    local title="$1" name="$2" host="$3" action="$4" dates start end now days limit expiry
+    dates="$(served_certificate_dates "$name" "$host" || true)"
+    if [[ -z "$dates" ]]; then
+        record INFO cert "срок сертификата $title не определён: домен не ответил по TLS" \
+            'повторить: на FRONT kalimera-updates; доступность домена проверяет awg-health --strict'
+        return 0
+    fi
+    read -r start end <<<"$dates"
     now="$(date +%s)"
-    for name in "${CERT_DOMAINS[@]}"; do
-        [[ "$name" == *.* ]] || continue
-        dates="$(served_certificate_dates "$name" || true)"
-        if [[ -z "$dates" ]]; then
-            record INFO cert "срок сертификата домена $name не определён: домен не ответил по TLS"
-            continue
-        fi
-        read -r start end <<<"$dates"
-        expiry="$(date -u -d "@$end" +%Y-%m-%d)"
-        days=$(( (end - now) / 86400 ))
-        limit=$(( (end - start) / 86400 / 5 ))
-        (( limit <= CERT_WARN_DAYS )) || limit=$CERT_WARN_DAYS
-        if [[ "$name" == "$CDN_DOMAIN" ]]; then
-            action='проверьте выпуск сертификата в личном кабинете CDN: автоматическое продление не сработало'
-        else
-            action='на FRONT: sudo systemctl start certbot.service; причина: sudo journalctl -u certbot -b --no-pager'
-        fi
-        if (( end <= now )); then
-            record WARN cert "сертификат домена $name истёк $expiry" "$action"
-        elif (( days <= limit )); then
-            record WARN cert "сертификат домена $name истекает $expiry (через $days дн.)" "$action"
-        else
-            record OK cert "сертификат домена $name действует до $expiry"
-        fi
-    done
+    expiry="$(date -u -d "@$end" +%Y-%m-%d)"
+    days=$(( (end - now) / 86400 ))
+    limit=$(( (end - start) / 86400 / 5 ))
+    (( limit <= CERT_WARN_DAYS )) || limit=$CERT_WARN_DAYS
+    if (( end <= now )); then
+        record WARN cert "сертификат $title истёк $expiry" "$action"
+    elif (( days < limit )); then
+        record WARN cert "сертификат $title истекает $expiry (через $days дн.)" "$action"
+    else
+        record OK cert "сертификат $title действует до $expiry" "$action"
+    fi
+}
+
+check_certificates() {
+    # Сертификат origin-домена запрашивается у своего же Nginx по loopback: в облаке
+    # с внешним адресом через NAT сервер до собственного публичного адреса не дойдёт.
+    if [[ "$ORIGIN_DOMAIN" == *.* ]]; then
+        check_certificate "origin-домена FRONT $ORIGIN_DOMAIN" "$ORIGIN_DOMAIN" 127.0.0.1 \
+            'на FRONT: sudo systemctl start certbot.service, затем sudo systemctl reload nginx; причина отказа: sudo journalctl -u certbot -b --no-pager'
+    fi
+    if [[ "$CERT_CDN_DOMAIN" == *.* ]]; then
+        check_certificate "CDN-домена $CERT_CDN_DOMAIN" "$CERT_CDN_DOMAIN" "$CERT_CDN_DOMAIN" \
+            "сертификат выпускает CDN: в личном кабинете CDN откройте ресурс и перевыпустите сертификат Let's Encrypt или загрузите новый собственный"
+    fi
 }
 {% endif %}
 

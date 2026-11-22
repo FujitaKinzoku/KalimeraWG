@@ -27,6 +27,10 @@ kalimera_updates_state_dir: /run/kalimera-updates
 kalimera_updates_apt_lock_path: /run/awg-apt-maintenance.lock
 kalimera_updates_calendar: "*-*-* 06:10:00"
 kalimera_updates_xray_releases_api: https://api.github.com/repos/XTLS/Xray-core/releases/latest
+# TLS-сертификаты каскада (origin-домен FRONT и домен CDN): замечание в
+# cascade-check и сообщение в Telegram, когда до конца срока осталось меньше
+# стольких дней. Срок каждого сертификата cascade-check показывает всегда.
+kalimera_updates_cert_warn_days: 10
 # Работа без присмотра. Раз в неделю ENTRY отправляет сводку в Telegram и, если
 # после обновления нужна перезагрузка, перезагружает серверы каскада по одному
 # (FRONT, EXIT, ENTRY) с проверкой после каждого.
