@@ -485,6 +485,10 @@ build_summary() {
     local re_counts='сбоев ([0-9]+), восстановлено ([0-9]+)'
     local re_cleared='прошло без действия службы ([0-9]+)'
     local re_open='не восстановлено ([0-9]+)'
+    # Сертификаты: «действует до 2027-02-08, осталось 78 дн.».
+    local cert_total=0 cert_worst=OK cert_next='' cert_next_left='' cert_date
+    local re_cert_date='(действует до|истекает|истёк) ([0-9]{4}-[0-9]{2}-[0-9]{2})'
+    local re_cert_left='осталось ([0-9]+) дн'
 
     for section in ENTRY EXIT FRONT LINK CDN DNS; do
         ok="${counts[$section:OK]:-0}"
@@ -606,6 +610,8 @@ build_summary() {
         while IFS= read -r line; do
             split_row "$line"
             [[ "$seg" == CDN ]] || [[ "$seg" == FRONT && "$label" == *CDN* ]] || continue
+            # Сертификат CDN показывает группа «СЕРТИФИКАТЫ».
+            [[ "$label" != 'сертификат '* && "$label" != 'срок сертификата '* ]] || continue
             case "$status" in
                 OK) color="$c_info" ;;
                 WARN) color="$c_warn" ;;
@@ -615,6 +621,38 @@ build_summary() {
             [[ -z "$value" ]] || text+=": $value"
             sum_add "$color" "$text"
         done <"$rows_file"
+    fi
+
+    # TLS-сертификаты каскада: срок каждого виден всегда, а не только при
+    # замечании. Сертификаты есть только у FRONT (origin-домен) и у CDN.
+    sum_head 'СЕРТИФИКАТЫ'
+    while IFS= read -r line; do
+        split_row "$line"
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$label" == 'сертификат '* || "$label" == 'срок сертификата '* ]] || continue
+        cert_total=$((cert_total + 1))
+        if [[ "$status" != OK ]]; then
+            cert_worst=WARN
+        fi
+        if [[ "$value" =~ $re_cert_date ]]; then
+            cert_date="${BASH_REMATCH[2]}"
+            # Даты в виде ГГГГ-ММ-ДД сравниваются как строки.
+            if [[ -z "$cert_next" || "$cert_date" < "$cert_next" ]]; then
+                cert_next="$cert_date"
+                cert_next_left=''
+                [[ ! "$value" =~ $re_cert_left ]] || cert_next_left="${BASH_REMATCH[1]}"
+            fi
+        fi
+        text="$label"
+        [[ -z "$value" ]] || text+=": $value"
+        sum_add "$(status_color "$status")" "$text"
+    done <"$rows_file"
+    if (( cert_total == 0 )); then
+        if [[ "$front_present" == true ]]; then
+            sum_add "$c_info" 'сведений нет: проверка на FRONT ещё не выполнялась (kalimera-updates) или отчёт не получен'
+        else
+            sum_add "$c_info" 'в каскаде без FRONT TLS-сертификатов нет'
+        fi
     fi
 
     sum_head 'DNS'
@@ -675,6 +713,15 @@ build_summary() {
         (( heal_cleared == 0 )) || text+=", прошло без действия службы $heal_cleared"
         (( heal_open == 0 )) || text+=", не восстановлено $heal_open"
         sum_add "$(status_color "$heal_worst")" "$text · статус $heal_worst"
+    fi
+    # Сертификаты по всему каскаду: сколько их и какой истекает первым.
+    if (( cert_total > 0 )); then
+        text="сертификаты: $cert_total"
+        if [[ -n "$cert_next" ]]; then
+            text+=", ближайший срок $cert_next"
+            [[ -z "$cert_next_left" ]] || text+=" (осталось $cert_next_left дн.)"
+        fi
+        sum_add "$(status_color "$cert_worst")" "$text · статус $cert_worst"
     fi
 }
 

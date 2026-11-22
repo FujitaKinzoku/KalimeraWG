@@ -205,6 +205,35 @@ check_memory() {
     fi
 }
 
+# Строка о TLS-сертификате каскада из последней проверки kalimera-updates на FRONT.
+# Срок виден всегда, а не только при замечании: по нему сводка составляет группу
+# «СЕРТИФИКАТЫ». Остаток дней считается на момент отчёта, до конца дня окончания.
+# $1 - итог проверки (OK, WARN или INFO), $2 - её текст, $3 - как продлить.
+cert_row() {
+    local level="$1" message="$2" action="$3" title verb expiry epoch days value
+    local re='^(сертификат .+) (действует до|истекает|истёк) ([0-9]{4}-[0-9]{2}-[0-9]{2})'
+    if [[ ! "$message" =~ $re ]]; then
+        # Срок не определён: домен не ответил по TLS. Сертификат без известного
+        # срока - замечание: ради срока строка и существует.
+        add WARN "$message" '' "$action"
+        return 0
+    fi
+    title="${BASH_REMATCH[1]}"
+    verb="${BASH_REMATCH[2]}"
+    expiry="${BASH_REMATCH[3]}"
+    value="$verb $expiry"
+    epoch="$(date -u -d "$expiry" +%s 2>/dev/null || true)"
+    if [[ "$verb" != 'истёк' && "$epoch" =~ ^[0-9]+$ ]]; then
+        days=$(( (epoch + 86400 - $(date +%s)) / 86400 ))
+        (( days < 0 )) || value+=", осталось $days дн."
+    fi
+    if [[ "$level" == OK ]]; then
+        add OK "$title" "$value"
+    else
+        add WARN "$title" "$value" "$action"
+    fi
+}
+
 # Новые версии AmneziaWG и Xray из последней проверки kalimera-updates. Это не
 # ошибка: строка идёт со статусом OK и попадает в группу «ОБНОВЛЕНИЯ» сводки.
 # Новое ядро сюда не входит: его ставит ночное обслуживание.
@@ -216,9 +245,7 @@ check_updates() {
             UPD:amneziawg|UPD:xray) add OK "обновление компонента: $message" "${action:-}" ;;
             # Срок регистрации домена: замечание появляется заранее, за месяц.
             WARN:domain) add WARN "$message" '' "${action:-}" ;;
-            # Сертификат домена, по которому подключаются клиенты: обычно его
-            # продлевает CDN, и замечание значит, что продление не сработало.
-            WARN:cert) add WARN "$message" '' "${action:-}" ;;
+            OK:cert|WARN:cert|INFO:cert) cert_row "$level" "$message" "${action:-}" ;;
         esac
     done <"$updates_state"
 }

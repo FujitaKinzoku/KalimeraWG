@@ -371,7 +371,7 @@ The cascade can be left alone for months. What happens without a human:
 | Reboot after an update | once a week | ENTRY reboots FRONT, EXIT and itself one at a time and checks the cascade after each |
 | Local faults | every 5 minutes | `self-heal`: the action for the exact check that failed |
 | FRONT certificate | when due | certbot, saved into the encrypted bundle |
-| CDN certificate expiry | once a day | FRONT looks at the certificate the domain actually serves; a note and a Telegram message when the renewal did not happen |
+| TLS certificate expiry | once a day | FRONT looks at the certificates served by the origin domain and the CDN domain; `cascade-check` shows the expiry of each, and with less than 10 days left gives a note with the renewal command and a Telegram message |
 | Hung kernel | at once | the server reboots itself after a panic; a hung system is rebooted by the watchdog, when the kernel has one |
 | Telegram digest | once a week | cascade state, self-healing count, new versions, reboot |
 
