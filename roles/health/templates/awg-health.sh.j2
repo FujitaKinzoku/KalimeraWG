@@ -563,6 +563,22 @@ has_default_route() {
     ip -4 route show table "$table" | grep -Eq "^default .*dev ${interface}( |$)"
 }
 
+# Запасной маршрут остаётся в таблице, когда интерфейс до EXIT исчезает: без него
+# пакет с меткой EXIT ушёл бы по основной таблице с адреса ENTRY.
+has_backstop_route() {
+    ip -4 route show table "$1" | grep -Eq '^unreachable default( |$)'
+}
+
+# Правило фильтра отклоняет пакет с меткой EXIT на выходе через WAN: оно работает и
+# тогда, когда пропало само правило policy routing.
+exit_guard_present() {
+    local wan="$1" mark="$2" chain
+    for chain in FORWARD OUTPUT; do
+        iptables -w 10 -C "$chain" -o "$wan" -m mark --mark "$mark" \
+            -j REJECT --reject-with icmp-net-unreachable 2>/dev/null || return 1
+    done
+}
+
 ufw_active() {
     ufw status | grep -Eq '^Status: active$'
 }
@@ -756,6 +772,9 @@ reality_ru_failover_synced() {
 printf 'Проверка AWG: {{ awg_node_role }}\n'
 check 'запуск от root' test "$(id -u)" -eq 0
 check_minor 'Ubuntu 24.04' grep -Eq '^VERSION_ID="?24\.04"?$' /etc/os-release
+{% if (security_kernel_panic_reboot_seconds | default(10) | int) != 0 %}
+check_value 'ядро перезагружается после panic' "$(sysctl -n kernel.panic)" {{ security_kernel_panic_reboot_seconds | default(10) | int }} WARN
+{% endif %}
 {% if awg_node_role | default('') in ['entry', 'exit'] %}
 # В этом блоке находятся только проверки ядра и сетевого профиля AWG.
 # FRONT получает общие политики security, operations и no-logs, но не
@@ -901,6 +920,8 @@ fi
 check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
 check 'маршрут по умолчанию в таблице 100' has_default_route {{ entry_exit_table }} {{ entry_exit_interface | quote }}
 check 'mark 0x1 направляется через EXIT сервер' route_uses_interface 8.8.8.8 {{ entry_exit_mark | quote }} {{ entry_exit_interface | quote }}
+check 'запасной маршрут unreachable в таблице 100' has_backstop_route {{ entry_exit_table }}
+check 'mark 0x1 не выходит через WAN ENTRY сервера' exit_guard_present {{ entry_wan_interface | quote }} {{ entry_exit_mark | quote }}
 check_minor 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
 check 'ipset force_exit' ipset list force_exit
 check 'ipset force_ru' ipset list force_ru

@@ -27,6 +27,11 @@ readonly ORIGIN_DOMAIN={{ front_origin_domain | default('') | quote }}
 readonly CDN_DOMAIN={{ front_cdn_domain | default('') | quote }}
 readonly DOMAIN_WARN_DAYS={{ kalimera_updates_domain_warn_days | default(30) | int }}
 readonly RDAP_BOOTSTRAP={{ kalimera_updates_rdap_bootstrap | default('https://data.iana.org/rdap/dns.json') | quote }}
+# Сертификаты доменов, по которым подключаются клиенты: домен CDN и, в прямом
+# режиме, домен самого FRONT. Проверяется сертификат, который сервер отдаёт на
+# деле, а не файл на диске: сертификат CDN на FRONT не хранится вовсе.
+readonly -a CERT_DOMAINS=({% if 'cdn' in (front_access_modes | default([])) and (front_cdn_domain | default('')) %}{{ front_cdn_domain | quote }}{% endif %}{% if 'direct' in (front_access_modes | default([])) and (front_direct_domain | default('')) %} {{ front_direct_domain | quote }}{% endif %})
+readonly CERT_WARN_DAYS={{ kalimera_updates_cert_warn_days | default(14) | int }}
 {% endif %}
 
 {% raw %}
@@ -449,6 +454,57 @@ check_domains() {
         fi
     done
 }
+
+# "начало конец" действия сертификата, который домен $1 отдаёт по TLS, в секундах.
+served_certificate_dates() {
+    local name="$1" answer dates start end
+    answer="$(timeout 20 openssl s_client -connect "$name:443" -servername "$name" </dev/null 2>/dev/null || true)"
+    dates="$(openssl x509 -noout -startdate -enddate <<<"$answer" 2>/dev/null || true)"
+    start="$(sed -n 's/^notBefore=//p' <<<"$dates")"
+    end="$(sed -n 's/^notAfter=//p' <<<"$dates")"
+    [[ -n "$start" && -n "$end" ]] || return 1
+    start="$(date -u -d "$start" +%s 2>/dev/null || true)"
+    end="$(date -u -d "$end" +%s 2>/dev/null || true)"
+    [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
+    printf '%s %s\n' "$start" "$end"
+}
+
+# Срок сертификатов, по которым подключаются клиенты. Сертификат CDN продлевает
+# сам CDN, сертификат FRONT - certbot; замечание появляется, когда до конца срока
+# осталось меньше CERT_WARN_DAYS дней, то есть продление уже должно было пройти и
+# не прошло. У короткоживущих сертификатов порог - пятая часть их срока: иначе
+# исправный сертификат на 45 дней давал бы замечание перед каждым продлением.
+# Домен, не ответивший по TLS, - не предмет этой проверки: о недоступности
+# сообщает awg-health.
+check_certificates() {
+    local name dates start end now days limit expiry action
+    now="$(date +%s)"
+    for name in "${CERT_DOMAINS[@]}"; do
+        [[ "$name" == *.* ]] || continue
+        dates="$(served_certificate_dates "$name" || true)"
+        if [[ -z "$dates" ]]; then
+            record INFO cert "срок сертификата домена $name не определён: домен не ответил по TLS"
+            continue
+        fi
+        read -r start end <<<"$dates"
+        expiry="$(date -u -d "@$end" +%Y-%m-%d)"
+        days=$(( (end - now) / 86400 ))
+        limit=$(( (end - start) / 86400 / 5 ))
+        (( limit <= CERT_WARN_DAYS )) || limit=$CERT_WARN_DAYS
+        if [[ "$name" == "$CDN_DOMAIN" ]]; then
+            action='проверьте выпуск сертификата в личном кабинете CDN: автоматическое продление не сработало'
+        else
+            action='на FRONT: sudo systemctl start certbot.service; причина: sudo journalctl -u certbot -b --no-pager'
+        fi
+        if (( end <= now )); then
+            record WARN cert "сертификат домена $name истёк $expiry" "$action"
+        elif (( days <= limit )); then
+            record WARN cert "сертификат домена $name истекает $expiry (через $days дн.)" "$action"
+        else
+            record OK cert "сертификат домена $name действует до $expiry"
+        fi
+    done
+}
 {% endif %}
 
 # Сообщение в Telegram уходит один раз на каждое новое содержание ($2); $1 - файл
@@ -480,10 +536,10 @@ domain_bucket() {
 }
 
 # Уведомления по итогам плановой проверки: новые версии AmneziaWG и Xray с
-# командой установки и срок регистрации домена. Новое ядро сюда не входит: его
+# командой установки, срок регистрации домена и срок TLS-сертификата. Новое ядро сюда не входит: его
 # ставит ночное обслуживание, а перезагрузку выполняет cascade-reboot.
 notify_news() {
-    local level component message action node updates='' domains='' key=''
+    local level component message action node updates='' domains='' key='' certs='' cert_key=''
     local newline=$'\n' days_re='через ([0-9]+) дн'
     node="${ROLE^^}"
     while IFS=$'\t' read -r level component message action; do
@@ -505,6 +561,16 @@ notify_news() {
                     key+="$message$newline"
                 fi
                 ;;
+            WARN:cert)
+                # Те же пороги, что у домена: сообщение повторяется за 14, 7, 3 дня
+                # и за день, а не каждый день.
+                certs+="${certs:+$newline}${message}${newline}→ ${action}"
+                if [[ "$message" =~ $days_re ]]; then
+                    cert_key+="${message%% (через*} порог $(domain_bucket "${BASH_REMATCH[1]}")$newline"
+                else
+                    cert_key+="$message$newline"
+                fi
+                ;;
         esac
     done <"$STATE_FILE"
     if [[ -n "$updates" ]]; then
@@ -516,6 +582,11 @@ notify_news() {
         notify_once domain-notified "$key" "AWG ${node}: заканчивается регистрация домена${newline}${domains}"
     else
         rm -f "$NOTIFIED_DIR/domain-notified"
+    fi
+    if [[ -n "$certs" ]]; then
+        notify_once cert-notified "$cert_key" "AWG ${node}: заканчивается срок TLS-сертификата${newline}${certs}"
+    else
+        rm -f "$NOTIFIED_DIR/cert-notified"
     fi
 }
 
@@ -533,6 +604,7 @@ run_checks() {
 {% if awg_node_role == 'front' %}
         check_xray
         check_domains
+        check_certificates
 {% endif %}
     } >"$temporary"
     chmod 0600 "$temporary"

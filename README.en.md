@@ -371,6 +371,8 @@ The cascade can be left alone for months. What happens without a human:
 | Reboot after an update | once a week | ENTRY reboots FRONT, EXIT and itself one at a time and checks the cascade after each |
 | Local faults | every 5 minutes | `self-heal`: the action for the exact check that failed |
 | FRONT certificate | when due | certbot, saved into the encrypted bundle |
+| CDN certificate expiry | once a day | FRONT looks at the certificate the domain actually serves; a note and a Telegram message when the renewal did not happen |
+| Hung kernel | at once | the server reboots itself after a panic; a hung system is rebooted by the watchdog, when the kernel has one |
 | Telegram digest | once a week | cascade state, self-healing count, new versions, reboot |
 
 **Reboot guards.** A server is not rebooted if it might not come back or not
@@ -411,8 +413,30 @@ awg_telegram_label: "VK"                   # cascade label in Telegram messages
 
 Where to look: `cascade-reboot status` (automation, next window, last
 decision), `cascade-reboot` (guards of every server without rebooting),
-`cascade-check` (self-healing summary, new versions, domain expiry, Telegram
-delivery).
+`cascade-check` (self-healing summary, new versions, domain and certificate
+expiry, Telegram delivery, hang watchdog, memory shortage).
+
+**Failures of the server itself.**
+
+- *Kernel panic.* The server reboots after 10 seconds
+  (`security_kernel_panic_reboot_seconds`). Ubuntu by default leaves it hanging
+  until a manual reset in the hosting panel.
+- *Hang.* systemd checks in with the kernel watchdog; with no check-in for two
+  minutes the kernel reboots the server. A server stuck during shutdown is
+  rebooted forcibly too. The hypervisor watchdog is used, or the software
+  `softdog` when there is none. The software watchdog does not help when all
+  CPUs have stopped, and some cloud kernels do not ship it at all:
+  `cascade-check` reports what this server has. Turn off:
+  `awg_watchdog_enabled: false`.
+- *Memory shortage.* The services that carry traffic (Unbound, dnsmasq,
+  sing-box, Xray, Nginx) are the last ones the kernel kills: the module build
+  and the package upgrade go first. `cascade-check` shows whether the kernel
+  has killed processes since boot. There is no swap on purpose: the contents of
+  the secret store would leave RAM for the disk.
+- *Lost tunnel to EXIT.* Foreign traffic is rejected instead of leaving for the
+  internet from the ENTRY address: the EXIT routing table keeps an
+  `unreachable` backstop route, and a filter rule does not let such a packet
+  out through WAN even when the policy routing rule itself is gone.
 
 **What the cascade will not do by itself.** It does not pay for servers, the
 domain, the proxy or the CDN. It does not bring back a server that failed to

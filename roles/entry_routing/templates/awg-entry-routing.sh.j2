@@ -13,6 +13,17 @@ readonly EXIT_PRIORITY={{ entry_exit_rule_priority }}
 readonly RU_MARK={{ entry_ru_mark | quote }}
 readonly RU_TABLE={{ entry_ru_table }}
 readonly RU_PRIORITY={{ entry_ru_rule_priority }}
+# Защита от выхода зарубежного трафика с адреса ENTRY. Таблица EXIT держит один
+# маршрут через межсерверный интерфейс; когда интерфейс исчезает, ядро удаляет
+# маршрут вместе с ним, поиск переходит к основной таблице, и пакет с меткой EXIT
+# уходит через WAN. Запасной маршрут unreachable с наибольшей метрикой остаётся в
+# таблице и отклоняет такой пакет. Правило фильтра закрывает второй случай: правило
+# policy routing пропало (так было при перезапуске systemd-networkd до v3.1.0), и
+# до таблицы EXIT пакет не доходит вовсе. FORWARD - трафик клиентов AmneziaWG,
+# OUTPUT - соединения backend FRONT, помеченные routing_mark.
+readonly EXIT_BACKSTOP_METRIC=4294967295
+readonly -a EXIT_GUARD=(-o "$WAN_IF" -m mark --mark "$EXIT_MARK" -j REJECT --reject-with icmp-net-unreachable)
+readonly -a EXIT_GUARD_CHAINS=(FORWARD OUTPUT)
 readonly MAIL_PORTS_FILE={{ entry_ru_direct_tcp_ports_file | quote }}
 DIRECT_PORTS=()
 while IFS= read -r direct_port; do
@@ -82,6 +93,18 @@ remove_policy_rule() {
     while ip rule del fwmark "$mark" table "$table" priority "$priority" 2>/dev/null; do :; done
 }
 
+# Правило policy routing остаётся на месте, если оно уже есть и ровно одно. Раньше
+# каждое применение удаляло его и добавляло заново: между двумя командами пакеты с
+# меткой шли по основной таблице, то есть через WAN ENTRY.
+ensure_policy_rule() {
+    local mark="$1" table="$2" priority="$3" rules present
+    rules="$(ip -4 rule show 2>/dev/null || true)"
+    present="$(grep -Ec "^${priority}:.*fwmark ${mark}( .*)? lookup ${table}( |\$)" <<<"$rules" || true)"
+    [[ "$present" != 1 ]] || return 0
+    remove_policy_rule "$mark" "$table" "$priority"
+    ip rule add fwmark "$mark" table "$table" priority "$priority"
+}
+
 # Правило ставится, только если его ещё нет. Раньше каждое применение удаляло
 # правило и добавляло заново: между двумя командами пакеты клиентов шли без него.
 # Без перехода в цепочку $CHAIN они выходили с ENTRY без метки маршрута, без
@@ -127,6 +150,9 @@ remove_state() {
         delete_all mangle FORWARD -o "$client_if" -d "$client_subnet" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
         delete_all filter FORWARD -i "$client_if" -o "$client_if" -j DROP
         remove_proxy_udp_reject "$client_if" "$client_subnet"
+    done
+    for guard_chain in "${EXIT_GUARD_CHAINS[@]}"; do
+        delete_all filter "$guard_chain" "${EXIT_GUARD[@]}"
     done
     remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
     remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
@@ -208,9 +234,14 @@ if [[ -s "$RU_CACHE" ]]; then
     unset ru_networks
 fi
 
+# Защита ставится раньше маршрутов и правил: всё, что ниже, выполняется уже под ней.
+for guard_chain in "${EXIT_GUARD_CHAINS[@]}"; do
+    rule_exists filter "$guard_chain" "${EXIT_GUARD[@]}" ||
+        iptables -w 10 -I "$guard_chain" 1 "${EXIT_GUARD[@]}"
+done
+ip route replace unreachable default metric "$EXIT_BACKSTOP_METRIC" table "$EXIT_TABLE"
 ip route replace default dev "$EXIT_IF" table "$EXIT_TABLE"
-remove_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
-ip rule add fwmark "$EXIT_MARK" table "$EXIT_TABLE" priority "$EXIT_PRIORITY"
+ensure_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
 
 proxy_ready=false
 if ip link show "$PROXY_IF" >/dev/null 2>&1 &&
@@ -218,8 +249,7 @@ if ip link show "$PROXY_IF" >/dev/null 2>&1 &&
         [[ ! -e "$PROXY_MANUAL_DISABLED_FLAG" ]] &&
         wait_for_interface_up "$PROXY_IF"; then
     ip route replace default dev "$PROXY_IF" table "$RU_TABLE"
-    remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
-    ip rule add fwmark "$RU_MARK" table "$RU_TABLE" priority "$RU_PRIORITY"
+    ensure_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"
     proxy_ready=true
 else
     remove_policy_rule "$RU_MARK" "$RU_TABLE" "$RU_PRIORITY"

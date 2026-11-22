@@ -1,0 +1,8 @@
+# Управляется Ansible. Сторож зависания: systemd отмечается в устройстве сторожа,
+# и если отметок нет дольше RuntimeWatchdogSec (система зависла), ядро
+# перезагружает сервер. RebootWatchdogSec ограничивает саму перезагрузку: сервер,
+# застрявший при выключении, тоже перезагружается принудительно. Без устройства
+# сторожа обе настройки ничего не делают.
+[Manager]
+RuntimeWatchdogSec={{ awg_watchdog_runtime_seconds | int }}s
+RebootWatchdogSec={{ awg_watchdog_reboot_seconds | int }}s

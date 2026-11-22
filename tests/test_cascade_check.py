@@ -678,6 +678,77 @@ class KalimeraReportTests(unittest.TestCase):
         output = self.run_report("check_reboot\n", awg_node_role="exit")
         self.assertEqual(output, row("EXIT", "OK", "перезагрузка не требуется"))
 
+    def test_watchdog_row_says_what_the_server_really_has(self) -> None:
+        sysfs = self.dir / "watchdog0"
+        variables = {"awg_watchdog_sysfs_dir": str(sysfs)}
+        # Модуля softdog нет в части облачных ядер: это не замечание, исправить нечем.
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания недоступен", "в ядре нет устройства сторожа и модуля softdog"),
+        )
+        sysfs.mkdir()
+        (sysfs / "identity").write_text("Software Watchdog\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания установлен", "Software Watchdog; состояние ядро не сообщает"),
+        )
+        (sysfs / "timeout").write_text("120\n", encoding="utf-8")
+        (sysfs / "state").write_text("active\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_watchdog\n", **variables),
+            row("ENTRY", "OK", "сторож зависания взведён", "Software Watchdog, 120 с"),
+        )
+        # Устройство есть, но systemd в нём не отмечается: зависший сервер не перезагрузится.
+        (sysfs / "state").write_text("inactive\n", encoding="utf-8")
+        output = self.run_report("check_watchdog\n", **variables)
+        self.assertTrue(output.startswith("ENTRY\tWARN\tсторож зависания не взведён\tSoftware Watchdog\t"), output)
+        self.assertIn("systemctl daemon-reexec", output)
+        self.assertEqual(self.run_report("check_watchdog\n", awg_watchdog_enabled=False, **variables), "")
+
+    def test_memory_shortage_is_reported_from_the_kernel_counter(self) -> None:
+        vmstat = self.dir / "vmstat"
+        meminfo = self.dir / "meminfo"
+        variables = {"awg_memory_vmstat_path": str(vmstat), "awg_memory_meminfo_path": str(meminfo)}
+        meminfo.write_text(
+            "MemTotal:        2013456 kB\nMemFree:          788480 kB\nMemAvailable:    1593344 kB\n", encoding="utf-8"
+        )
+        vmstat.write_text("nr_free_pages 197120\noom_kill 0\n", encoding="utf-8")
+        self.assertEqual(
+            self.run_report("check_memory\n", **variables),
+            row("ENTRY", "OK", "нехватки памяти с загрузки сервера не было", "доступно 1556 из 1966 МБ"),
+        )
+        # Журнал в RAM к моменту проверки вытеснен, а счётчик ядра остаётся.
+        vmstat.write_text("nr_free_pages 197120\noom_kill 3\n", encoding="utf-8")
+        output = self.run_report("check_memory\n", **variables)
+        self.assertTrue(
+            output.startswith(
+                "ENTRY\tWARN\tядро завершало процессы из-за нехватки памяти\t"
+                "с загрузки сервера: 3; сейчас доступно 1556 из 1966 МБ\t"
+            ),
+            output,
+        )
+        self.assertIn("увеличьте память сервера", output)
+        # Ядро без счётчика: строки нет, а не замечание.
+        vmstat.write_text("nr_free_pages 197120\n", encoding="utf-8")
+        self.assertEqual(self.run_report("check_memory\n", **variables), "")
+
+    def test_certificate_warning_becomes_a_row(self) -> None:
+        updates = self.dir / "updates"
+        updates.mkdir()
+        (updates / "state").write_text(
+            "#checked\t2026-11-22 06:10 UTC\n"
+            "OK\tcert\tсертификат домена origin.example.uk действует до 2027-01-20\t\n"
+            "WARN\tcert\tсертификат домена www.example.uk истекает 2026-12-01 (через 9 дн.)\tпроверьте выпуск сертификата\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.run_report("check_updates\n", awg_node_role="front"),
+            row(
+                "FRONT", "WARN", "сертификат домена www.example.uk истекает 2026-12-01 (через 9 дн.)", "",
+                "проверьте выпуск сертификата",
+            ),
+        )
+
     def test_component_updates_become_rows_without_a_warning(self) -> None:
         updates = self.dir / "updates"
         updates.mkdir()

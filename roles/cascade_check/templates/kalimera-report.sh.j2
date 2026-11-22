@@ -27,6 +27,10 @@ readonly reboot_overdue_days={{ (awg_auto_reboot_overdue_days | default(21)) | i
 readonly updates_state={{ ((kalimera_updates_state_dir | default('/run/kalimera-updates')) ~ '/state') | quote }}
 readonly telegram_enabled={{ 'true' if (awg_telegram_monitor_enabled | default(false) | bool) else 'false' }}
 readonly telegram_monitor={{ (awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor')) | quote }}
+readonly watchdog_enabled={{ 'true' if (awg_watchdog_enabled | default(true) | bool) else 'false' }}
+readonly watchdog_sysfs={{ (awg_watchdog_sysfs_dir | default('/sys/class/watchdog/watchdog0')) | quote }}
+readonly vmstat_file={{ (awg_memory_vmstat_path | default('/proc/vmstat')) | quote }}
+readonly meminfo_file={{ (awg_memory_meminfo_path | default('/proc/meminfo')) | quote }}
 
 {% raw %}
 usage() { echo 'Использование: kalimera-report --tsv'; }
@@ -156,6 +160,51 @@ check_reboot() {
     fi
 }
 
+# Сторож зависания: без него зависшая система остаётся висеть до ручного сброса.
+# Строка сообщает, что есть на самом деле: сторож взведён, не взведён или его нет.
+# Отсутствие сторожа - не замечание: модуля softdog нет в части облачных ядер, и
+# исправить это на сервере нечем.
+check_watchdog() {
+    local identity='' state='' timeout=''
+    [[ "$watchdog_enabled" == true ]] || return 0
+    if [[ ! -d "$watchdog_sysfs" ]]; then
+        add OK 'сторож зависания недоступен' 'в ядре нет устройства сторожа и модуля softdog'
+        return 0
+    fi
+    identity="$(cat "$watchdog_sysfs/identity" 2>/dev/null || true)"
+    identity="${identity:-устройство сторожа}"
+    if [[ ! -r "$watchdog_sysfs/state" ]]; then
+        add OK 'сторож зависания установлен' "$identity; состояние ядро не сообщает"
+        return 0
+    fi
+    state="$(cat "$watchdog_sysfs/state" 2>/dev/null || true)"
+    timeout="$(cat "$watchdog_sysfs/timeout" 2>/dev/null || true)"
+    if [[ "$state" == active ]]; then
+        add OK 'сторож зависания взведён' "$identity, ${timeout:-?} с"
+    else
+        add WARN 'сторож зависания не взведён' "$identity" \
+            'sudo systemctl daemon-reexec; если строка осталась - на ENTRY: kalimera-deploy --resume'
+    fi
+}
+
+# Нехватка памяти. Счётчик oom_kill ядро ведёт с загрузки: сколько раз оно
+# завершало процессы, потому что память кончилась. Журнал в RAM к моменту проверки
+# уже вытеснен, а счётчик остаётся до перезагрузки.
+check_memory() {
+    local kills total available now_text
+    kills="$(awk '$1 == "oom_kill" { print $2 }' "$vmstat_file" 2>/dev/null || true)"
+    [[ "$kills" =~ ^[0-9]+$ ]] || return 0
+    total="$(awk '$1 == "MemTotal:" { print int($2 / 1024) }' "$meminfo_file" 2>/dev/null || true)"
+    available="$(awk '$1 == "MemAvailable:" { print int($2 / 1024) }' "$meminfo_file" 2>/dev/null || true)"
+    now_text="доступно ${available:-?} из ${total:-?} МБ"
+    if (( kills == 0 )); then
+        add OK 'нехватки памяти с загрузки сервера не было' "$now_text"
+    else
+        add WARN 'ядро завершало процессы из-за нехватки памяти' "с загрузки сервера: $kills; сейчас $now_text" \
+            'службы каскада перезапускаются сами; если повторяется - увеличьте память сервера. Отметка снимается перезагрузкой'
+    fi
+}
+
 # Новые версии AmneziaWG и Xray из последней проверки kalimera-updates. Это не
 # ошибка: строка идёт со статусом OK и попадает в группу «ОБНОВЛЕНИЯ» сводки.
 # Новое ядро сюда не входит: его ставит ночное обслуживание.
@@ -167,6 +216,9 @@ check_updates() {
             UPD:amneziawg|UPD:xray) add OK "обновление компонента: $message" "${action:-}" ;;
             # Срок регистрации домена: замечание появляется заранее, за месяц.
             WARN:domain) add WARN "$message" '' "${action:-}" ;;
+            # Сертификат домена, по которому подключаются клиенты: обычно его
+            # продлевает CDN, и замечание значит, что продление не сработало.
+            WARN:cert) add WARN "$message" '' "${action:-}" ;;
         esac
     done <"$updates_state"
 }
@@ -371,6 +423,8 @@ main() {
 
     check_services
     check_reboot
+    check_watchdog
+    check_memory
     check_self_heal
     check_updates
     check_telegram

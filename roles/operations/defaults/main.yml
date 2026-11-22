@@ -48,6 +48,37 @@ awg_auto_reboot_min_interval_days: 6
 # Новое ядро выдерживается столько часов после установки: ошибку в свежем ядре
 # Ubuntu обычно находят и исправляют за несколько дней.
 awg_auto_reboot_kernel_min_age_hours: 72
+# Сторож зависания. systemd отмечается в устройстве сторожа; если отметок нет
+# дольше awg_watchdog_runtime_seconds (система зависла), ядро перезагружает сервер.
+# Если у сервера нет сторожа гипервизора, загружается программный softdog; если в
+# ядре нет и его, настройка ничего не делает. awg_watchdog_reboot_seconds
+# ограничивает саму перезагрузку: сервер, застрявший при выключении, тоже
+# перезагружается принудительно.
+awg_watchdog_enabled: true
+awg_watchdog_runtime_seconds: 120
+awg_watchdog_reboot_seconds: 600
+awg_watchdog_service_name: kalimera-watchdog.service
+awg_watchdog_dropin_path: /etc/systemd/system.conf.d/90-kalimera-watchdog.conf
+# Нехватка памяти. Службы, через которые идёт трафик каскада, ядро завершает в
+# последнюю очередь: раньше них - сборку модуля, обновление пакетов и другие
+# разовые задания. Настройка для службы, которой на сервере нет (RU-прокси
+# выключен, межсерверный канал работает на модуле ядра), ни на что не влияет.
+awg_oom_score_adjust: -500
+awg_oom_apply_path: /usr/local/libexec/kalimera-oom-apply
+awg_oom_protected_units_by_role:
+  entry:
+    - unbound.service
+    - dnsmasq.service
+    - "{{ sing_box_service_name | default('sing-box.service') }}"
+    - "{{ front_backend_service_name | default('kalimera-front-backend.service') }}"
+    - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
+  exit:
+    - unbound.service
+    - "{{ awg3_transit_service_name | default('awg3-transit.service') }}"
+  front:
+    - "{{ front_xray_service_name | default('xray.service') }}"
+    - nginx.service
+awg_oom_protected_units: "{{ awg_oom_protected_units_by_role[awg_node_role | default('')] | default([]) }}"
 awg_domain_policy_dir: /etc/awg/domain-policy
 awg_client_output_dir: /root/awg-client-configs
 entry_ru_proxy_capability_path: /usr/local/sbin/ru-proxy-capability

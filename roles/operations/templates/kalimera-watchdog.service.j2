@@ -1,0 +1,22 @@
+[Unit]
+Description=Программный сторож ядра: перезагрузка зависшей системы
+Documentation=man:systemd-system.conf(5)
+# Загружается до остальных служб: к их запуску systemd уже отмечается в стороже.
+DefaultDependencies=no
+Before=sysinit.target
+ConditionVirtualization=!container
+# Модуля softdog нет в части облачных ядер. Тогда служба пропускается, а не
+# завершается ошибкой: сторожа на таком сервере просто нет.
+ConditionPathExistsGlob=/lib/modules/%v/kernel/drivers/watchdog/softdog.ko*
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Сторож гипервизора надёжнее программного: он срабатывает и тогда, когда ядро
+# остановилось целиком. Если устройство уже есть, softdog не загружается.
+# Ubuntu запрещает автозагрузку модулей сторожа через modules-load.d, поэтому
+# модуль загружается здесь по имени.
+ExecStart=/bin/sh -c '[ -e /dev/watchdog0 ] || exec /sbin/modprobe softdog'
+
+[Install]
+WantedBy=sysinit.target
