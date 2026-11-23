@@ -406,9 +406,13 @@ check_dns() {
 # ENTRY–EXIT, то есть выход через EXIT. Считается только установление
 # соединения, без DNS. Рекурсивный DNS EXIT здесь не нужен: по умолчанию он
 # выключен (entry_dns_default_via_exit: false), и его адрес не отвечает.
+# Дальний маршрут замедляет все три подключения одинаково. Если же одно из них
+# дольше другого на секунду и более, оно ждало повторной отправки первого
+# пакета: ядро повторяет его через 1 с. Это потери в туннеле, а не расстояние.
 check_tunnel() {
     local iface="${1:-$entry_exit_iface}" pair="${2:-ENTRY–EXIT}" target="${3:-EXIT}"
-    local output code lookup connect ms ok=0 sum=0 avg
+    local ssh_row="${4:-ENTRY → EXIT: SSH}"
+    local output code lookup connect ms ok=0 sum=0 avg min=0 max=0
     [[ -n "$iface" ]] || return 0
     for _ in 1 2 3; do
         if output="$(curl -4 -sS -o /dev/null --max-time 10 --interface "$iface" -w '%{http_code} %{time_namelookup} %{time_connect}' https://example.com/ 2>/dev/null)"; then
@@ -418,6 +422,8 @@ check_tunnel() {
                     ms="$(awk -v c="$connect" -v l="$lookup" 'BEGIN { printf "%d", (c - l) * 1000 }')"
                     ok=$((ok + 1))
                     sum=$((sum + ms))
+                    if (( ok == 1 || ms < min )); then min="$ms"; fi
+                    if (( ms > max )); then max="$ms"; fi
                     ;;
             esac
         fi
@@ -429,8 +435,10 @@ check_tunnel() {
     avg=$((sum / ok))
     if (( ok < 3 )); then
         emit LINK WARN "туннель $pair: TCP через туннель" "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" "проверьте канал до $target и нагрузку: awg-health --strict" "$avg"
+    elif (( max - min >= 900 )); then
+        emit LINK WARN "туннель $pair: TCP через туннель" "3 из 3 подключений, от $min до $max мс: неустойчиво, похоже на потери пакетов" "подключение, которое дольше остальных на секунду и более, ждало повторной отправки первого пакета: в туннеле до $target теряются пакеты (потери или ограничение UDP между хостингами), сами серверы исправны - повторите проверку позже" "$avg"
     elif (( avg > 250 )); then
-        emit LINK WARN "туннель $pair: TCP через туннель" "3 из 3 подключений, среднее $avg мс: высокая задержка" 'сравните со строкой «ENTRY → EXIT: SSH»: если задержка высока и там, медленный маршрут между хостингами ENTRY и EXIT, серверы исправны - повторите проверку позже; если только здесь - нагрузка EXIT: awg-health --strict на EXIT' "$avg"
+        emit LINK WARN "туннель $pair: TCP через туннель" "3 из 3 подключений, среднее $avg мс: высокая задержка" "сравните со строкой «$ssh_row»: если задержка высока и там, медленный маршрут между хостингами ENTRY и $target, серверы исправны - повторите проверку позже; если только здесь - нагрузка $target: awg-health --strict на этом сервере" "$avg"
     else
         emit LINK OK "туннель $pair: TCP через туннель" "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
     fi
@@ -510,7 +518,7 @@ main() {
             check_tunnel
             report_http LINK 'выход через EXIT: example.com' "$entry_exit_iface" https://example.com/ 'туннель и NAT EXIT: awg-health --strict на ENTRY и EXIT'
             if [[ -n "$entry_standby_iface" ]]; then
-                check_tunnel "$entry_standby_iface" 'ENTRY–EXIT резервный' 'резервного EXIT'
+                check_tunnel "$entry_standby_iface" 'ENTRY–EXIT резервный' 'резервного EXIT' 'ENTRY → EXIT резервный: SSH'
                 report_http LINK 'выход через EXIT резервный: example.com' "$entry_standby_iface" https://example.com/ 'туннель и NAT резервного EXIT: awg-health --strict на ENTRY и на резервном EXIT'
             fi
             report_http LINK 'выход напрямую с ENTRY: yandex.ru' '' https://yandex.ru/ 'проверьте WAN ENTRY и DNS: dns-status'

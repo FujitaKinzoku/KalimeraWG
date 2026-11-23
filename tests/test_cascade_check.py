@@ -795,6 +795,63 @@ class KalimeraReportTests(unittest.TestCase):
         vmstat.write_text("nr_free_pages 197120\n", encoding="utf-8")
         self.assertEqual(self.run_report("check_memory\n", **variables), "")
 
+    def tunnel_rows(self, connects: list[str], call: str = "check_tunnel") -> str:
+        """check_tunnel с подставным curl: времена подключения по порядку вызовов."""
+        counter = shlex.quote(str(self.dir / "curl-count"))
+        (self.dir / "curl-count").unlink(missing_ok=True)
+        times = " ".join(shlex.quote(value) for value in connects)
+        body = (
+            f"times=({times})\n"
+            "curl() {\n"
+            f'    local n; n="$(cat {counter} 2>/dev/null || echo 0)"\n'
+            f"    echo $((n + 1)) >{counter}\n"
+            '    [[ "${times[$n]}" != fail ]] || return 7\n'
+            "    printf '200 0.000 %s' \"${times[$n]}\"\n"
+            "}\n"
+            f"{call}\n"
+        )
+        return self.run_report(body, entry_exit_interface="awg3")
+
+    def test_tunnel_row_tells_packet_loss_from_a_long_route(self) -> None:
+        # Найдено на рабочем каскаде: два подключения из трёх ждали повторной
+        # отправки первого пакета (1 с), а строка показывала среднее 764 мс и
+        # называла это задержкой маршрута, причём со ссылкой на строку SSH
+        # основного EXIT.
+        standby = "check_tunnel awg4 'ENTRY–EXIT резервный' 'резервного EXIT' 'ENTRY → EXIT резервный: SSH'"
+        output = self.tunnel_rows(["0.100", "1.100", "1.100"], standby)
+        self.assertTrue(
+            output.startswith(
+                "LINK\tWARN\tтуннель ENTRY–EXIT резервный: TCP через туннель\t"
+                "3 из 3 подключений, от 100 до 1100 мс: неустойчиво, похоже на потери пакетов\t"
+            ),
+            output,
+        )
+        self.assertIn("в туннеле до резервного EXIT теряются пакеты", output)
+        self.assertTrue(output.endswith("\t766\n"), output)
+        # Дальний маршрут: все подключения медленные одинаково.
+        output = self.tunnel_rows(["0.700", "0.720", "0.710"], standby)
+        self.assertIn("\t3 из 3 подключений, среднее 710 мс: высокая задержка\t", output)
+        self.assertIn("сравните со строкой «ENTRY → EXIT резервный: SSH»", output)
+        self.assertIn("нагрузка резервного EXIT", output)
+        output = self.tunnel_rows(["0.700", "0.720", "0.710"])
+        self.assertTrue(output.startswith("LINK\tWARN\tтуннель ENTRY–EXIT: TCP через туннель\t"), output)
+        self.assertIn("сравните со строкой «ENTRY → EXIT: SSH»", output)
+        # Часть подключений не прошла: прежняя строка.
+        output = self.tunnel_rows(["0.100", "fail", "0.100"])
+        self.assertIn("\t2 из 3 подключений, среднее 100 мс: часть подключений не прошла\t", output)
+        # Обычный случай не меняется.
+        self.assertEqual(
+            self.tunnel_rows(["0.050", "0.052", "0.054"]),
+            row(
+                "LINK",
+                "OK",
+                "туннель ENTRY–EXIT: TCP через туннель",
+                "3 из 3 подключений, среднее 52 мс (без DNS)",
+                "",
+                "52",
+            ),
+        )
+
     def test_every_certificate_becomes_a_row_with_the_days_left(self) -> None:
         # Срок сертификата виден всегда, а не только при замечании. Остаток дней
         # считается на момент отчёта: итог проверки на FRONT хранится сутки.
