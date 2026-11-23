@@ -1024,6 +1024,13 @@ check 'почтовый порт 25 не обходится' mail_port_25_absent
 check 'исходящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 check 'входящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -o {{ entry_client_interface | quote }} -d {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 {% if entry_ru_proxy_enabled | bool %}
+# Сторож прокси может перейти в fail-open, пока идут проверки рабочего режима:
+# условие ветви уже проверено, а правила прокси сняты. Не прошедшая в этот момент
+# проверка ошибкой не считается: состояние покажет следующий запуск.
+unless_ru_proxy_failopen() {
+    "$@" || [[ -e {{ entry_ru_proxy_disabled_flag | quote }} ]]
+}
+
 {% if entry_ru_proxy_manual_disabled_flag is defined %}
 if [[ -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
     check 'sing-box вручную отключён' service_inactive {{ sing_box_service_name | quote }}
@@ -1036,9 +1043,9 @@ check 'служба sing-box' systemctl is-active --quiet {{ sing_box_service_na
 check 'российский TUN-интерфейс' ip link show {{ entry_ru_proxy_interface | quote }}
 check 'таймер watchdog российского прокси' systemctl is-active --quiet {{ entry_ru_proxy_watch_timer_name | quote }}
 if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
-    check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
-    check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
-    check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
+    check 'правило policy routing для mark 0x2' unless_ru_proxy_failopen has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
+    check 'маршрут по умолчанию в таблице 200' unless_ru_proxy_failopen has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
+    check 'mark 0x2 направляется через российский TUN' unless_ru_proxy_failopen route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
 {% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
     # Ответ идёт через внешний SOCKS5-прокси. В области selected через него
     # направляются только выбранные домены и адреса: сбой прокси - замечание, а не
@@ -1047,19 +1054,19 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
 {% else %}
     check 'прослушивание российского DoH' dns_resolves_a 127.0.0.1 yandex.ru {{ entry_dns_ru_port | int }}
 {% endif %}
-    check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked {{ entry_ru_mark | quote }}
+    check 'списки proxy-domain и proxy-address направляются в RU-прокси' unless_ru_proxy_failopen proxy_lists_marked {{ entry_ru_mark | quote }}
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" != proxy ]]; then
-        check 'UDP списков proxy-* не выходит мимо прокси' proxy_udp_rejected {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }}
+        check 'UDP списков proxy-* не выходит мимо прокси' unless_ru_proxy_failopen proxy_udp_rejected {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }}
     fi
 {% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
     check 'российские сети выходят напрямую с ENTRY, область selected' ru_networks_bypass_proxy
 {% else %}
     if [[ "$proxy_udp_mode" == proxy ]]; then
-        check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
+        check 'RU UDP направляется через SOCKS5' unless_ru_proxy_failopen udp_ru_bypass_absent
     else
-        check 'force_ru UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy force_ru
-        check 'российский UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy ru
+        check 'force_ru UDP обходит несовместимый SOCKS5' unless_ru_proxy_failopen udp_ru_bypasses_proxy force_ru
+        check 'российский UDP обходит несовместимый SOCKS5' unless_ru_proxy_failopen udp_ru_bypasses_proxy ru
     fi
 {% endif %}
 else

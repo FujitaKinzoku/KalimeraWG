@@ -287,7 +287,7 @@ audit_hint() {
         *'контейнерный runtime'*)
             hint='если Docker/Podman не нужны: sudo systemctl disable --now docker.service podman.service containerd.service' ;;
         *'внешние слушатели'*)
-            hint='владелец порта: sudo ss -lntup; лишнюю службу остановите и отключите' ;;
+            hint='порты и программы показывает server-audit; лишнюю службу остановите и отключите' ;;
     esac
     printf '%s\n' "${hint:-на ENTRY: kalimera-deploy --resume восстановит настройки KalimeraWG}"
 }
@@ -530,6 +530,29 @@ known_public_listeners_only() {
     [[ -z "$unexpected_listeners" ]]
 }
 
+# Программа, которая держит порт. Аудит идёт от root и видит её сам; у рабочего
+# администратора нет sudo для ss, поэтому имя печатается прямо в отчёте.
+listener_owner() {
+    local proto="$1" port="$2" line
+    line="$(ss -H -lntup 2>/dev/null |
+        awk -v proto="$proto" -v suffix=":$port" \
+            '$1 == proto && substr($5, length($5) - length(suffix) + 1) == suffix { print; exit }')"
+    if [[ "$line" =~ \(\(\"([^\"]+)\" ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+}
+
+# Строка отчёта: каждый неожиданный порт и программа, если она известна.
+listener_report() {
+    local proto port owner report=''
+    while IFS=/ read -r proto port; do
+        [[ -n "$port" ]] || continue
+        owner="$(listener_owner "$proto" "$port")"
+        report+="${report:+, }$proto/$port${owner:+ ($owner)}"
+    done <<<"$unexpected_listeners"
+    printf '%s' "$report"
+}
+
 systemd_config_last_value() {
     local config="$1" key="$2"
     systemd-analyze cat-config "$config" |
@@ -651,7 +674,7 @@ record_warn_result \
     'обнаружены неожиданные внешние слушатели' \
     known_public_listeners_only
 if [[ "$quiet" == false && -n "$unexpected_listeners" ]]; then
-    printf '     порты: %s; владелец: sudo ss -lntup\n' "$(paste -sd ' ' <<<"$unexpected_listeners")"
+    printf '     порты и программы: %s\n' "$(listener_report)"
 fi
 
 # Доступные обновления - не ошибка и не предупреждение: строки UPD берутся из
