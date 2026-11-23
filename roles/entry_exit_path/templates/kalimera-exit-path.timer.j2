@@ -1,0 +1,13 @@
+[Unit]
+Description=Периодическая проверка путей до EXIT
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec={{ entry_exit_path_interval }}
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit={{ entry_exit_path_service_name }}
+
+[Install]
+WantedBy=timers.target

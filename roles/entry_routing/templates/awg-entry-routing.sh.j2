@@ -5,6 +5,11 @@ CLIENT_IFS=({{ entry_client_interface | quote }}{% if entry_legacy_client_availa
 CLIENT_SUBNETS=({{ entry_client_subnet | quote }}{% if entry_legacy_client_available | default(false) | bool %} {{ entry_legacy_client_subnet | quote }}{% endif %}{% if entry_mobile_client_available | default(false) | bool %} {{ entry_mobile_client_subnet | quote }}{% endif %})
 CLIENT_DNS_ADDRESSES=({{ entry_client_listen_address | quote }}{% if entry_legacy_client_available | default(false) | bool %} {{ entry_legacy_client_listen_address | quote }}{% endif %}{% if entry_mobile_client_available | default(false) | bool %} {{ entry_mobile_client_listen_address | quote }}{% endif %})
 readonly EXIT_IF={{ entry_exit_interface | quote }}
+# Все туннели до EXIT: основной и, если подключён, резервный. Правила NAT ставятся
+# для каждого, а маршрут таблицы EXIT ведёт в тот, который выбрал переключатель
+# путей (exit-path). Пока он ничего не выбрал или резервного EXIT нет - в основной.
+readonly -a EXIT_IFS=("$EXIT_IF"{% if entry_standby_exit_enabled | default(false) | bool %} {{ entry_standby_exit_interface | default('awg4') | quote }}{% endif %})
+readonly EXIT_PATH_ACTIVE_FILE={{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }}
 readonly PROXY_IF={{ entry_ru_proxy_interface | quote }}
 readonly WAN_IF={{ entry_wan_interface | quote }}
 readonly EXIT_MARK={{ entry_exit_mark | quote }}
@@ -54,6 +59,20 @@ interface_is_up() {
     local link
     link="$(ip -o link show dev "$1" 2>/dev/null || true)"
     grep -Eq '(^|[,<])UP([,>]|$)' <<<"$link"
+}
+
+active_exit_if() {
+    local candidate="" known
+    if [[ -r "$EXIT_PATH_ACTIVE_FILE" ]]; then
+        read -r candidate <"$EXIT_PATH_ACTIVE_FILE" || candidate=""
+    fi
+    for known in "${EXIT_IFS[@]}"; do
+        if [[ "$candidate" == "$known" ]] && ip link show "$known" >/dev/null 2>&1; then
+            printf '%s' "$known"
+            return 0
+        fi
+    done
+    printf '%s' "$EXIT_IF"
 }
 
 wait_for_interface_up() {
@@ -140,8 +159,9 @@ remove_state() {
         client_subnet="${CLIENT_SUBNETS[$index]}"
         dns_address="${CLIENT_DNS_ADDRESSES[$index]}"
         delete_all mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
-        delete_all nat POSTROUTING -s "$client_subnet" -o "$EXIT_IF" -j MASQUERADE
-        delete_all nat POSTROUTING -s "$client_subnet" -o "$WAN_IF" -j MASQUERADE
+        for out_if in "${EXIT_IFS[@]}" "$WAN_IF"; do
+            delete_all nat POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE
+        done
         delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p udp --dport 53 -j DNAT --to-destination "$dns_address:53"
         delete_all nat PREROUTING -i "$client_if" -s "$client_subnet" -p tcp --dport 53 -j DNAT --to-destination "$dns_address:53"
         delete_all filter FORWARD -i "$client_if" -s "$client_subnet" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
@@ -240,7 +260,7 @@ for guard_chain in "${EXIT_GUARD_CHAINS[@]}"; do
         iptables -w 10 -I "$guard_chain" 1 "${EXIT_GUARD[@]}"
 done
 ip route replace unreachable default metric "$EXIT_BACKSTOP_METRIC" table "$EXIT_TABLE"
-ip route replace default dev "$EXIT_IF" table "$EXIT_TABLE"
+ip route replace default dev "$(active_exit_if)" table "$EXIT_TABLE"
 ensure_policy_rule "$EXIT_MARK" "$EXIT_TABLE" "$EXIT_PRIORITY"
 
 proxy_ready=false
@@ -311,7 +331,7 @@ for index in "${!CLIENT_IFS[@]}"; do
         # Неактивные дополнительные интерфейсы должны оставлять после себя
         # чистое состояние без сброса общих policy-routing таблиц.
         delete_all mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
-        for out_if in "$EXIT_IF" "$WAN_IF"; do
+        for out_if in "${EXIT_IFS[@]}" "$WAN_IF"; do
             delete_all nat POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE
         done
         for proto in udp tcp; do
@@ -332,7 +352,7 @@ for index in "${!CLIENT_IFS[@]}"; do
     rule_exists mangle PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN" ||
         iptables -w 10 -t mangle -A PREROUTING -i "$client_if" -s "$client_subnet" -j "$CHAIN"
 
-    for out_if in "$EXIT_IF" "$WAN_IF"; do
+    for out_if in "${EXIT_IFS[@]}" "$WAN_IF"; do
         rule_exists nat POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE ||
             iptables -w 10 -t nat -A POSTROUTING -s "$client_subnet" -o "$out_if" -j MASQUERADE
     done

@@ -1160,6 +1160,248 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
     return True
 
 
+STANDBY_EXIT_HOST = "exit-standby-managed"
+STANDBY_EXIT_INTERFACE = "awg4"
+
+
+def standby_transit_network(used: list[object]) -> ipaddress.IPv4Network:
+    """Свободная служебная подсеть туннеля ENTRY - резервный EXIT."""
+    occupied: list[ipaddress.IPv4Network] = []
+    for value in used:
+        if not value:
+            continue
+        try:
+            occupied.append(ipaddress.ip_network(str(value), strict=False))
+        except ValueError:
+            continue
+    for third_octet in range(78, 100):
+        candidate = ipaddress.ip_network(f"10.{third_octet}.0.0/24")
+        if not any(candidate.overlaps(network) for network in occupied):
+            return candidate
+    fail("Не найдена свободная подсеть 10.78.0.0/24-10.99.0.0/24 для туннеля резервного EXIT")
+
+
+def standby_transit_profile(primary: object) -> dict[str, object]:
+    """Профиль обфускации туннеля до резервного EXIT.
+
+    Профиль свой, но S4 совпадает с основным туннелем: S4 добавляется к каждому
+    пакету данных и входит в расчёт MTU, а MTU каскада один на оба пути.
+    """
+    profile = awg3_transit_obfuscation()
+    if isinstance(primary, dict) and primary.get("s4") is not None:
+        profile["s4"] = int(primary["s4"])
+    validate_awg_obfuscation(profile)
+    return profile
+
+
+def standby_exit_configured(hosts_document: dict) -> bool:
+    exit_hosts = (
+        hosts_document.get("all", {}).get("children", {}).get("exit", {}).get("hosts", {})
+    )
+    return isinstance(exit_hosts, dict) and STANDBY_EXIT_HOST in exit_hosts
+
+
+def enable_standby_exit(production: Path, vault_password: Path) -> bool:
+    """Добавить резервный EXIT к production inventory (docs/standby-exit.md).
+
+    Новый сервер входит в группу exit вторым хостом. ENTRY получает второй туннель
+    и переключатель путей; основной EXIT, клиентские ключи и конфиги не меняются.
+    """
+    hosts_path = production / "hosts.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    if not all(path.is_file() for path in (hosts_path, all_path, entry_path, exit_path)):
+        fail("Для подключения резервного EXIT нужен установленный production inventory")
+    if not vault_password.is_file():
+        fail("Для подключения резервного EXIT нужен пароль Ansible Vault")
+
+    hosts_document = load_yaml(hosts_path)
+    children = hosts_document.setdefault("all", {}).setdefault("children", {})
+    exit_hosts = children.get("exit", {}).get("hosts", {})
+    if standby_exit_configured(hosts_document):
+        print("Резервный EXIT уже подключён к production inventory; повторное включение не требуется.")
+        return False
+    if not isinstance(exit_hosts, dict) or list(exit_hosts) != ["exit-managed"]:
+        fail("Резервный EXIT подключается к каскаду с одним основным EXIT (exit-managed)")
+
+    entry_vars = load_yaml(entry_path)
+    exit_vars = load_yaml(exit_path)
+    if entry_vars.get("awg3_transit_enabled", False) or exit_vars.get("awg3_transit_enabled", False):
+        fail(
+            "Резервный EXIT работает только с kernel-модулем AmneziaWG. Межсерверный канал "
+            "этого каскада на userspace-движке: переключите его scripts/toggle-transit-engine.py."
+        )
+    if not entry_vars.get("entry_manage_awg_configs", False):
+        fail("Резервный EXIT требует, чтобы конфигурации AWG на ENTRY вёл установщик")
+
+    ui_panel(
+        "РЕЗЕРВНЫЙ EXIT: ВТОРОЙ ЗАРУБЕЖНЫЙ СЕРВЕР",
+        [
+            "ENTRY держит туннель до обоих серверов и сам переводит зарубежный",
+            "трафик на резервный, когда основной перестаёт отвечать. Клиентские",
+            "конфиги не меняются. Сервер должен быть у другого хостера и в другой",
+            "сети, чем основной EXIT, с чистой Ubuntu 24.04.",
+        ],
+        "cyan",
+    )
+    standby_host = prompt("IP-адрес или DNS-имя резервного EXIT")
+    if not standby_host:
+        fail("Необходимо указать адрес резервного EXIT")
+    require_public_endpoint(standby_host, "Адрес резервного EXIT")
+    standby_ipv4 = resolve_single_public_ipv4(standby_host, "Адрес резервного EXIT")
+    taken_addresses = {
+        str(entry_vars.get("security_interserver_peer_ipv4", "")),
+        str(exit_vars.get("security_interserver_peer_ipv4", "")),
+        str(entry_vars.get("front_public_ipv4", "")),
+    }
+    if standby_ipv4 in taken_addresses:
+        fail("Этот адрес уже занят другим сервером каскада: резервному EXIT нужен отдельный сервер")
+    standby_user = prompt("Пользователь SSH резервного EXIT", "root")
+    standby_port = prompt_port("Текущий SSH-порт резервного EXIT", 22)
+    primary_ssh_port = int(exit_hosts["exit-managed"].get("ssh_listen_port", 56777))
+    standby_new_port = prompt_port("Новый управляемый SSH-порт резервного EXIT", primary_ssh_port)
+    if standby_new_port < 1024:
+        fail("Управляемый SSH-порт резервного EXIT должен находиться в диапазоне 1024–65535")
+    standby_password = getpass.getpass("Пароль SSH резервного EXIT (ввод скрыт): ")
+    if not standby_password:
+        fail("Начальный пароль SSH резервного EXIT не может быть пустым")
+
+    network = standby_transit_network(
+        [
+            exit_vars.get("exit_awg_subnet"),
+            entry_vars.get("entry_client_subnet"),
+            entry_vars.get("entry_legacy_client_subnet"),
+            entry_vars.get("entry_mobile_client_subnet"),
+            entry_vars.get("entry_ru_tun_address"),
+        ]
+    )
+    exit_tunnel_ip, entry_tunnel_ip = list(network.hosts())[:2]
+    exit_listen_port = int(exit_vars.get("exit_awg_listen_port", 443))
+    used_ports = {
+        int(entry_vars.get(key) or 0)
+        for key in (
+            "awg3_transit_listen_port",
+            "security_interserver_listen_port",
+            "entry_awg0_listen_port",
+            "entry_legacy_client_listen_port",
+            "entry_mobile_client_listen_port",
+            "entry_mobile_legacy_internal_port",
+        )
+    }
+    entry_listen_port = int(entry_vars.get("awg3_transit_listen_port") or 39745) + 1
+    while entry_listen_port in used_ports:
+        entry_listen_port += 1
+    if entry_listen_port > 65535:
+        fail("Не найден свободный UDP-порт ENTRY для туннеля резервного EXIT")
+    profile = standby_transit_profile(entry_vars.get("entry_awg1_obfuscation"))
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    standby_password = bootstrap_key(
+        standby_host,
+        standby_user,
+        standby_port,
+        standby_password,
+        ssh_public,
+        "резервный EXIT",
+    )
+    automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+        standby_host,
+        standby_user,
+        standby_port,
+        ssh_private,
+    )
+    if not automation_source_ipv4:
+        fail("Резервный EXIT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+
+    entry_private = awg_private_key()
+    exit_private = awg_private_key()
+    transit_psk = awg_psk()
+    vault_updates: dict[str, object] = {
+        "vault_awg_entry_standby_exit_private_key": entry_private,
+        "vault_awg_entry_standby_exit_peer_public_key": awg_public_key(exit_private),
+        "vault_awg_entry_standby_exit_psk": transit_psk,
+        "vault_awg_entry_standby_exit_entry_public_key": awg_public_key(entry_private),
+        "vault_awg_standby_header_protection_key": awg_private_key(),
+        "vault_awg_standby_exit_private_key": exit_private,
+        "vault_standby_exit_peers": [
+            {
+                "name": "entry",
+                "public_key": awg_public_key(entry_private),
+                "allowed_ips": [f"{entry_tunnel_ip}/32"],
+                "preshared_key": transit_psk,
+            }
+        ],
+    }
+    if standby_user != "root":
+        vault_updates["vault_exit_standby_become_password"] = standby_password
+    update_production_vault(production, vault_password, vault_updates)
+
+    entry_vars.update(
+        {
+            "entry_standby_exit_enabled": True,
+            "entry_standby_exit_interface": STANDBY_EXIT_INTERFACE,
+            "entry_standby_exit_host": STANDBY_EXIT_HOST,
+            "entry_standby_exit_public_ipv4": standby_ipv4,
+            "entry_standby_exit_endpoint": f"{standby_ipv4}:{exit_listen_port}",
+            "entry_standby_exit_listen_port": entry_listen_port,
+            "entry_standby_exit_tunnel_address": f"{entry_tunnel_ip}/32",
+            "entry_standby_exit_peer_tunnel_address": str(exit_tunnel_ip),
+            "entry_standby_exit_subnet": str(network),
+            "entry_standby_exit_obfuscation": profile,
+        }
+    )
+    yaml_write(entry_path, entry_vars)
+
+    standby_vars: dict[str, object] = {
+        "ansible_host": standby_host,
+        "ansible_user": standby_user,
+        "ansible_port": standby_port,
+        "ansible_become": True,
+        "ansible_ssh_private_key_file": str(ssh_private),
+        "ssh_listen_port": standby_new_port,
+        "security_allow_ssh_port_change": standby_port != standby_new_port,
+        "security_automation_source_ipv4": automation_source_ipv4,
+        "exit_standby": True,
+        "exit_awg_address": f"{exit_tunnel_ip}/{network.prefixlen}",
+        "exit_awg_subnet": str(network),
+        "exit_awg_obfuscation": profile,
+        "awg3_transit_address": f"{exit_tunnel_ip}/{network.prefixlen}",
+        "awg3_peer_endpoint_port": entry_listen_port,
+        "awg3_peer_tunnel_address": str(entry_tunnel_ip),
+        "awg3_transit_allowed_ips": [f"{entry_tunnel_ip}/32"],
+        "awg3_transit_obfuscation": profile,
+        "awg3_transit_private_key": "{{ vault_awg_standby_exit_private_key }}",
+        "awg3_transit_peer_public_key": "{{ vault_awg_entry_standby_exit_entry_public_key }}",
+        # Имена секретов те же, что читает роль exit: у резервного сервера они
+        # указывают на его собственные ключи.
+        "vault_awg_exit_private_key": "{{ vault_awg_standby_exit_private_key }}",
+        "vault_exit_peers": "{{ vault_standby_exit_peers }}",
+        "vault_awg3_header_protection_key": "{{ vault_awg_standby_header_protection_key }}",
+        "runtime_secrets_advertise_ipv4": standby_ipv4,
+    }
+    if standby_user != "root":
+        standby_vars["ansible_become_password"] = "{{ vault_exit_standby_become_password }}"
+    children["exit"]["hosts"][STANDBY_EXIT_HOST] = standby_vars
+    yaml_write(hosts_path, hosts_document)
+
+    # Новый сервер проходит тот же двухшаговый переход SSH, что и при установке:
+    # сначала работают оба порта и root, затем вход остаётся только у kalimera.
+    all_vars = load_yaml(all_path)
+    if all_vars.get("security_finalize_admin_access") is not False:
+        all_vars["security_finalize_admin_access"] = False
+        yaml_write(all_path, all_vars)
+
+    print(
+        "Production inventory обновлён: добавлен резервный EXIT "
+        f"({standby_ipv4}); он будет установлен текущим deploy."
+    )
+    return True
+
+
 def _front_replacement_state_root() -> Path:
     return Path.home() / ".local" / "share" / "awg-iac" / "production" / "front-replacement"
 
@@ -1843,10 +2085,12 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         ).hexdigest()
         document["vault_runtime_secret_shares"] = shares
         changed = True
-    if len(active_hosts) > len(shares) - 2:
+    # Последняя доля - внешняя аварийная копия владельца и серверу не выдаётся.
+    # Остальные раздаются серверам: с резервным EXIT их четыре из пяти.
+    if len(active_hosts) > len(shares) - 1:
         fail(
             "Для серверов не хватает уникальных Shamir-долей с сохранением "
-            "двух резервных долей"
+            "аварийной доли владельца"
         )
 
     exchange_private = document.get("vault_runtime_exchange_private_keys")
@@ -1894,7 +2138,9 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
         for values in entry_hosts.values()
     )
 
-    for share_index, host in enumerate(active_hosts, start=1):
+    # Доля сервера не меняется при добавлении нового: сервер, подключённый позже
+    # (резервный EXIT), получает первую свободную, а не сдвигает остальные.
+    def host_values_of(host: str) -> dict:
         host_group = (
             entry_hosts
             if host in entry_hosts
@@ -1902,10 +2148,31 @@ def ensure_runtime_secret_material(production: Path, vault_password: Path) -> bo
             if host in exit_hosts
             else front_hosts
         )
-        host_values = host_group[host]
-        if not isinstance(host_values, dict):
-            host_values = {}
-            host_group[host] = host_values
+        values = host_group[host]
+        if not isinstance(values, dict):
+            values = {}
+            host_group[host] = values
+        return values
+
+    assigned_indices: dict[str, int] = {}
+    for host in active_hosts:
+        current_index = host_values_of(host).get("runtime_secrets_share_index")
+        if (
+            isinstance(current_index, int)
+            and 1 <= current_index < len(shares)
+            and current_index not in assigned_indices.values()
+        ):
+            assigned_indices[host] = current_index
+    free_indices = [
+        index for index in range(1, len(shares)) if index not in assigned_indices.values()
+    ]
+    for host in active_hosts:
+        if host not in assigned_indices:
+            assigned_indices[host] = free_indices.pop(0)
+
+    for host in active_hosts:
+        share_index = assigned_indices[host]
+        host_values = host_values_of(host)
         if host_values.get("runtime_secrets_share_index") != share_index:
             host_values["runtime_secrets_share_index"] = share_index
             changed = True
@@ -2133,19 +2400,23 @@ def ensure_admin_account_material(
                 "{{ vault_front_root_password_hash }}",
             )
         )
+    exit_group_hosts = children.get("exit", {}).get("hosts", {})
     for hosts, admin_hash, root_hash in host_mappings:
-        if not isinstance(hosts, dict) or len(hosts) != 1:
+        # Роль exit допускает второй сервер - резервный EXIT. Учётные записи у него
+        # те же, что у основного: рабочий вход и там и там только по ключу.
+        allowed_count = (1, 2) if hosts is exit_group_hosts else (1,)
+        if not isinstance(hosts, dict) or len(hosts) not in allowed_count:
             fail("Для миграции учётных записей требуется по одному хосту каждой активной роли")
-        values = next(iter(hosts.values()))
-        if not isinstance(values, dict):
-            fail("Некорректные host variables production inventory")
-        for key, value in (
-            ("security_admin_password_hash", admin_hash),
-            ("security_root_password_hash", root_hash),
-        ):
-            if values.get(key) != value:
-                values[key] = value
-                changed = True
+        for values in hosts.values():
+            if not isinstance(values, dict):
+                fail("Некорректные host variables production inventory")
+            for key, value in (
+                ("security_admin_password_hash", admin_hash),
+                ("security_root_password_hash", root_hash),
+            ):
+                if values.get(key) != value:
+                    values[key] = value
+                    changed = True
 
     if changed:
         yaml_write(all_path, all_vars)
@@ -3788,7 +4059,21 @@ def cascade_reboot_plan(hosts_document: dict) -> list[str]:
     неё проверку выполняет отдельный юнит systemd.
     """
     children = hosts_document["all"]["children"]
-    order = [group for group in ("front", "exit") if (children.get(group) or {}).get("hosts")]
+    order: list[str] = []
+    if (children.get("front") or {}).get("hosts"):
+        order.append("front")
+    exit_hosts = (children.get("exit") or {}).get("hosts") or {}
+    if len(exit_hosts) > 1:
+        # С резервным EXIT серверы группы перезагружаются по одному: сначала
+        # резервный, затем основной. Пока один из них загружается, зарубежный
+        # трафик идёт через другой.
+        standby = [
+            name for name, values in exit_hosts.items()
+            if isinstance(values, dict) and values.get("exit_standby")
+        ]
+        order.extend(standby + [name for name in exit_hosts if name not in standby])
+    elif exit_hosts:
+        order.append("exit")
     return [*order, "entry"]
 
 
@@ -4080,7 +4365,14 @@ WEEKLY_TIMER = "kalimera-weekly.timer"
 DEFAULT_AUTO_REBOOT_INTERVAL_DAYS = 6
 GUARD_WAIT_ATTEMPTS = 20
 GUARD_WAIT_SECONDS = 120
-SERVER_NAMES = {"entry": "ENTRY", "exit": "EXIT", "front": "FRONT"}
+SERVER_NAMES = {
+    "entry": "ENTRY",
+    "exit": "EXIT",
+    "front": "FRONT",
+    # С резервным EXIT серверы группы exit перезагружаются по именам хостов.
+    "exit-managed": "EXIT",
+    "exit-standby-managed": "EXIT резервный",
+}
 
 
 class GuardReport(NamedTuple):
@@ -5047,6 +5339,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--enable-standby-exit",
+        action="store_true",
+        help=(
+            "при --resume подключить резервный EXIT: второй зарубежный сервер, на который "
+            "ENTRY сам переводит трафик при отказе основного; интерактивно запросит "
+            "данные подключения, клиентские конфиги не меняются"
+        ),
+    )
+    parser.add_argument(
         "--enable-ru-proxy",
         action="store_true",
         help=(
@@ -5321,6 +5622,24 @@ def main() -> None:
         or args.rollback_front_replacement
     ):
         parser.error("команды обслуживания нельзя объединять с другими режимами deploy")
+    if args.enable_standby_exit and (
+        not args.resume
+        or any(service_commands)
+        or args.summary
+        or args.terminal_only
+        or args.restore_entry
+        or update_flags
+        or feature_flags
+        or args.enable_mobile
+        or args.enable_front
+        or args.replace_front
+        or args.commit_front_replacement
+        or args.rollback_front_replacement
+    ):
+        parser.error(
+            "--enable-standby-exit выполняется отдельным запуском: kalimera-deploy --resume "
+            "--enable-standby-exit"
+        )
     if any(service_commands) and not (production / "hosts.yml").is_file():
         fail("Не найден production inventory; сначала выполните установку")
     if args.maintenance_show:
@@ -5419,6 +5738,8 @@ def main() -> None:
             rollback_front_replacement(production)
         if args.enable_front:
             enable_front_profile(production, vault_password)
+        if args.enable_standby_exit:
+            enable_standby_exit(production, vault_password)
         if args.replace_front:
             prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)

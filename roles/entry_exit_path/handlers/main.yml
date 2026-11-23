@@ -1,0 +1,5 @@
+---
+- name: "Перечитать модули systemd для переключателя путей EXIT"
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  listen: Перечитать модули systemd для переключателя путей EXIT

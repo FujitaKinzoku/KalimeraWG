@@ -18,6 +18,16 @@ cascade_check_exit_host: "{{ hostvars[groups['exit'][0]].ansible_host }}"
 cascade_check_exit_port: >-
   {{ hostvars[groups['exit'][0]].ssh_listen_port |
      default(hostvars[groups['exit'][0]].ansible_port | default(22)) }}
+# Резервный EXIT - второй сервер группы exit (docs/standby-exit.md). Основным
+# остаётся первый: на него указывают cascade_check_exit_host и остальные роли.
+cascade_check_standby_present: "{{ (groups['exit'] | default([])) | length > 1 }}"
+cascade_check_standby_host: >-
+  {{ hostvars[groups['exit'][1]].ansible_host
+     if (groups['exit'] | default([]) | length > 1) else '' }}
+cascade_check_standby_port: >-
+  {{ hostvars[groups['exit'][1]].ssh_listen_port |
+     default(hostvars[groups['exit'][1]].ansible_port | default(22))
+     if (groups['exit'] | default([]) | length > 1) else 22 }}
 cascade_check_front_present: "{{ (groups['front'] | default([])) | length > 0 }}"
 cascade_check_front_host: >-
   {{ hostvars[groups['front'][0]].ansible_host

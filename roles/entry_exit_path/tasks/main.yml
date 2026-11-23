@@ -1,0 +1,120 @@
+---
+- name: "Проверка параметров переключателя путей EXIT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_exit_path_interval is match('^[1-9][0-9]*s$')
+      - entry_exit_path_probe_targets | length >= 1
+      - entry_exit_path_probe_quorum | int >= 1
+      - entry_exit_path_probe_quorum | int <= entry_exit_path_probe_targets | length
+      - entry_exit_path_probe_timeout_seconds | int >= 1
+      - entry_exit_path_probe_timeout_seconds | int <= 10
+      - entry_exit_path_fail_threshold | int >= 1
+      - entry_exit_path_failback_seconds | int >= 0
+      - entry_exit_path_drill_seconds | int >= 60
+    fail_msg: >-
+      Параметры переключателя путей EXIT заданы неверно: интервал в секундах,
+      число ответивших адресов не больше числа адресов, порог неудач от 1.
+  when: entry_standby_exit_enabled | default(false) | bool
+
+# conntrack забывает соединения прежнего туннеля при переключении. Без него
+# открытые соединения клиентов висели бы до тайм-аута вместо быстрого обрыва.
+- name: "Установка conntrack для переключателя путей EXIT"
+  ansible.builtin.apt:
+    name: conntrack
+    state: present
+    lock_timeout: 600
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Создание каталогов переключателя путей EXIT"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ entry_exit_path_config_dir }}"
+    - "{{ entry_exit_path_mode_file | dirname }}"
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Установка переключателя путей EXIT"
+  ansible.builtin.copy:
+    src: kalimera-exit-path.py
+    dest: "{{ entry_exit_path_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Установка команды exit-path"
+  ansible.builtin.file:
+    src: "{{ entry_exit_path_script_path }}"
+    dest: "{{ entry_exit_path_command_path }}"
+    state: link
+    force: true
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Настройки переключателя путей EXIT"
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ entry_exit_path_config_dir }}/config.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Модули systemd переключателя путей EXIT"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {src: kalimera-exit-path.service.j2, dest: "{{ entry_exit_path_service_name }}"}
+    - {src: kalimera-exit-path.timer.j2, dest: "{{ entry_exit_path_timer_name }}"}
+  notify: Перечитать модули systemd для переключателя путей EXIT
+  when: entry_standby_exit_enabled | default(false) | bool
+
+- name: "Применение модулей systemd переключателя путей EXIT"
+  ansible.builtin.meta: flush_handlers
+
+- name: "Включение таймера переключателя путей EXIT"
+  ansible.builtin.systemd_service:
+    name: "{{ entry_exit_path_timer_name }}"
+    enabled: true
+    state: started
+  when: entry_standby_exit_enabled | default(false) | bool
+
+# Резервный EXIT отключён: переключатель снимается, а файл с выбранным
+# интерфейсом удаляется, чтобы маршрут таблицы EXIT снова вёл в основной туннель.
+- name: "Поиск таймера отключённого переключателя путей EXIT"
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ entry_exit_path_timer_name }}"
+  register: entry_exit_path_stale_timer
+  when: not (entry_standby_exit_enabled | default(false) | bool)
+
+- name: "Остановка таймера отключённого переключателя путей EXIT"
+  ansible.builtin.systemd_service:
+    name: "{{ entry_exit_path_timer_name }}"
+    enabled: false
+    state: stopped
+  when:
+    - not (entry_standby_exit_enabled | default(false) | bool)
+    - entry_exit_path_stale_timer.stat.exists
+
+- name: "Удаление файлов отключённого переключателя путей EXIT"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ entry_exit_path_timer_name }}"
+    - "/etc/systemd/system/{{ entry_exit_path_service_name }}"
+    - "{{ entry_exit_path_command_path }}"
+    - "{{ entry_exit_path_script_path }}"
+    - "{{ entry_exit_path_config_dir }}"
+    - "{{ entry_exit_path_state_dir }}"
+    - "{{ entry_exit_path_mode_file | dirname }}"
+  notify: Перечитать модули systemd для переключателя путей EXIT
+  when: not (entry_standby_exit_enabled | default(false) | bool)

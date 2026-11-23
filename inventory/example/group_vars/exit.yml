@@ -1,8 +1,9 @@
 ---
 awg_node_role: exit
 
-# При будущей поддержке второго EXIT установщик назначит ему индекс 3 на уровне
-# host vars. Динамический список peers уже допускает ENTRY и остальные EXIT.
+# Резервный EXIT (docs/standby-exit.md) - второй хост этой группы. Свою долю и
+# остальные отличия от основного он получает на уровне host vars от установщика:
+# kalimera-deploy --resume --enable-standby-exit.
 runtime_secrets_share_index: 2
 runtime_secrets_peer_inventory_hosts: >-
   {{ ((groups['entry'] | default([])) +

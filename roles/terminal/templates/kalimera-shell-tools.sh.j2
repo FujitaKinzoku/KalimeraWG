@@ -49,6 +49,7 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function cascade-check { _kalimera_admin cascade-check "$@"; }
     function cascade-reboot { _kalimera_admin cascade-reboot "$@"; }
     function maintenance-time { _kalimera_admin maintenance-time "$@"; }
+    function exit-path { _kalimera_admin exit-path "$@"; }
 {% endif %}
     function controller-backup { _kalimera_admin controller-backup "$@"; }
     function server-audit { _kalimera_admin server-audit "$@"; }

@@ -13,6 +13,9 @@ readonly DISABLED_FLAG={{ entry_ru_proxy_disabled_flag | quote }}
 readonly ROUTING_SCRIPT={{ entry_routing_script_path | quote }}
 readonly DNS_POLICY={{ awg_dns_policy_path | quote }}
 readonly EXIT_IF={{ entry_exit_interface | quote }}
+{% if entry_standby_exit_enabled | default(false) | bool %}
+readonly STANDBY_EXIT_IF={{ entry_standby_exit_interface | default('awg4') | quote }}
+{% endif %}
 readonly EXIT_MARK={{ entry_exit_mark | quote }}
 readonly EXIT_TABLE={{ entry_exit_table }}
 readonly EXIT_PRIORITY={{ entry_exit_rule_priority }}
@@ -76,7 +79,14 @@ if [[ "$probe_ok" == true ]]; then
         exit_routes="$(ip -4 route show table "$EXIT_TABLE" 2>/dev/null || true)"
         proxy_routes="$(ip -4 route show table "$RU_TABLE" 2>/dev/null || true)"
         grep -Eq "^${EXIT_PRIORITY}:.*fwmark ${EXIT_MARK}.*lookup ${EXIT_TABLE}" <<<"$policy_rules" || routing_ok=false
+{% if entry_standby_exit_enabled | default(false) | bool %}
+        # С резервным EXIT маршрут таблицы EXIT ведёт в туннель, который выбрал
+        # переключатель путей. Исправным считается любой из двух: иначе сторож
+        # заново применял бы маршрутизацию каждые десять секунд работы на резерве.
+        grep -Eq "^default .*dev (${EXIT_IF}|${STANDBY_EXIT_IF})( |$)" <<<"$exit_routes" || routing_ok=false
+{% else %}
         grep -Eq "^default .*dev ${EXIT_IF}( |$)" <<<"$exit_routes" || routing_ok=false
+{% endif %}
         grep -Eq "^${RU_PRIORITY}:.*fwmark ${RU_MARK}.*lookup ${RU_TABLE}" <<<"$policy_rules" || routing_ok=false
         grep -Eq "^default .*dev ${PROXY_IF}( |$)" <<<"$proxy_routes" || routing_ok=false
         iptables -w 10 -t mangle -S AWG_RU_PROXY >/dev/null 2>&1 || routing_ok=false

@@ -56,7 +56,15 @@
     quiet: true
     that:
       - groups['entry'] | default([]) | length == 1
-      - groups['exit'] | default([]) | length == 1
+      - groups['exit'] | default([]) | length in [1, 2]
+      # Второй сервер группы exit - только резервный EXIT, подключённый
+      # установщиком: основной остаётся первым, и ENTRY о резервном знает.
+      - >-
+        groups['exit'] | default([]) | length == 1 or
+        ((hostvars[groups['entry'][0]].entry_standby_exit_enabled | default(false) | bool) and
+         (hostvars[groups['exit'][1]].exit_standby | default(false) | bool) and
+         not (hostvars[groups['exit'][0]].exit_standby | default(false) | bool) and
+         not (hostvars[groups['entry'][0]].awg3_transit_enabled | default(false) | bool))
       - >-
         (hostvars[groups['entry'][0]].awg3_transit_enabled | default(false) | bool) ==
         (hostvars[groups['exit'][0]].awg3_transit_enabled | default(false) | bool)
@@ -67,8 +75,10 @@
          (hostvars[groups['exit'][0]].awg3_peer_endpoint_port | int) ==
          (hostvars[groups['entry'][0]].awg3_transit_listen_port | int))
     fail_msg: >-
-      Inventory должен содержать ровно одну согласованную пару ENTRY/EXIT;
-      режим AWG 3+ и взаимные endpoint/listen UDP-порты обязаны быть согласованы.
+      Inventory должен содержать ровно одну согласованную пару ENTRY/EXIT и не более
+      одного резервного EXIT, подключённого командой kalimera-deploy --resume
+      --enable-standby-exit; режим AWG 3+ и взаимные endpoint/listen UDP-порты
+      обязаны быть согласованы.
   run_once: true
 
 - name: "Вывод: предварительная проверка - этап 7"

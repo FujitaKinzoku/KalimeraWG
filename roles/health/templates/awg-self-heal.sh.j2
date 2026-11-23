@@ -103,8 +103,21 @@ classify() {
             plan_action=mobile_firewall_apply ;;
         'внешний UDP/8443 неактивного мобильного AWG закрыт')
             plan_action=mobile_firewall_remove ;;
-        'служба AWG 3+ до EXIT сервера'|'служба AWG до EXIT сервера'|'интерфейс AWG до EXIT сервера'|'состояние AWG 3+ до EXIT сервера доступно'|'состояние AWG до EXIT сервера доступно'|'свежий handshake ENTRY–EXIT')
+        'служба AWG 3+ до EXIT сервера'|'служба AWG до EXIT сервера'|'интерфейс AWG до EXIT сервера'|'состояние AWG 3+ до EXIT сервера доступно'|'состояние AWG до EXIT сервера доступно')
             plan_action=transit ;;
+        'свежий handshake ENTRY–EXIT')
+            # Основной EXIT не отвечает, и трафик уже идёт через резервный:
+            # перезапуск туннеля ничего не исправит, а каждая попытка заново
+            # применяла бы маршрутизацию и обрывала соединения клиентов.
+            if exit_path_uses_standby; then
+                plan_reason='external:основной EXIT не отвечает, трафик идёт через резервный; состояние: exit-path status'
+            else
+                plan_action=transit
+            fi ;;
+        'служба AWG до резервного EXIT'|'интерфейс AWG до резервного EXIT'|'состояние AWG до резервного EXIT доступно')
+            plan_action=transit_standby ;;
+        'таймер переключателя путей EXIT')
+            plan_action=timer_exit_path ;;
         'служба AWG 3+ EXIT сервера'|'служба AWG EXIT сервера'|'интерфейс AWG EXIT сервера'|'состояние AWG 3+ EXIT сервера доступно'|'состояние AWG EXIT сервера доступно'|'свежий handshake EXIT–ENTRY')
             plan_action=transit ;;
         'ограниченный NAT EXIT сервера'|'изоляция клиентов EXIT сервера'|'исходящий TCP MSS EXIT сервера'|'входящий TCP MSS EXIT сервера')
@@ -181,22 +194,36 @@ classify_unit() {
     case "$1" in
         awg-maintenance.service)
             plan_action=unit_maintenance ;;
-        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|certbot.service|awg-local-peer-apply.service)
+        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|kalimera-exit-path.service|certbot.service|awg-local-peer-apply.service)
             plan_action="unit_rerun:$1" ;;
         *)
             plan_reason="manual:причина: sudo journalctl -u $1 -b --no-pager" ;;
     esac
 }
 
+# Идёт ли зарубежный трафик через резервный EXIT. Путь выбирает переключатель
+# путей (exit-path); без резервного EXIT ответ всегда отрицательный.
+exit_path_uses_standby() {
+{% if awg_node_role | default('') == 'entry' and (entry_standby_exit_enabled | default(false) | bool) %}
+    local active=""
+    if [[ -r {{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} ]]; then
+        read -r active <{{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} || active=""
+    fi
+    [[ "$active" == {{ entry_standby_exit_interface | default('awg4') | quote }} ]]
+{% else %}
+    return 1
+{% endif %}
+}
+
 # Порядок выполнения: сначала то, от чего зависят остальные.
 readonly -a action_order=(
     disk_cleanup time_sync
     secrets_unlock kernel_module sysctl ufw_enable ufw_logging_off ssh fail2ban
-    awg_client awg_legacy awg_mobile transit local_peers ru_zone sing_box routing
+    awg_client awg_legacy awg_mobile transit transit_standby local_peers ru_zone sing_box routing
     mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
     domain_sync dnsmasq
     front_backend xray vless_sync nginx certbot
-    timer_audit timer_telegram timer_self timer_proxy_watch unit_maintenance
+    timer_audit timer_telegram timer_self timer_proxy_watch timer_exit_path unit_maintenance
 )
 
 action_title() {
@@ -214,6 +241,7 @@ action_title() {
         awg_legacy) echo 'перезапуск совместимого интерфейса AWG' ;;
         awg_mobile) echo 'перезапуск интерфейса mobile/AWG3+' ;;
         transit) echo 'перезапуск межсерверного интерфейса AWG' ;;
+        transit_standby) echo 'перезапуск интерфейса AWG до резервного EXIT' ;;
         local_peers) echo 'повторное применение локальных VPN-пиров' ;;
         ru_zone) echo 'загрузка набора российских сетей' ;;
         sing_box) echo 'перезапуск sing-box' ;;
@@ -230,7 +258,7 @@ action_title() {
         vless_sync) echo 'синхронизация пользователей VLESS с Xray' ;;
         nginx) echo 'перезапуск Nginx' ;;
         certbot) echo 'продление TLS-сертификата' ;;
-        timer_audit|timer_telegram|timer_self|timer_proxy_watch) echo 'включение таймера' ;;
+        timer_audit|timer_telegram|timer_self|timer_proxy_watch|timer_exit_path) echo 'включение таймера' ;;
         unit_maintenance) echo 'повторный запуск ночного обслуживания' ;;
         unit_rerun:*) echo "повторный запуск ${1#unit_rerun:}" ;;
         *) echo "$1" ;;
@@ -339,6 +367,10 @@ run_action() {
         sing_box) restart_unit {{ sing_box_service_name | default('sing-box.service') | quote }} ;;
         front_backend) restart_unit {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} ;;
         timer_proxy_watch) systemctl enable --now {{ entry_ru_proxy_watch_timer_name | default('awg-ru-proxy-watch.timer') | quote }} ;;
+{% if entry_standby_exit_enabled | default(false) | bool %}
+        transit_standby) restart_unit awg-quick@{{ entry_standby_exit_interface | default('awg4') }}.service ;;
+        timer_exit_path) systemctl enable --now {{ entry_exit_path_timer_name | default('kalimera-exit-path.timer') | quote }} ;;
+{% endif %}
 {% endif %}
 {% if awg_node_role | default('') == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}
