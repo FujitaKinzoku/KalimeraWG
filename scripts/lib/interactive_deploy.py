@@ -1389,7 +1389,9 @@ def enable_standby_exit(production: Path, vault_password: Path) -> bool:
     yaml_write(entry_path, entry_vars)
 
     standby_vars: dict[str, object] = {
-        "ansible_host": standby_host,
+        # Адрес, а не имя: по нему же остальные серверы ограничивают выдачу своей
+        # доли ключа (from= в authorized_keys), а sshd сверяет там адрес соединения.
+        "ansible_host": standby_ipv4,
         "ansible_user": standby_user,
         "ansible_port": standby_port,
         "ansible_become": True,
