@@ -850,6 +850,39 @@ class InstallerTests(InstallerCase):
         self.assertEqual(len(vault["vault_awg_standby_header_protection_key"]), 44)
         self.assertNotIn("vault_exit_standby_become_password", vault)
 
+    def test_exit_role_finds_entry_in_the_peers_of_the_standby(self) -> None:
+        # Роль exit требует, чтобы адрес ENTRY в туннеле был в AllowedIPs списка
+        # peers. Общее значение каскада относится к туннелю основного EXIT.
+        self.enable()
+        standby = deploy.load_yaml(self.hosts_path)["all"]["children"]["exit"]["hosts"][
+            "exit-standby-managed"
+        ]
+        peers = read_vault(self.vault_path)["vault_standby_exit_peers"]
+        self.assertEqual(standby["awg_interserver_entry_address"], "10.78.0.2/32")
+        self.assertIn(standby["awg_interserver_entry_address"], peers[0]["allowed_ips"])
+        role = (ROOT / "roles" / "exit" / "tasks" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("awg_interserver_entry_address in", role)
+
+    def test_inventory_written_by_an_earlier_build_is_completed(self) -> None:
+        self.enable()
+        document = deploy.load_yaml(self.hosts_path)
+        del document["all"]["children"]["exit"]["hosts"]["exit-standby-managed"][
+            "awg_interserver_entry_address"
+        ]
+        deploy.yaml_write(self.hosts_path, document)
+        with mock.patch("builtins.print"):
+            self.assertTrue(deploy.repair_standby_exit_inventory(self.production))
+            self.assertFalse(deploy.repair_standby_exit_inventory(self.production))
+        standby = deploy.load_yaml(self.hosts_path)["all"]["children"]["exit"]["hosts"][
+            "exit-standby-managed"
+        ]
+        self.assertEqual(standby["awg_interserver_entry_address"], "10.78.0.2/32")
+
+    def test_cascade_without_a_standby_is_not_touched_by_the_repair(self) -> None:
+        before = self.hosts_path.read_text(encoding="utf-8")
+        self.assertFalse(deploy.repair_standby_exit_inventory(self.production))
+        self.assertEqual(self.hosts_path.read_text(encoding="utf-8"), before)
+
     def test_new_server_goes_through_the_two_step_ssh_transition(self) -> None:
         self.enable()
         self.assertIs(deploy.load_yaml(self.all_path)["security_finalize_admin_access"], False)

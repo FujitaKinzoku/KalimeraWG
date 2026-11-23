@@ -1201,6 +1201,38 @@ def standby_exit_configured(hosts_document: dict) -> bool:
     return isinstance(exit_hosts, dict) and STANDBY_EXIT_HOST in exit_hosts
 
 
+def repair_standby_exit_inventory(production: Path) -> bool:
+    """Дополнить хост резервного EXIT значениями, которые выводятся из настроек ENTRY.
+
+    Установщик записывает хост один раз и при повторном запуске его не трогает.
+    Значение, добавленное в установщик позже, без этого шага не попало бы в уже
+    созданный inventory, и deploy останавливался бы на проверке роли exit.
+    """
+    hosts_path = production / "hosts.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    if not hosts_path.is_file() or not entry_path.is_file():
+        return False
+    hosts_document = load_yaml(hosts_path)
+    if not standby_exit_configured(hosts_document):
+        return False
+    standby = hosts_document["all"]["children"]["exit"]["hosts"][STANDBY_EXIT_HOST]
+    if not isinstance(standby, dict):
+        return False
+    entry_tunnel_address = load_yaml(entry_path).get("entry_standby_exit_tunnel_address")
+    expected: dict[str, object] = {}
+    if entry_tunnel_address:
+        expected["awg_interserver_entry_address"] = str(entry_tunnel_address)
+    changed = False
+    for key, value in expected.items():
+        if standby.get(key) != value:
+            standby[key] = value
+            changed = True
+    if changed:
+        yaml_write(hosts_path, hosts_document)
+        print("Production inventory дополнен: недостающие значения резервного EXIT.")
+    return changed
+
+
 def enable_standby_exit(production: Path, vault_password: Path) -> bool:
     """Добавить резервный EXIT к production inventory (docs/standby-exit.md).
 
@@ -1366,6 +1398,9 @@ def enable_standby_exit(production: Path, vault_password: Path) -> bool:
         "security_allow_ssh_port_change": standby_port != standby_new_port,
         "security_automation_source_ipv4": automation_source_ipv4,
         "exit_standby": True,
+        # Адрес ENTRY в туннеле этого сервера. Общее значение каскада относится к
+        # туннелю основного EXIT, а роль exit сверяет с ним список peers.
+        "awg_interserver_entry_address": f"{entry_tunnel_ip}/32",
         "exit_awg_address": f"{exit_tunnel_ip}/{network.prefixlen}",
         "exit_awg_subnet": str(network),
         "exit_awg_obfuscation": profile,
@@ -5705,6 +5740,7 @@ def main() -> None:
         if not all_vars_path.is_file():
             fail("Не найдены групповые переменные production inventory")
         migrate_production_inventory(production)
+        repair_standby_exit_inventory(production)
         drop_stale_xray_override(repo, production)
         if args.update_components or args.update_amneziawg:
             require_amneziawg_ppa(repo)
