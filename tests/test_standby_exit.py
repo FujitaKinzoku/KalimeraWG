@@ -80,6 +80,8 @@ class SelectorCase(unittest.TestCase):
             }
         )
         self.reach = {PRIMARY: 3, STANDBY: 3}
+        # Сколько ответивших адресов ответили только на повторно отправленный пакет.
+        self.slow = {PRIMARY: 0, STANDBY: 0}
         self.route = "awg3"
         self.route_ok = True
         self.routes: list[str] = []
@@ -93,8 +95,13 @@ class SelectorCase(unittest.TestCase):
                 self.routes.append(self.route)
             return self.route_ok
 
+        def probe_path(_cfg, name: str) -> list[float | None]:
+            reached = self.reach[name]
+            slow = min(self.slow[name], reached)
+            return [1.05] * slow + [0.05] * (reached - slow) + [None] * (3 - reached)
+
         for name, replacement in {
-            "probe_path": lambda _cfg, name: self.reach[name],
+            "probe_path": probe_path,
             "set_route": set_route,
             "current_route_interface": lambda _cfg: self.route,
             "flush_connections": lambda _cfg, previous: self.flushed.append(previous),
@@ -332,6 +339,164 @@ class SelectorReportTests(SelectorCase):
         self.assertIn("Зарубежный трафик идёт через: основной EXIT (awg3)", text)
         self.assertIn("Режим: автоматический", text)
         self.assertIn("резервный EXIT (awg4): отвечает (3 из 3)", text)
+
+
+class SelectorQualityTests(SelectorCase):
+    """Потери пакетов на пути, который формально отвечает.
+
+    Найдено на рабочем каскаде: туннель до резервного EXIT терял около 3% пакетов
+    и давал 0,9 Мбит/с вместо 36, а команда status писала «отвечает (3 из 3), без
+    сбоев 44 мин».
+    """
+
+    def status(self, now: int) -> str:
+        return "\n".join(
+            selector.status_lines(self.cfg, selector.read_state(self.cfg), "auto", now)
+        )
+
+    def rows(self, now: int) -> list[tuple[str, str]]:
+        return selector.report_rows(
+            self.cfg, selector.read_state(self.cfg), selector.read_mode(self.cfg), now
+        )
+
+    def run_lossy_ticks(self, start: int, count: int, every: int) -> None:
+        """Каждая every-я проверка резервного пути проходит со второй попытки."""
+        for index in range(count):
+            self.slow[STANDBY] = 1 if index % every == 0 else 0
+            selector.tick(self.cfg, start + index * 10)
+
+    def test_clean_paths_show_the_delay_and_no_losses(self) -> None:
+        self.run_ticks(6000, 25)
+        text = self.status(6245)
+        self.assertEqual(
+            text.count("  задержка 50 мс; за час все проверки (75) прошли с первой попытки"), 2, text
+        )
+        self.assertEqual([level for level, _ in self.rows(6245)], ["OK", "OK", "OK"])
+
+    def test_lossy_standby_is_reported_while_it_still_answers(self) -> None:
+        self.run_lossy_ticks(6000, 30, every=5)
+        state = selector.read_state(self.cfg)
+        # Правила выбора пути потери не меняют: резервный путь по-прежнему годен.
+        self.assertEqual(state["active"], PRIMARY)
+        self.assertEqual(state["paths"][STANDBY]["fail"], 0)
+        self.assertTrue(selector.path_is_healthy(state, STANDBY))
+        rows = self.rows(6295)
+        self.assertEqual([level for level, _ in rows], ["OK", "WARN", "OK"])
+        self.assertEqual(
+            rows[1][1],
+            "резервный EXIT: отвечает, но теряет пакеты: за час 6 из 90 проверок "
+            "прошли со второй попытки или без ответа (6,7%)",
+        )
+        text = self.status(6295)
+        self.assertIn("резервный EXIT (awg4): отвечает (3 из 3)", text)
+        self.assertIn(
+            "  задержка 50 мс; за час 6 из 90 проверок прошли со второй попытки или без ответа "
+            "(6,7%): путь теряет пакеты",
+            text,
+        )
+        self.assertIn("  задержка 50 мс; за час все проверки (90) прошли с первой попытки", text)
+
+    def test_unanswered_probe_counts_as_a_loss(self) -> None:
+        # Отвечают два адреса из трёх: путь жив по правилу большинства, но третья
+        # проверка каждый раз теряется.
+        self.reach[STANDBY] = 2
+        self.run_ticks(6000, 20)
+        rows = self.rows(6195)
+        self.assertEqual(rows[1][0], "WARN")
+        self.assertIn("за час 20 из 60 проверок", rows[1][1])
+        self.assertIn("(33,3%)", rows[1][1])
+
+    def test_rare_loss_stays_below_the_warning(self) -> None:
+        self.run_lossy_ticks(6000, 30, every=30)
+        self.assertEqual([level for level, _ in self.rows(6295)], ["OK", "OK", "OK"])
+        text = self.status(6295)
+        self.assertIn("за час 1 из 90 проверок прошли со второй попытки или без ответа (1,1%)", text)
+        self.assertNotIn("путь теряет пакеты", text)
+
+    def test_few_probes_give_no_verdict(self) -> None:
+        self.slow[STANDBY] = 3
+        self.run_ticks(6000, 2)
+        self.assertEqual([level for level, _ in self.rows(6015)], ["OK", "OK", "OK"])
+        text = self.status(6015)
+        # Ни одного подключения с первой попытки: задержку назвать не из чего.
+        self.assertIn("резервный EXIT (awg4): отвечает (3 из 3), без сбоев 15 с\n  данных о потерях пока мало", text)
+        self.assertIn("  задержка 50 мс; данных о потерях пока мало", text)
+
+    def test_losses_older_than_an_hour_are_forgotten(self) -> None:
+        self.run_lossy_ticks(6000, 30, every=2)
+        self.assertEqual(self.rows(6295)[1][0], "WARN")
+        self.slow[STANDBY] = 0
+        self.run_ticks(6000 + 2 * 3600, 25)
+        later = 6000 + 2 * 3600 + 245
+        self.assertEqual([level for level, _ in self.rows(later)], ["OK", "OK", "OK"])
+        self.assertIn("за час все проверки (75) прошли с первой попытки", self.status(later))
+        history = selector.read_state(self.cfg)["paths"][STANDBY]["quality"]
+        self.assertTrue(all(item[0] > (later // 60) - 60 for item in history), history)
+
+    def test_state_of_the_previous_version_is_accepted(self) -> None:
+        # Служба обновляется на работающем ENTRY: в /run лежит состояние без новых
+        # полей, а испорченный счёт не должен останавливать проверки.
+        run = self.dir / "run"
+        run.mkdir()
+        (run / "state.json").write_text(
+            json.dumps(
+                {
+                    "active": "primary",
+                    "since": 5000,
+                    "reason": "",
+                    "drill_until": 0,
+                    "paths": {
+                        "primary": {"fail": 0, "healthy_since": 5000, "reached": 3, "checked": 5990},
+                        "standby": {
+                            "fail": 0, "healthy_since": 5000, "reached": 3, "checked": 5990,
+                            "quality": "мусор", "rtt_ms": None,
+                        },
+                    },
+                    "last_switch": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = selector.tick(self.cfg, 6000)
+        self.assertEqual(state["active"], PRIMARY)
+        self.assertEqual(state["paths"][PRIMARY]["healthy_since"], 5000)
+        self.assertEqual(state["paths"][PRIMARY]["quality"], [[100, 3, 0]])
+        self.assertEqual(state["paths"][STANDBY]["quality"], [[100, 3, 0]])
+        self.assertEqual(state["paths"][STANDBY]["rtt_ms"], 50)
+
+
+class SelectorProbeTests(unittest.TestCase):
+    def test_probe_returns_the_connect_time_or_nothing(self) -> None:
+        connection = mock.MagicMock()
+        connection.__enter__.return_value = connection
+        with mock.patch.object(selector.socket, "socket", return_value=connection), \
+                mock.patch.object(selector.time, "monotonic", side_effect=[10.0, 10.25]):
+            self.assertAlmostEqual(selector.probe_target("awg4", "192.0.2.1", 443, 3), 0.25)
+        connection.setsockopt.assert_called_once_with(
+            selector.socket.SOL_SOCKET, selector.SO_BINDTODEVICE, b"awg4\0"
+        )
+        connection.connect.side_effect = OSError("timed out")
+        with mock.patch.object(selector.socket, "socket", return_value=connection):
+            self.assertIsNone(selector.probe_target("awg4", "192.0.2.1", 443, 3))
+
+    def test_missing_interface_answers_nothing(self) -> None:
+        cfg = selector.Config(
+            {
+                "paths": [
+                    {"name": "primary", "interface": "kalimera-none0"},
+                    {"name": "standby", "interface": "kalimera-none1"},
+                ],
+                "probe_targets": [["192.0.2.1", 443], ["192.0.2.2", 443]],
+                "probe_quorum": 1,
+                "probe_timeout_seconds": 1,
+                "fail_threshold": 3,
+                "failback_seconds": 900,
+                "table": 100,
+                "state_dir": "/nonexistent/run",
+                "mode_file": "/nonexistent/mode",
+            }
+        )
+        self.assertEqual(selector.probe_path(cfg, PRIMARY), [None, None])
 
 
 class SelectorSystemTests(unittest.TestCase):

@@ -15,6 +15,10 @@ EXIT. Проверка - TCP-соединения через сам туннел
   * если не отвечают оба, маршрут не меняется: пакеты уходят в неработающий
     туннель и теряются, но с адреса ENTRY зарубежный трафик не выходит.
 
+Кроме «отвечает или нет» по каждому пути ведётся счёт проверок, прошедших со
+второй попытки: это потери пакетов в туннеле. На выбор пути он пока не влияет,
+его показывают exit-path status и cascade-check.
+
 Состояние лежит в /run и после перезагрузки начинается с основного пути.
 Закрепление пути командой use хранится в /var/lib и перезагрузку переживает.
 """
@@ -39,6 +43,10 @@ STANDBY = "standby"
 PATH_NAMES = (PRIMARY, STANDBY)
 MODES = ("auto", PRIMARY, STANDBY)
 SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
+# Счёт потерь ведётся по минутам за последний час; вывод о потерях делается не
+# раньше, чем наберётся столько проверок.
+QUALITY_MINUTES = 60
+QUALITY_MIN_PROBES = 60
 
 
 class Config:
@@ -56,6 +64,10 @@ class Config:
         self.fail_threshold = int(document["fail_threshold"])
         self.failback_seconds = int(document["failback_seconds"])
         self.drill_seconds = int(document.get("drill_seconds", 300))
+        # Первый пакет TCP-соединения ядро повторяет через 1 с. Подключение,
+        # занявшее столько, прошло со второй попытки: пакет или ответ потерян.
+        self.slow_probe_seconds = float(document.get("slow_probe_seconds", 0.9))
+        self.loss_warn_percent = float(document.get("loss_warn_percent", 2))
         self.table = int(document["table"])
         self.state_dir = Path(document["state_dir"])
         self.mode_file = Path(document["mode_file"])
@@ -85,7 +97,14 @@ def empty_state() -> dict:
         "reason": "",
         "drill_until": 0,
         "paths": {
-            name: {"fail": 0, "healthy_since": None, "reached": None, "checked": 0}
+            name: {
+                "fail": 0,
+                "healthy_since": None,
+                "reached": None,
+                "checked": 0,
+                "rtt_ms": None,
+                "quality": [],
+            }
             for name in PATH_NAMES
         },
         "last_switch": None,
@@ -143,8 +162,12 @@ def write_mode(cfg: Config, mode: str) -> None:
     atomic_write(cfg.mode_file, mode + "\n")
 
 
-def probe_target(interface: str, host: str, port: int, timeout: float) -> bool:
-    """Открыть TCP-соединение через указанный интерфейс и сразу закрыть его."""
+def probe_target(interface: str, host: str, port: int, timeout: float) -> float | None:
+    """Открыть TCP-соединение через указанный интерфейс и сразу закрыть его.
+
+    Возвращает время подключения в секундах; None, если адрес не ответил.
+    """
+    started = time.monotonic()
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
             connection.setsockopt(
@@ -152,35 +175,79 @@ def probe_target(interface: str, host: str, port: int, timeout: float) -> bool:
             )
             connection.settimeout(timeout)
             connection.connect((host, port))
-        return True
     except OSError:
-        return False
+        return None
+    return time.monotonic() - started
 
 
-def probe_path(cfg: Config, name: str) -> int:
-    """Сколько адресов ответило через туннель этого пути."""
+def probe_path(cfg: Config, name: str) -> list[float | None]:
+    """Время подключения к каждому проверочному адресу через туннель этого пути."""
     interface = cfg.interface(name)
     if not Path("/sys/class/net", interface).exists():
-        return 0
+        return [None] * len(cfg.targets)
     with ThreadPoolExecutor(max_workers=len(cfg.targets)) as pool:
-        results = pool.map(
-            lambda target: probe_target(interface, target[0], target[1], cfg.probe_timeout),
-            cfg.targets,
+        return list(
+            pool.map(
+                lambda target: probe_target(interface, target[0], target[1], cfg.probe_timeout),
+                cfg.targets,
+            )
         )
-        return sum(1 for ok in results if ok)
 
 
-def record_probe(state: dict, name: str, reached: int, quorum: int, now: int) -> None:
+def quality_items(history: object, now: int) -> list[list[int]]:
+    """Записи счёта потерь за последний час: [минута, проверок, с потерей]."""
+    minute = now // 60
+    kept: list[list[int]] = []
+    if not isinstance(history, list):
+        return kept
+    for item in history:
+        if (
+            isinstance(item, list)
+            and len(item) == 3
+            and all(isinstance(value, int) for value in item)
+            and minute - QUALITY_MINUTES < item[0] <= minute
+        ):
+            kept.append(item)
+    return kept
+
+
+def quality_counts(entry: dict, now: int) -> tuple[int, int]:
+    """Сколько проверок пути было за последний час и сколько из них с потерей."""
+    items = quality_items(entry.get("quality"), now)
+    return sum(item[1] for item in items), sum(item[2] for item in items)
+
+
+def path_is_lossy(cfg: Config, entry: dict, now: int) -> bool:
+    total, lost = quality_counts(entry, now)
+    return total >= QUALITY_MIN_PROBES and lost * 100 >= cfg.loss_warn_percent * total
+
+
+def record_probe(
+    state: dict, name: str, times: list[float | None], cfg: Config, now: int
+) -> None:
     entry = state["paths"][name]
-    entry["reached"] = reached
+    answered = [value for value in times if value is not None]
+    entry["reached"] = len(answered)
     entry["checked"] = now
-    if reached >= quorum:
+    if len(answered) >= cfg.quorum:
         entry["fail"] = 0
         if entry["healthy_since"] is None:
             entry["healthy_since"] = now
     else:
         entry["fail"] = int(entry["fail"]) + 1
         entry["healthy_since"] = None
+    # Задержка пути - самое быстрое подключение без повторной отправки.
+    clean = [value for value in answered if value < cfg.slow_probe_seconds]
+    if clean:
+        entry["rtt_ms"] = int(min(clean) * 1000)
+    history = quality_items(entry.get("quality"), now)
+    minute = now // 60
+    lost = len(times) - len(clean)
+    if history and history[-1][0] == minute:
+        history[-1] = [minute, history[-1][1] + len(times), history[-1][2] + lost]
+    else:
+        history.append([minute, len(times), lost])
+    entry["quality"] = history
 
 
 def path_is_healthy(state: dict, name: str) -> bool:
@@ -350,7 +417,7 @@ def tick(cfg: Config, now: int | None = None) -> dict:
     state = read_state(cfg)
     mode = read_mode(cfg)
     for name in PATH_NAMES:
-        record_probe(state, name, probe_path(cfg, name), cfg.quorum, now)
+        record_probe(state, name, probe_path(cfg, name), cfg, now)
     if int(state.get("drill_until") or 0) and int(state["drill_until"]) <= now:
         state["drill_until"] = 0
     if not state.get("since"):
@@ -385,6 +452,29 @@ def format_age(seconds: int) -> str:
     return f"{seconds // 3600} ч"
 
 
+def format_share(part: int, total: int) -> str:
+    return f"{part * 100 / total:.1f}".replace(".", ",")
+
+
+def quality_text(cfg: Config, entry: dict, now: int) -> str:
+    """Задержка пути и доля проверок с потерей за последний час."""
+    parts: list[str] = []
+    if entry.get("rtt_ms") is not None:
+        parts.append(f"задержка {int(entry['rtt_ms'])} мс")
+    total, lost = quality_counts(entry, now)
+    if total < QUALITY_MIN_PROBES:
+        parts.append("данных о потерях пока мало")
+    elif lost == 0:
+        parts.append(f"за час все проверки ({total}) прошли с первой попытки")
+    else:
+        verdict = ": путь теряет пакеты" if path_is_lossy(cfg, entry, now) else ""
+        parts.append(
+            f"за час {lost} из {total} проверок прошли со второй попытки или без ответа "
+            f"({format_share(lost, total)}%){verdict}"
+        )
+    return "; ".join(parts)
+
+
 def status_lines(cfg: Config, state: dict, mode: str, now: int) -> list[str]:
     active = state["active"]
     lines = [f"Зарубежный трафик идёт через: {cfg.label(active)} ({cfg.interface(active)})"]
@@ -413,6 +503,8 @@ def status_lines(cfg: Config, state: dict, mode: str, now: int) -> list[str]:
                 f"неудачных проверок подряд: {entry['fail']}"
             )
         lines.append(f"{cfg.label(name)} ({cfg.interface(name)}): {verdict}")
+        if entry["reached"] is not None:
+            lines.append(f"  {quality_text(cfg, entry, now)}")
     last = state.get("last_switch")
     if isinstance(last, dict) and last.get("at"):
         lines.append(
@@ -434,6 +526,18 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
         return [("WARN", "переключатель путей EXIT не проверял туннели последние две минуты")]
     for name in PATH_NAMES:
         entry = state["paths"][name]
+        # Путь отвечает, но проверки то и дело проходят со второй попытки:
+        # скорость через него будет в разы ниже, чем обещает задержка.
+        if int(entry["fail"]) == 0 and path_is_lossy(cfg, entry, now):
+            total, lost = quality_counts(entry, now)
+            rows.append(
+                (
+                    "WARN",
+                    f"{cfg.label(name)}: отвечает, но теряет пакеты: за час {lost} из {total} "
+                    f"проверок прошли со второй попытки или без ответа ({format_share(lost, total)}%)",
+                )
+            )
+            continue
         text = (
             f"{cfg.label(name)}: отвечает {entry['reached']} из {len(cfg.targets)} "
             "проверочных адресов"

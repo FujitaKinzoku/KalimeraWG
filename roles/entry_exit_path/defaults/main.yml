@@ -26,3 +26,10 @@ entry_exit_path_fail_threshold: 3
 entry_exit_path_failback_seconds: 900
 # Длительность учебного переключения командой exit-path drill.
 entry_exit_path_drill_seconds: 300
+# Проверка, занявшая столько секунд и больше, прошла со второй попытки: первый
+# пакет соединения ядро повторяет через 1 с. Такие проверки и проверки без
+# ответа считаются потерями пакетов. На выбор пути этот счёт не влияет.
+entry_exit_path_slow_probe_seconds: 0.9
+# При какой доле потерь за последний час exit-path status и cascade-check
+# сообщают, что путь теряет пакеты, в процентах.
+entry_exit_path_loss_warn_percent: 2
