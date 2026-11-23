@@ -6,3 +6,8 @@ dee4d253ee13e46d3a04161e13881cca272008db:tests/render-shell.yml:generic-api-key:
 # ключевого материала на лету (commit c833053), но сама исходная строка
 # навсегда остаётся в истории git и должна быть проигнорирована здесь.
 7b5109d4b625b07aa41ae0333c6b75545daf5a6e:tests/check-sing-box.yml:generic-api-key:90
+
+# Исторический fingerprint фиктивного cluster_id из временного inventory в
+# tests/test_standby_exit.py. Значение из теста убрано следующим коммитом: оно
+# не было нужно, установщик создаёт идентификатор сам.
+547c658e340d69808602a22df59162fcd40030f9:tests/test_standby_exit.py:generic-api-key:693

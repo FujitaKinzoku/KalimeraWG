@@ -380,7 +380,7 @@ class SelectorSystemTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             cfg = self.config(Path(temporary))
             calls: list[list[str]] = []
-            with mock.patch.object(selector.shutil, "which", return_value="/usr/sbin/conntrack"), \
+            with mock.patch.object(selector.shutil, "which", side_effect=lambda name: f"/usr/sbin/{name}"), \
                     mock.patch.object(selector, "run_quiet", side_effect=lambda argv, **_: calls.append(argv) or 0):
                 selector.flush_connections(cfg, PRIMARY)
             self.assertEqual(
@@ -388,8 +388,36 @@ class SelectorSystemTests(unittest.TestCase):
                 [
                     ["/usr/sbin/conntrack", "-D", "--reply-dst", "10.77.0.2"],
                     ["/usr/sbin/conntrack", "-D", "--orig-src", "10.77.0.2"],
+                    # Сокеты самого ENTRY, привязанные к адресу прежнего туннеля.
+                    ["/usr/sbin/ss", "-K", "-4", "src", "10.77.0.2"],
                 ],
             )
+
+    def test_missing_tools_do_not_stop_the_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg = self.config(Path(temporary))
+            with mock.patch.object(selector.shutil, "which", return_value=None), \
+                    mock.patch.object(selector, "run_quiet") as run_quiet:
+                selector.flush_connections(cfg, PRIMARY)
+                selector.sync_dns(cfg, STANDBY)
+            run_quiet.assert_not_called()
+
+    def test_switch_is_announced_through_the_telegram_monitor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg = self.config(
+                Path(temporary), notify_command=["/usr/local/sbin/awg-telegram-monitor", "--notify"]
+            )
+            calls: list[list[str]] = []
+            with mock.patch.object(selector, "run_quiet", side_effect=lambda argv, **_: calls.append(argv) or 0):
+                selector.notify(cfg, "Зарубежный трафик переведён")
+            self.assertEqual(
+                calls,
+                [["/usr/local/sbin/awg-telegram-monitor", "--notify", "Зарубежный трафик переведён"]],
+            )
+            calls.clear()
+            with mock.patch.object(selector, "run_quiet", side_effect=lambda argv, **_: calls.append(argv) or 0):
+                selector.notify(self.config(Path(temporary)), "текст")
+            self.assertEqual(calls, [], "без Telegram-монитора сообщение не отправляется")
 
     def test_forgotten_deploy_mark_expires(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -435,6 +463,7 @@ class SelectorSystemTests(unittest.TestCase):
         self.assertEqual(cfg.quorum, 2)
         self.assertTrue(cfg.dns_via_exit)
         self.assertEqual(str(cfg.hold_file), "/run/kalimera-deploy.active")
+        self.assertEqual(cfg.notify_command, [], "без Telegram-монитора уведомлять нечем")
 
 
 class StandbyRoutingTests(ShellCase):
@@ -690,7 +719,6 @@ class InstallerCase(unittest.TestCase):
                 "security_finalize_admin_access": True,
                 "security_manage_admin_account": True,
                 "security_admin_authorized_keys": ["ssh-ed25519 AAAA admin"],
-                "runtime_secrets_cluster_id": "0123456789abcdef0123456789abcdef",
             },
         )
         deploy.yaml_write(

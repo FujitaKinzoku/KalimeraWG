@@ -281,12 +281,19 @@ def flush_connections(cfg: Config, previous: str) -> None:
     выходит уже с новым адресом, сайт отвечает сбросом, и приложение сразу
     открывает соединение заново.
     """
-    conntrack = shutil.which("conntrack")
     address = str(cfg.paths[previous].get("tunnel_address", "")).split("/")[0]
-    if not conntrack or not address:
+    if not address:
         return
-    run_quiet([conntrack, "-D", "--reply-dst", address])
-    run_quiet([conntrack, "-D", "--orig-src", address])
+    conntrack = shutil.which("conntrack")
+    if conntrack:
+        run_quiet([conntrack, "-D", "--reply-dst", address])
+        run_quiet([conntrack, "-D", "--orig-src", address])
+    # Соединения самого ENTRY (backend FRONT для клиентов VLESS) привязаны к адресу
+    # прежнего туннеля и без этого ждали бы собственного тайм-аута. Закрытый сокет
+    # служба видит сразу, а клиент открывает соединение заново уже по новому пути.
+    sockets = shutil.which("ss")
+    if sockets:
+        run_quiet([sockets, "-K", "-4", "src", address])
 
 
 def sync_dns(cfg: Config, name: str) -> None:
@@ -312,7 +319,7 @@ def sync_dns(cfg: Config, name: str) -> None:
 
 def notify(cfg: Config, message: str) -> None:
     if cfg.notify_command:
-        run_quiet(cfg.notify_command + [message], timeout=30)
+        run_quiet(cfg.notify_command + [message], timeout=45)
 
 
 def apply_path(cfg: Config, state: dict, target: str, reason: str, now: int) -> bool:

@@ -25,5 +25,7 @@
   'state_dir': entry_exit_path_state_dir,
   'mode_file': entry_exit_path_mode_file,
   'hold_file': kalimera_deploy_marker_path | default('/run/kalimera-deploy.active'),
-  'dns_via_exit': entry_dns_default_via_exit | default(false) | bool
+  'dns_via_exit': entry_dns_default_via_exit | default(false) | bool,
+  'notify_command': ([awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor'), '--notify']
+                     if (awg_telegram_monitor_enabled | default(false) | bool) else [])
 } | to_nice_json(ensure_ascii=False) }}
