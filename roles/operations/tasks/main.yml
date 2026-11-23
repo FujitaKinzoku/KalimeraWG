@@ -325,6 +325,20 @@
   when: awg_node_role == 'entry'
   notify: Перезагрузить модули systemd для администрирования
 
+# Резервный EXIT отключён: его туннеля больше нет, настройка модуля осталась бы
+# без дела. Имя сверяется с действующими интерфейсами на случай своего inventory.
+- name: "Удаление восстановления состояния интерфейса отключённого резервного EXIT"
+  ansible.builtin.file:
+    path: "/etc/systemd/system/awg-quick@{{ entry_standby_exit_interface | default('awg4') }}.service.d"
+    state: absent
+  when:
+    - awg_node_role == 'entry'
+    - not (entry_standby_exit_enabled | default(false) | bool)
+    - >-
+      (entry_standby_exit_interface | default('awg4')) not in
+      [entry_client_interface, entry_legacy_client_interface, entry_exit_interface]
+  notify: Перезагрузить модули systemd для администрирования
+
 - name: "Установка: администрирование - этап 12"
   ansible.builtin.file:
     src: /usr/local/sbin/awg-domain-admin

@@ -936,7 +936,15 @@ class InstallerCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def enable(self, address: str = "198.51.100.7", user: str = "root") -> bool:
+    CLEAN_ROUTE = {"count": 100, "clean": 100, "slow": 0, "failed": 0, "rtt_ms": 90}
+
+    def enable(
+        self,
+        address: str = "198.51.100.7",
+        user: str = "root",
+        route: dict | None = None,
+        proceed: bool = False,
+    ) -> bool:
         answers = iter([address, user])
         ports = iter([22, 56777])
         with mock.patch.object(deploy, "prompt", side_effect=lambda *_a, **_k: next(answers)), \
@@ -946,10 +954,35 @@ class InstallerCase(unittest.TestCase):
                 mock.patch.object(deploy, "resolve_single_public_ipv4", side_effect=lambda value, _label: value), \
                 mock.patch.object(deploy, "bootstrap_key", return_value="initial-password") as bootstrap, \
                 mock.patch.object(deploy, "remote_observed_ssh_source_ipv4", return_value="192.0.2.10"), \
-                mock.patch.object(deploy, "ui_panel"), \
+                mock.patch.object(
+                    deploy, "probe_tcp_route", return_value=dict(route or self.CLEAN_ROUTE)
+                ) as probe, \
+                mock.patch.object(deploy, "prompt_bool", return_value=proceed) as asked, \
+                mock.patch.object(deploy, "ui_panel") as panel, \
                 mock.patch("builtins.print"):
             self.bootstrap = bootstrap
+            self.probe = probe
+            self.asked = asked
+            self.panel = panel
             return deploy.enable_standby_exit(self.production, self.vault_password)
+
+    def disable(self, confirm: bool = True, active: str = "awg3") -> bool:
+        """Отключение резервного EXIT; active - интерфейс, выбранный переключателем."""
+        state_dir = Path(self.tmp.name) / "exit-path"
+        state_dir.mkdir(exist_ok=True)
+        (state_dir / "active").write_text(active + "\n", encoding="utf-8")
+        entry = deploy.load_yaml(self.entry_path)
+        if entry.get("entry_standby_exit_enabled"):
+            entry["entry_exit_path_state_dir"] = str(state_dir)
+            deploy.yaml_write(self.entry_path, entry)
+        with mock.patch.object(deploy, "prompt_bool", return_value=confirm) as asked, \
+                mock.patch.object(deploy, "forget_ssh_host") as forget, \
+                mock.patch.object(deploy, "ui_panel") as panel, \
+                mock.patch("builtins.print"):
+            self.asked = asked
+            self.forget = forget
+            self.panel = panel
+            return deploy.disable_standby_exit(self.production, self.vault_password)
 
 
 class InstallerTests(InstallerCase):
@@ -1092,17 +1125,232 @@ class InstallerTests(InstallerCase):
                 mock.patch.object(deploy, "require_public_endpoint"), \
                 mock.patch.object(deploy, "resolve_single_public_ipv4", side_effect=lambda value, _label: value), \
                 mock.patch.object(deploy, "bootstrap_key", side_effect=SystemExit(1)), \
+                mock.patch.object(deploy, "probe_tcp_route", return_value=dict(self.CLEAN_ROUTE)), \
                 mock.patch.object(deploy, "ui_panel"), mock.patch("builtins.print"):
             with self.assertRaises(SystemExit):
                 deploy.enable_standby_exit(self.production, self.vault_password)
         self.assertEqual(self.entry_path.read_text(encoding="utf-8"), before)
         self.assertNotIn("vault_awg_standby_exit_private_key", read_vault(self.vault_path))
 
+    # Проверка маршрута до нового сервера. Найдено на рабочем каскаде: сервер был
+    # исправен, а маршрут между хостингами терял 3-5% пакетов - это выяснилось
+    # только после установки.
+
+    def test_clean_route_is_checked_and_asks_nothing(self) -> None:
+        self.assertTrue(self.enable())
+        self.probe.assert_called_once_with("198.51.100.7", 22)
+        self.asked.assert_not_called()
+        self.bootstrap.assert_called_once()
+
+    def test_lossy_route_stops_the_connection_unless_the_owner_insists(self) -> None:
+        before_hosts = self.hosts_path.read_text(encoding="utf-8")
+        before_entry = self.entry_path.read_text(encoding="utf-8")
+        lossy = {"count": 100, "clean": 91, "slow": 8, "failed": 1, "rtt_ms": 95}
+        with self.assertRaises(SystemExit) as stopped:
+            self.enable(route=lossy)
+        self.assertEqual(stopped.exception.code, 0)
+        self.asked.assert_called_once_with("Всё равно подключить этот сервер", False)
+        text = " ".join(self.panel.call_args.args[1])
+        self.assertIn("с первой попытки прошли 91, со второй - 8, без ответа - 1", text)
+        self.bootstrap.assert_not_called()
+        self.assertEqual(self.hosts_path.read_text(encoding="utf-8"), before_hosts)
+        self.assertEqual(self.entry_path.read_text(encoding="utf-8"), before_entry)
+        self.assertNotIn("vault_awg_standby_exit_private_key", read_vault(self.vault_path))
+        # Владелец настоял: сервер подключается, как обычно.
+        self.assertTrue(self.enable(route=lossy, proceed=True))
+        self.bootstrap.assert_called_once()
+
+    def test_single_slow_connection_is_not_a_reason_to_ask(self) -> None:
+        self.assertTrue(self.enable(route={"count": 100, "clean": 99, "slow": 1, "failed": 0, "rtt_ms": 95}))
+        self.asked.assert_not_called()
+
+    def test_silent_port_is_reported_before_anything_changes(self) -> None:
+        before = self.hosts_path.read_text(encoding="utf-8")
+        with self.assertRaises(SystemExit) as stopped:
+            self.enable(route={"count": 5, "clean": 0, "slow": 0, "failed": 5, "rtt_ms": None})
+        self.assertNotEqual(stopped.exception.code, 0)
+        self.bootstrap.assert_not_called()
+        self.assertEqual(self.hosts_path.read_text(encoding="utf-8"), before)
+
+    def test_route_is_not_measured_from_a_machine_that_is_not_entry(self) -> None:
+        document = deploy.load_yaml(self.hosts_path)
+        entry = document["all"]["children"]["entry"]["hosts"]["entry-managed"]
+        del entry["ansible_connection"]
+        entry["ansible_host"] = "192.0.2.10"
+        deploy.yaml_write(self.hosts_path, document)
+        self.assertTrue(self.enable())
+        self.probe.assert_not_called()
+
+    def test_probe_counts_the_connections_that_needed_a_second_attempt(self) -> None:
+        # Времена подключения: два чистых, одно со второй попытки, одно без ответа.
+        # Значения точно представимы в двоичном виде: разность часов без погрешности.
+        outcomes = iter([0.0625, 0.125, 1.5, None])
+        clock = {"now": 100.0}
+
+        def connect(_address, timeout):
+            value = next(outcomes)
+            if value is None:
+                raise OSError("timed out")
+            clock["now"] += value
+            return mock.MagicMock()
+
+        with mock.patch.object(deploy.socket, "create_connection", side_effect=connect) as created, \
+                mock.patch.object(deploy.time, "monotonic", side_effect=lambda: clock["now"]), \
+                mock.patch.object(deploy.time, "sleep") as pause:
+            result = deploy.probe_tcp_route("198.51.100.7", 22, count=4)
+        self.assertEqual(result, {"count": 4, "clean": 2, "slow": 1, "failed": 1, "rtt_ms": 125})
+        created.assert_called_with(("198.51.100.7", 22), timeout=5.0)
+        self.assertEqual(pause.call_count, 3)
+
+    def test_probe_gives_up_on_a_closed_port(self) -> None:
+        with mock.patch.object(deploy.socket, "create_connection", side_effect=OSError("refused")) as created, \
+                mock.patch.object(deploy.time, "sleep"):
+            result = deploy.probe_tcp_route("198.51.100.7", 22)
+        self.assertEqual(created.call_count, 5)
+        self.assertEqual(result, {"count": 5, "clean": 0, "slow": 0, "failed": 5, "rtt_ms": None})
+
     def test_tunnel_subnet_avoids_the_occupied_ones(self) -> None:
         self.assertEqual(str(deploy.standby_transit_network(["10.77.0.0/24"])), "10.78.0.0/24")
         self.assertEqual(
             str(deploy.standby_transit_network(["10.78.0.0/24", "10.79.0.1/24", None, "bad"])),
             "10.80.0.0/24",
+        )
+
+
+class StandbyRemovalTests(InstallerCase):
+    """Отключение резервного EXIT: без него сервер нельзя было ни заменить, ни убрать."""
+
+    def exit_hosts(self) -> list[str]:
+        return list(deploy.load_yaml(self.hosts_path)["all"]["children"]["exit"]["hosts"])
+
+    def test_disable_returns_the_cascade_to_one_exit(self) -> None:
+        self.enable()
+        self.assertTrue(self.disable())
+        self.asked.assert_called_once_with("Отключить резервный EXIT", False)
+        self.assertEqual(self.exit_hosts(), ["exit-managed"])
+        entry = deploy.load_yaml(self.entry_path)
+        self.assertEqual([key for key in entry if key.startswith("entry_standby_exit_")], [])
+        # Остальные настройки ENTRY на месте.
+        self.assertEqual(entry["awg3_transit_listen_port"], 39745)
+        self.assertEqual(entry["entry_awg1_obfuscation"], PROFILE)
+        vault = read_vault(self.vault_path)
+        self.assertEqual([key for key in deploy.STANDBY_EXIT_VAULT_KEYS if key in vault], [])
+        self.assertEqual(vault["vault_awg_exit_private_key"], "primary-exit-key")
+        self.forget.assert_called_once_with("198.51.100.7", {22, 56777})
+        # Владельцу сказано, что сам сервер остаётся с ключами.
+        self.assertIn("удалите сервер у хостера", " ".join(self.panel.call_args.args[1]))
+
+    def test_disable_is_refused_while_traffic_goes_through_the_standby(self) -> None:
+        self.enable()
+        with self.assertRaises(SystemExit) as stopped:
+            self.disable(active="awg4")
+        self.assertNotEqual(stopped.exception.code, 0)
+        self.asked.assert_not_called()
+        self.assertEqual(self.exit_hosts(), ["exit-managed", "exit-standby-managed"])
+        self.assertIn("vault_awg_standby_exit_private_key", read_vault(self.vault_path))
+
+    def test_declined_disable_changes_nothing(self) -> None:
+        self.enable()
+        before = self.hosts_path.read_text(encoding="utf-8")
+        with self.assertRaises(SystemExit) as stopped:
+            self.disable(confirm=False)
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(self.hosts_path.read_text(encoding="utf-8"), before)
+        self.assertTrue(deploy.load_yaml(self.entry_path)["entry_standby_exit_enabled"])
+        self.forget.assert_not_called()
+
+    def test_cascade_without_a_standby_has_nothing_to_disable(self) -> None:
+        before = self.hosts_path.read_text(encoding="utf-8")
+        self.assertFalse(self.disable())
+        self.asked.assert_not_called()
+        self.assertEqual(self.hosts_path.read_text(encoding="utf-8"), before)
+
+    def test_interrupted_disable_is_finished_by_the_next_run(self) -> None:
+        self.enable()
+        document = deploy.load_yaml(self.hosts_path)
+        del document["all"]["children"]["exit"]["hosts"]["exit-standby-managed"]
+        deploy.yaml_write(self.hosts_path, document)
+        self.assertTrue(self.disable())
+        entry = deploy.load_yaml(self.entry_path)
+        self.assertEqual([key for key in entry if key.startswith("entry_standby_exit_")], [])
+        self.assertNotIn("vault_awg_standby_exit_private_key", read_vault(self.vault_path))
+        self.assertFalse(self.disable())
+
+    def test_password_of_a_non_root_login_leaves_the_vault(self) -> None:
+        self.enable(user="ubuntu")
+        self.assertIn("vault_exit_standby_become_password", read_vault(self.vault_path))
+        self.disable()
+        self.assertNotIn("vault_exit_standby_become_password", read_vault(self.vault_path))
+
+    def test_share_is_freed_and_goes_to_the_next_standby(self) -> None:
+        self.enable()
+        with mock.patch("builtins.print"):
+            deploy.ensure_runtime_secret_material(self.production, self.vault_password)
+        self.assertIn(
+            "exit-standby-managed", read_vault(self.vault_path)["vault_runtime_exchange_public_keys"]
+        )
+        self.disable()
+        with mock.patch("builtins.print"):
+            deploy.ensure_runtime_secret_material(self.production, self.vault_password)
+        vault = read_vault(self.vault_path)
+        # Ключ обмена долями отключённого сервера убран: остальные ему больше не отвечают.
+        self.assertNotIn("exit-standby-managed", vault["vault_runtime_exchange_public_keys"])
+        self.assertNotIn("exit-standby-managed", vault["vault_runtime_exchange_private_keys"])
+        children = deploy.load_yaml(self.hosts_path)["all"]["children"]
+        self.assertEqual(
+            [
+                values["runtime_secrets_share_index"]
+                for group in ("entry", "exit", "front")
+                for values in children[group]["hosts"].values()
+            ],
+            [1, 2, 3],
+        )
+        # Новый сервер подключается той же командой и получает освободившуюся долю.
+        self.assertTrue(self.enable(address="198.51.100.99"))
+        with mock.patch("builtins.print"):
+            deploy.ensure_runtime_secret_material(self.production, self.vault_password)
+        standby = deploy.load_yaml(self.hosts_path)["all"]["children"]["exit"]["hosts"][
+            "exit-standby-managed"
+        ]
+        self.assertEqual(standby["ansible_host"], "198.51.100.99")
+        self.assertEqual(standby["runtime_secrets_share_index"], 4)
+
+    def test_host_keys_of_the_removed_server_are_forgotten(self) -> None:
+        ssh_dir = self.home / ".ssh"
+        ssh_dir.mkdir(parents=True, exist_ok=True)
+        (ssh_dir / "known_hosts").write_text("198.51.100.7 ssh-ed25519 AAAA\n", encoding="utf-8")
+        calls: list[list[str]] = []
+        with mock.patch.object(deploy.shutil, "which", return_value="/usr/bin/ssh-keygen"), \
+                mock.patch.object(
+                    deploy.subprocess, "run", side_effect=lambda argv, **_k: calls.append(argv)
+                ):
+            deploy.forget_ssh_host("198.51.100.7", {22, 56777})
+        known_hosts = str(ssh_dir / "known_hosts")
+        self.assertEqual(
+            calls,
+            [
+                ["/usr/bin/ssh-keygen", "-R", "198.51.100.7", "-f", known_hosts],
+                ["/usr/bin/ssh-keygen", "-R", "[198.51.100.7]:56777", "-f", known_hosts],
+            ],
+        )
+
+    def test_admin_gateway_allows_both_commands(self) -> None:
+        gateway = (
+            ROOT / "roles" / "security" / "templates" / "kalimera-admin-command.sh.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("'--resume --enable-standby-exit'|'--resume --disable-standby-exit'|", gateway)
+
+    def test_entry_roles_remove_what_the_standby_left(self) -> None:
+        # Отключение меняет только inventory: туннель, переключатель и настройку
+        # модуля на ENTRY убирают роли при обычном deploy.
+        entry_role = (ROOT / "roles" / "entry" / "tasks" / "main.yml").read_text(encoding="utf-8")
+        selector_role = (SELECTOR_ROLE / "tasks" / "main.yml").read_text(encoding="utf-8")
+        operations = (ROOT / "roles" / "operations" / "tasks" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("Остановка туннеля отключённого резервного EXIT", entry_role)
+        self.assertIn("Удаление конфигурации отключённого резервного EXIT", entry_role)
+        self.assertIn("Удаление файлов отключённого переключателя путей EXIT", selector_role)
+        self.assertIn(
+            "Удаление восстановления состояния интерфейса отключённого резервного EXIT", operations
         )
 
 
