@@ -305,7 +305,9 @@
     mode: "0755"
   loop: >-
     {{ [entry_client_interface, entry_legacy_client_interface] +
-       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) +
+       ([entry_standby_exit_interface | default('awg4')]
+        if entry_standby_exit_enabled | default(false) | bool else []) }}
   when: awg_node_role == 'entry'
 
 - name: "Связывание запуска клиентских и базового EXIT интерфейса с восстановлением peers и маршрутов"
@@ -317,7 +319,9 @@
     mode: "0644"
   loop: >-
     {{ [entry_client_interface, entry_legacy_client_interface] +
-       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) +
+       ([entry_standby_exit_interface | default('awg4')]
+        if entry_standby_exit_enabled | default(false) | bool else []) }}
   when: awg_node_role == 'entry'
   notify: Перезагрузить модули systemd для администрирования
 

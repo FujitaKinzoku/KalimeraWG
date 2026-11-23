@@ -468,7 +468,7 @@ unexpected_public_listeners() {
 {% if front_backend_enabled | default(false) | bool %}
     known_tcp="$known_tcp {{ reality_fallback_port | default(8444) | int }}"
 {% endif %}
-    local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}'
+    local known_udp='{{ entry_awg0_listen_port | int }} {{ entry_mobile_client_listen_port | default(8443) | int }} {{ entry_legacy_client_listen_port | default(39744) | int }} {{ awg3_transit_listen_port | default(39745) | int }}{% if entry_standby_exit_enabled | default(false) | bool %} {{ entry_standby_exit_listen_port | default(0) | int }}{% endif %}'
 {% elif awg_node_role == 'front' %}
     known_tcp="$known_tcp 80 443"
     local known_udp=''
