@@ -16,8 +16,9 @@ EXIT. Проверка - TCP-соединения через сам туннел
     туннель и теряются, но с адреса ENTRY зарубежный трафик не выходит.
 
 Кроме «отвечает или нет» по каждому пути ведётся счёт проверок, прошедших со
-второй попытки: это потери пакетов в туннеле. На выбор пути он пока не влияет,
-его показывают exit-path status и cascade-check.
+второй попытки, пока путь отвечает: это потери пакетов в туннеле. Минуты, когда
+путь не отвечал совсем, считаются отдельно. На выбор пути счёт не влияет, его
+показывают exit-path status и cascade-check.
 
 Состояние лежит в /run и после перезагрузки начинается с основного пути.
 Закрепление пути командой use хранится в /var/lib и перезагрузку переживает.
@@ -197,7 +198,12 @@ def probe_path(cfg: Config, name: str) -> list[float | None]:
 
 
 def quality_items(history: object, now: int) -> list[list[int]]:
-    """Записи счёта потерь за последний час: [минута, проверок, с потерей]."""
+    """Записи счёта за последний час.
+
+    Запись: [минута, проверок при отвечающем пути, из них с потерей, проверок,
+    когда путь не отвечал совсем]. Записи прежней версии из трёх чисел
+    отбрасываются: в них минуты отказа пути считались потерями.
+    """
     minute = now // 60
     kept: list[list[int]] = []
     if not isinstance(history, list):
@@ -205,7 +211,7 @@ def quality_items(history: object, now: int) -> list[list[int]]:
     for item in history:
         if (
             isinstance(item, list)
-            and len(item) == 3
+            and len(item) == 4
             and all(isinstance(value, int) for value in item)
             and minute - QUALITY_MINUTES < item[0] <= minute
         ):
@@ -213,14 +219,19 @@ def quality_items(history: object, now: int) -> list[list[int]]:
     return kept
 
 
-def quality_counts(entry: dict, now: int) -> tuple[int, int]:
-    """Сколько проверок пути было за последний час и сколько из них с потерей."""
+def quality_counts(entry: dict, now: int) -> tuple[int, int, int]:
+    """Проверки пути за последний час: при отвечающем пути, из них с потерей,
+    и проверки, когда путь не отвечал совсем."""
     items = quality_items(entry.get("quality"), now)
-    return sum(item[1] for item in items), sum(item[2] for item in items)
+    return (
+        sum(item[1] for item in items),
+        sum(item[2] for item in items),
+        sum(item[3] for item in items),
+    )
 
 
 def path_is_lossy(cfg: Config, entry: dict, now: int) -> bool:
-    total, lost = quality_counts(entry, now)
+    total, lost, _down = quality_counts(entry, now)
     return total >= QUALITY_MIN_PROBES and lost * 100 >= cfg.loss_warn_percent * total
 
 
@@ -242,13 +253,21 @@ def record_probe(
     clean = [value for value in answered if value < cfg.slow_probe_seconds]
     if clean:
         entry["rtt_ms"] = int(min(clean) * 1000)
+    # Потери считаются только пока путь отвечает. Проверка, на которой путь не
+    # ответил совсем, - отказ: его показывает счётчик неудач. Найдено на рабочем
+    # каскаде: пока deploy настраивал новый резервный EXIT, туннель на ENTRY уже
+    # был, но не отвечал, и шесть минут установки дали «23% потерь» на час.
+    if len(answered) >= cfg.quorum:
+        sample = [len(times), len(times) - len(clean), 0]
+    else:
+        sample = [0, 0, len(times)]
     history = quality_items(entry.get("quality"), now)
     minute = now // 60
-    lost = len(times) - len(clean)
     if history and history[-1][0] == minute:
-        history[-1] = [minute, history[-1][1] + len(times), history[-1][2] + lost]
+        last = history[-1]
+        history[-1] = [minute, last[1] + sample[0], last[2] + sample[1], last[3] + sample[2]]
     else:
-        history.append([minute, len(times), lost])
+        history.append([minute, *sample])
     entry["quality"] = history
 
 
@@ -468,7 +487,7 @@ def quality_text(cfg: Config, entry: dict, now: int) -> str:
     parts: list[str] = []
     if entry.get("rtt_ms") is not None:
         parts.append(f"задержка {int(entry['rtt_ms'])} мс")
-    total, lost = quality_counts(entry, now)
+    total, lost, down = quality_counts(entry, now)
     if total < QUALITY_MIN_PROBES:
         parts.append("данных о потерях пока мало")
     elif lost == 0:
@@ -479,6 +498,8 @@ def quality_text(cfg: Config, entry: dict, now: int) -> str:
             f"за час {lost} из {total} проверок прошли со второй попытки или без ответа "
             f"({format_share(lost, total)}%){verdict}"
         )
+    if down:
+        parts.append(f"за час путь не отвечал совсем, проверок без ответа: {down}")
     return "; ".join(parts)
 
 
@@ -536,7 +557,7 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
         # Путь отвечает, но проверки то и дело проходят со второй попытки:
         # скорость через него будет в разы ниже, чем обещает задержка.
         if int(entry["fail"]) == 0 and path_is_lossy(cfg, entry, now):
-            total, lost = quality_counts(entry, now)
+            total, lost, _down = quality_counts(entry, now)
             rows.append(
                 (
                     "WARN",

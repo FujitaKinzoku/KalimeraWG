@@ -473,7 +473,10 @@ class SelectorQualityTests(SelectorCase):
                     "reason": "",
                     "drill_until": 0,
                     "paths": {
-                        "primary": {"fail": 0, "healthy_since": 5000, "reached": 3, "checked": 5990},
+                        "primary": {"fail": 0, "healthy_since": 5000, "reached": 3, "checked": 5990,
+                                    # Запись прежнего формата: минуты отказа в ней
+                                    # засчитаны потерями, поэтому она отбрасывается.
+                                    "quality": [[99, 30, 30]]},
                         "standby": {
                             "fail": 0, "healthy_since": 5000, "reached": 3, "checked": 5990,
                             "quality": "мусор", "rtt_ms": None,
@@ -487,9 +490,36 @@ class SelectorQualityTests(SelectorCase):
         state = selector.tick(self.cfg, 6000)
         self.assertEqual(state["active"], PRIMARY)
         self.assertEqual(state["paths"][PRIMARY]["healthy_since"], 5000)
-        self.assertEqual(state["paths"][PRIMARY]["quality"], [[100, 3, 0]])
-        self.assertEqual(state["paths"][STANDBY]["quality"], [[100, 3, 0]])
+        self.assertEqual(state["paths"][PRIMARY]["quality"], [[100, 3, 0, 0]])
+        self.assertEqual(state["paths"][STANDBY]["quality"], [[100, 3, 0, 0]])
         self.assertEqual(state["paths"][STANDBY]["rtt_ms"], 50)
+
+    def test_path_that_did_not_answer_at_all_is_not_counted_as_lossy(self) -> None:
+        # Найдено на рабочем каскаде: deploy поднял туннель на ENTRY раньше, чем
+        # настроил новый резервный EXIT; 33 проверки без ответа за время установки
+        # давали «99 из 429 проверок ... (23,1%): путь теряет пакеты», хотя после
+        # установки путь не потерял ни одного пакета.
+        self.reach[STANDBY] = 0
+        self.run_ticks(6000, 33)
+        self.reach[STANDBY] = 3
+        self.run_ticks(6330, 110)
+        now = 6330 + 109 * 10 + 5
+        self.assertEqual([level for level, _ in self.rows(now)], ["OK", "OK", "OK"])
+        text = self.status(now)
+        self.assertIn(
+            "  задержка 50 мс; за час все проверки (330) прошли с первой попытки; "
+            "за час путь не отвечал совсем, проверок без ответа: 99",
+            text,
+        )
+        self.assertNotIn("путь теряет пакеты", text)
+
+    def test_tick_below_the_quorum_is_an_outage_not_a_loss(self) -> None:
+        # Один адрес из трёх ответил: путь по правилу большинства не отвечает,
+        # эта проверка - отказ, а не три потерянных пакета.
+        self.reach[STANDBY] = 1
+        state = selector.tick(self.cfg, 6000)
+        self.assertEqual(state["paths"][STANDBY]["fail"], 1)
+        self.assertEqual(state["paths"][STANDBY]["quality"], [[100, 0, 0, 3]])
 
 
 class SelectorProbeTests(unittest.TestCase):
