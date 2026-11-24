@@ -274,6 +274,33 @@ class SelectorManualTests(SelectorCase):
         # Основной путь всё это время отвечал, поэтому возврат сразу после учения.
         state = selector.tick(self.cfg, 2300)
         self.assertEqual(state["active"], PRIMARY)
+        # Найдено на рабочем каскаде: возврат после учения назывался «основной путь
+        # снова устойчиво отвечает», будто основной путь отказывал.
+        self.assertIn("Причина: учебное переключение завершено.", self.messages[-1])
+        self.assertEqual(state["last_switch"]["reason"], "учебное переключение завершено")
+
+    def test_real_failback_keeps_its_own_reason(self) -> None:
+        self.run_ticks(1000, 2)
+        self.reach[PRIMARY] = 0
+        self.run_ticks(1020, 3)
+        self.reach[PRIMARY] = 3
+        state = self.run_ticks(1050, 95)
+        self.assertEqual(state["active"], PRIMARY)
+        self.assertEqual(state["last_switch"]["reason"], "основной путь снова устойчиво отвечает")
+
+    def test_interrupted_drill_is_named_in_the_return(self) -> None:
+        now = int(selector.time.time())
+        self.run_ticks(now - 1000, 3)
+        state = selector.read_state(self.cfg)
+        state["drill_until"] = now + 300
+        selector.write_state(self.cfg, state)
+        self.assertEqual(selector.tick(self.cfg, now - 5)["active"], STANDBY)
+        with mock.patch("builtins.print"):
+            self.assertEqual(selector.command_auto(self.cfg, mock.Mock()), 0)
+        state = selector.read_state(self.cfg)
+        self.assertEqual(state["active"], PRIMARY)
+        self.assertEqual(state["drill_until"], 0)
+        self.assertEqual(state["last_switch"]["reason"], "учебное переключение завершено")
 
     def test_drill_ends_when_the_standby_stops_answering(self) -> None:
         self.run_ticks(1000, 100)

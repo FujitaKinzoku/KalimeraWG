@@ -47,6 +47,8 @@ SO_BINDTODEVICE = getattr(socket, "SO_BINDTODEVICE", 25)
 # раньше, чем наберётся столько проверок.
 QUALITY_MINUTES = 60
 QUALITY_MIN_PROBES = 60
+REASON_FAILBACK = "основной путь снова устойчиво отвечает"
+REASON_DRILL_END = "учебное переключение завершено"
 
 
 class Config:
@@ -274,7 +276,7 @@ def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
         return PRIMARY, "резервный путь не отвечает"
     healthy_since = primary["healthy_since"]
     if healthy_since is not None and now - int(healthy_since) >= cfg.failback_seconds:
-        return PRIMARY, "основной путь снова устойчиво отвечает"
+        return PRIMARY, REASON_FAILBACK
     return STANDBY, ""
 
 
@@ -418,11 +420,16 @@ def tick(cfg: Config, now: int | None = None) -> dict:
     mode = read_mode(cfg)
     for name in PATH_NAMES:
         record_probe(state, name, probe_path(cfg, name), cfg, now)
-    if int(state.get("drill_until") or 0) and int(state["drill_until"]) <= now:
+    drill_ended = 0 < int(state.get("drill_until") or 0) <= now
+    if drill_ended:
         state["drill_until"] = 0
     if not state.get("since"):
         state["since"] = now
     target, reason = decide(state, mode, cfg, now)
+    # Во время учения основной путь не отказывал: возврат с него называется своим
+    # именем, а не восстановлением основного пути.
+    if drill_ended and reason == REASON_FAILBACK:
+        reason = REASON_DRILL_END
     if (
         target != state["active"]
         and mode == "auto"
@@ -583,7 +590,10 @@ def command_use(cfg: Config, args: argparse.Namespace) -> int:
 def command_auto(cfg: Config, _args: argparse.Namespace) -> int:
     write_mode(cfg, "auto")
     state = read_state(cfg)
-    state["drill_until"] = 0
+    # Прерванное учение получает отметку в прошлом: проверка ниже увидит его
+    # завершённым и так и назовёт возврат на основной путь.
+    if int(state.get("drill_until") or 0):
+        state["drill_until"] = 1
     write_state(cfg, state)
     tick(cfg)
     print("Режим автоматический: путь выбирается по результатам проверок.")
