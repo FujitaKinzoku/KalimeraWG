@@ -389,13 +389,64 @@ class RoleTests(unittest.TestCase):
         text = (ROLE / "handlers" / "main.yml").read_text(encoding="utf-8")
         self.assertNotRegex(text, r"state:\s*(re)?started")
 
-    def test_sing_box_package_service_is_stopped_on_exit(self) -> None:
-        task = next(t for t in self.tasks if t["name"] == "Отключение службы sing-box из пакета на EXIT")
+    def packaged_unused(self, **variables) -> bool:
+        task = next(
+            t for t in self.tasks if t["name"] == "Нужны ли серверу служба и конфигурация sing-box из пакета"
+        )
+        expression = task["ansible.builtin.set_fact"]["transit_tls_package_service_unused"]
+        return environment().from_string(expression).render(**variables).strip() == "True"
+
+    def test_packaged_sing_box_is_removed_only_where_the_project_does_not_run_it(self) -> None:
+        # На EXIT переменные ENTRY не определены и не должны понадобиться.
+        self.assertTrue(self.packaged_unused(awg_node_role="exit"))
+        entry = {"awg_node_role": "entry"}
+        # Роль sing_box ведёт службу и config.json при RU-прокси или VLESS: их трогать нельзя.
+        self.assertFalse(self.packaged_unused(**entry, entry_ru_proxy_enabled=True, reality_fallback_enabled=False))
+        self.assertFalse(self.packaged_unused(**entry, entry_ru_proxy_enabled=False, reality_fallback_enabled=True))
+        self.assertFalse(self.packaged_unused(**entry, entry_ru_proxy_enabled=True))
+        self.assertTrue(self.packaged_unused(**entry, entry_ru_proxy_enabled=False, reality_fallback_enabled=False))
+        self.assertTrue(self.packaged_unused(**entry, entry_ru_proxy_enabled=False))
+        # Без сведений о RU-прокси на ENTRY задача падает, а не решает за владельца.
+        with self.assertRaises(jinja2.UndefinedError):
+            self.packaged_unused(**entry)
+        # Условие то же, по которому роль sing_box ставит и ведёт sing-box.
+        sing_box = (ROOT / "roles" / "sing_box" / "tasks" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("when: entry_ru_proxy_enabled | bool or reality_fallback_enabled | default(false) | bool", sing_box)
+
+    def test_packaged_service_and_configuration_are_removed_together(self) -> None:
+        stop = next(t for t in self.tasks if t["name"] == "Отключение службы sing-box из пакета")
         self.assertEqual(
-            task["ansible.builtin.systemd_service"],
+            stop["ansible.builtin.systemd_service"],
             {"name": "sing-box.service", "enabled": False, "state": "stopped"},
         )
-        self.assertIn("awg_node_role == 'exit'", task["when"])
+        remove = next(t for t in self.tasks if t["name"] == "Удаление конфигурации sing-box из пакета")
+        self.assertEqual(
+            remove["ansible.builtin.file"], {"path": "{{ transit_tls_config_dir }}/config.json", "state": "absent"}
+        )
+        # Служба, которую пакет успел запустить без конфигурации, не остаётся в списке сбойных.
+        reset = next(t for t in self.tasks if t["name"] == "Снятие отметки о сбое службы sing-box из пакета")
+        self.assertEqual(
+            reset["ansible.builtin.command"]["argv"], ["/usr/bin/systemctl", "reset-failed", "sing-box.service"]
+        )
+        self.assertIs(reset["failed_when"], False)
+        for task in (stop, reset, remove):
+            self.assertEqual(
+                task["when"], ["transit_tls_enabled | bool", "transit_tls_package_service_unused | bool"]
+            )
+        # Пакет ставится раньше: иначе он вернул бы и службу, и файл.
+        names = [task["name"] for task in self.tasks]
+        self.assertLess(names.index("Установка sing-box"), names.index(stop["name"]))
+        self.assertLess(names.index(stop["name"]), names.index(remove["name"]))
+
+    def test_audit_checks_the_modes_of_the_transport_configuration(self) -> None:
+        audit = (ROOT / "roles" / "operations" / "templates" / "server-audit.sh.j2").read_text(encoding="utf-8")
+        listed = audit[audit.index("sensitive_modes_ok() {"):audit.index("for file in /etc/amnezia/amneziawg/*.conf")]
+        for line in (
+            "{{ transit_tls_server_config_path | default('/etc/sing-box/transit-server.json') }}",
+            "{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-primary.json",
+            "{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-standby.json",
+        ):
+            self.assertIn(line + "\n", listed)
 
     def test_secrets_are_never_printed_by_the_role(self) -> None:
         for task in self.tasks:

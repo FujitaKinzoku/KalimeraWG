@@ -87,16 +87,46 @@
     lock_timeout: 600
   when: transit_tls_enabled | bool
 
-# Пакет включает и запускает собственную службу sing-box. На EXIT она не нужна:
-# здесь работает только служба запасного транспорта, и только по запросу ENTRY.
-- name: Отключение службы sing-box из пакета на EXIT
+# Пакет приносит собственную службу и config.json с правами 0644. На EXIT проект
+# ими не пользуется никогда; на ENTRY - когда нет ни RU-прокси, ни VLESS: иначе
+# их ведёт роль sing_box, и условие здесь то же, что в ней. Оставлять их нельзя:
+# server-audit требует для config.json права 0600, а включённая служба после
+# перезагрузки не стартует - её конфигурации нет в защищённом хранилище.
+- name: Нужны ли серверу служба и конфигурация sing-box из пакета
+  ansible.builtin.set_fact:
+    transit_tls_package_service_unused: >-
+      {{ awg_node_role == 'exit'
+         or not (entry_ru_proxy_enabled | bool
+                 or reality_fallback_enabled | default(false) | bool) }}
+  when: transit_tls_enabled | bool
+
+- name: Отключение службы sing-box из пакета
   ansible.builtin.systemd_service:
     name: sing-box.service
     enabled: false
     state: stopped
   when:
     - transit_tls_enabled | bool
-    - awg_node_role == 'exit'
+    - transit_tls_package_service_unused | bool
+
+# Если пакет успел запустить службу, она упала: её конфигурации нет в хранилище.
+# Без этого шага отметка о сбое оставалась бы в server-audit до перезагрузки.
+- name: Снятие отметки о сбое службы sing-box из пакета
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, sing-box.service]
+  changed_when: false
+  failed_when: false
+  when:
+    - transit_tls_enabled | bool
+    - transit_tls_package_service_unused | bool
+
+- name: Удаление конфигурации sing-box из пакета
+  ansible.builtin.file:
+    path: "{{ transit_tls_config_dir }}/config.json"
+    state: absent
+  when:
+    - transit_tls_enabled | bool
+    - transit_tls_package_service_unused | bool
 
 - name: Каталоги запасного транспорта
   ansible.builtin.file:

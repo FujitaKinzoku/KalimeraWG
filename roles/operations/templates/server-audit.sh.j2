@@ -320,6 +320,11 @@ sensitive_modes_ok() {
 /etc/awg-telegram-monitor.env
 /etc/sing-box/config.json
 /etc/sing-box/front-backend.json
+{% if transit_tls_enabled | default(false) | bool %}
+{{ transit_tls_server_config_path | default('/etc/sing-box/transit-server.json') }}
+{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-primary.json
+{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-standby.json
+{% endif %}
 {% if awg_node_role == 'front' %}
 {{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
 {{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
