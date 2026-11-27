@@ -464,9 +464,35 @@ class ReportTests(TransportCase):
         self.assertIn("  транспорт: прямой\n", text + "\n")
         rows = selector.report_rows(self.cfg, state, "auto", self.now)
         self.assertIn(
-            ("WARN", "основной EXIT: туннель идёт запасным транспортом (внутри TLS), прямой не проходит"),
+            # Проходит ли прямой сейчас, неизвестно: строка говорит, когда это проверится.
+            ("WARN", "основной EXIT: туннель идёт запасным транспортом (внутри TLS); "
+                     "прямой проверится через 28 мин"),
             rows,
         )
+
+    def test_pinning_a_path_that_runs_on_tls_says_so(self) -> None:
+        # Найдено на рабочем каскаде: резервный путь сам ушёл на запасной транспорт,
+        # трафик закрепили на нём для сравнения и сравнивали как прямой.
+        self.steps(3)
+        self.passes[(STANDBY, "awg")] = False
+        self.until(lambda state: state["paths"][STANDBY]["transport"] == "tls" and
+                   state["paths"][STANDBY]["fail"] == 0)
+        self.reach[PRIMARY] = self.reach[STANDBY] = 3
+        self.now += 10
+        with mock.patch("builtins.print") as printed, \
+                mock.patch.object(selector.time, "time", return_value=self.now):
+            self.assertEqual(selector.command_use(self.cfg, mock.Mock(path=STANDBY)), 0)
+        lines = [call.args[0] for call in printed.call_args_list]
+        self.assertEqual(lines[0], "Путь закреплён: резервный EXIT. Вернуть автоматику: exit-path auto")
+        self.assertIn("идёт запасным транспортом (внутри TLS): он медленнее прямого", lines[1])
+        self.assertIn("exit-path retest", lines[1])
+        self.assertEqual(self.transport(STANDBY), "tls")
+        # Путь на прямом транспорте закрепляется без оговорок.
+        self.now += 10
+        with mock.patch("builtins.print") as printed, \
+                mock.patch.object(selector.time, "time", return_value=self.now):
+            self.assertEqual(selector.command_use(self.cfg, mock.Mock(path=PRIMARY)), 0)
+        self.assertEqual(len(printed.call_args_list), 1)
 
     def test_cascade_without_a_second_transport_reports_nothing_new(self) -> None:
         for path in self.cfg.paths.values():

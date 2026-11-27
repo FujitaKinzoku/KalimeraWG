@@ -849,14 +849,19 @@ def transport_text(cfg: Config, state: dict, name: str, now: int) -> str:
     if current == names[0]:
         return f"транспорт: {label}"
     text = f"транспорт: {label} (запасной), {format_age(now - int(entry['transport_since']))}"
+    return f"{text}; {retest_note(cfg, state, name, now)}"
+
+
+def retest_note(cfg: Config, state: dict, name: str, now: int) -> str:
+    """Когда путь на запасном транспорте проверит прямой."""
     if state["active"] != name:
-        wait = int(entry.get("retest_at") or 0) - now
+        wait = int(state["paths"][name].get("retest_at") or 0) - now
         when = "при следующей проверке" if wait <= 0 else f"через {format_age(wait)}"
-        return f"{text}; прямой проверится {when}"
+        return f"прямой проверится {when}"
     if cfg.transport_retest_hour is None:
-        return f"{text}; прямой проверяется по команде exit-path retest"
+        return "прямой проверяется по команде exit-path retest"
     return (
-        f"{text}; прямой проверится в {cfg.transport_retest_hour:02d}:00 UTC "
+        f"прямой проверится в {cfg.transport_retest_hour:02d}:00 UTC "
         "или по команде exit-path retest"
     )
 
@@ -932,8 +937,8 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
             "проверочных адресов"
         )
         rows.append(("OK" if int(entry["fail"]) == 0 else "WARN", text))
-    # Запасной транспорт - работающий каскад, но уже без запаса: прямой путь до
-    # этого сервера не проходит.
+    # Запасной транспорт - работающий каскад, но уже без запаса: прямой транспорт
+    # до этого сервера перестал отвечать.
     for name in PATH_NAMES:
         entry = state["paths"][name]
         # Отметка учения снимается проверкой, которая возвращает путь на прямой
@@ -944,8 +949,11 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
             rows.append(
                 (
                     "WARN",
+                    # Проходит ли прямой сейчас, неизвестно: путь мог уйти на
+                    # запасной и из-за минутного отказа сервера. Это покажет проверка.
                     f"{cfg.label(name)}: туннель идёт запасным транспортом "
-                    f"({cfg.transport_label(name, entry['transport'])}), прямой не проходит",
+                    f"({cfg.transport_label(name, entry['transport'])}); "
+                    f"{retest_note(cfg, state, name, now)}",
                 )
             )
     if int(state.get("drill_until") or 0) > now:
@@ -982,6 +990,15 @@ def command_use(cfg: Config, args: argparse.Namespace) -> int:
     write_mode(cfg, args.path)
     state = tick(cfg)
     print(f"Путь закреплён: {cfg.label(args.path)}. Вернуть автоматику: exit-path auto")
+    # Найдено на рабочем каскаде: трафик закрепили на пути, который в это время шёл
+    # запасным транспортом, и сравнивали его с другим как прямой.
+    if state["active"] == args.path and transport_rank(cfg, state, args.path) > 0:
+        label = cfg.transport_label(args.path, state["paths"][args.path]["transport"])
+        print(
+            f"Этот путь сейчас идёт запасным транспортом ({label}): он медленнее прямого. "
+            "Пока путь несёт трафик, прямой сам проверяется только раз в сутки; проверить "
+            "сейчас: exit-path retest (связь прервётся до трёх минут)."
+        )
     return 0 if state["active"] == args.path else 1
 
 
