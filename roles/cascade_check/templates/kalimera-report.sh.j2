@@ -18,6 +18,10 @@ readonly exit_title={{ ('резервного EXIT' if (exit_standby | default(f
 readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
 readonly ru_dot_active={{ 'true' if (entry_dns_ru_dot_active | default(false) | bool) else 'false' }}
 readonly ru_proxy_selected={{ 'true' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'false' }}
+# Зарубежные имена через резолвер EXIT: что задано в inventory и файл, по которому
+# видно, что действует на самом деле.
+readonly dns_via_exit={{ 'true' if (entry_dns_default_via_exit | default(false) | bool) else 'false' }}
+readonly dot_config={{ ((entry_unbound_config_dir | default('/etc/unbound/unbound.conf.d')) ~ '/90-awg-dot.conf') | quote }}
 readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
 readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
@@ -375,8 +379,20 @@ dns_row() {
     fi
 }
 
+# Пересылка Unbound на резолвер EXIT идёт без TLS: шифрует её сам туннель. По
+# этому признаку режим виден в файле конфигурации.
+foreign_dns_via_exit() {
+    grep -Eq '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null &&
+        ! grep -Eq '^[[:space:]]*forward-tls-upstream:[[:space:]]*yes' "$dot_config" 2>/dev/null
+}
+
 check_dns() {
-    local route_ru dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
+    local route_ru route_foreign dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
+    if foreign_dns_via_exit; then
+        route_foreign='маршрут: Unbound → резолвер EXIT внутри туннеля, с ENTRY наружу запрос не уходит'
+    else
+        route_foreign='маршрут: Unbound → серверы DoT напрямую с ENTRY'
+    fi
     if [[ "$ru_state" == active && "$ru_proxy_selected" != true ]]; then
         route_ru='маршрут: RU DoH через RU-прокси'
     elif [[ "$ru_dot_active" == true && "$ru_proxy_selected" == true ]]; then
@@ -387,8 +403,15 @@ check_dns() {
         route_ru='маршрут: Unbound (RU DoH недоступен, RU-прокси выключен)'
     fi
     dns_row 'DNS: yandex.ru (РФ) через клиентский резолвер' "$entry_client_listen" 53 yandex.ru "$route_ru" "$dns_hint"
-    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или EXIT по политике ENTRY)' "$dns_hint"
+    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com "$route_foreign" "$dns_hint"
     dns_row 'DNS: example.com напрямую через Unbound' 127.0.0.1 "$entry_dns_port" example.com 'маршрут: Unbound на 127.0.0.1' "$dns_hint"
+    # Режим включён, а действует прежний: при deploy резолвер EXIT не ответил, и
+    # зарубежные имена остались на серверах DoT.
+    if [[ "$dns_via_exit" == true ]] && ! foreign_dns_via_exit; then
+        emit DNS WARN 'зарубежные имена: режим «через резолвер EXIT» включён, но не действует' \
+            'запросы идут с ENTRY на серверы DoT' \
+            'резолвер EXIT не ответил при deploy: awg-health --strict на EXIT, затем на ENTRY kalimera-deploy --resume'
+    fi
     if [[ "$ru_state" == active ]]; then
         # RU DoH отвечает через внешний SOCKS5-прокси. В области selected через
         # него идут только выбранные домены и адреса: его сбой - замечание, а не

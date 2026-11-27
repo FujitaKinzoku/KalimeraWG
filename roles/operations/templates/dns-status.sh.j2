@@ -50,13 +50,31 @@ query_state() {
 
 printf '%s=== DNS KALIMERAWG ===%s\n' "$cyan" "$reset"
 printf 'dnsmasq: %s · Unbound: %s\n' "$(service_state dnsmasq.service)" "$(service_state unbound.service)"
-printf 'DNS клиентов: {{ entry_client_listen_address }}:53 → dnsmasq → Unbound/DoT\n'
+printf 'DNS клиентов: {{ entry_client_listen_address }}:53 → dnsmasq → Unbound\n'
 printf 'Основной DNS-тест: %s\n' "$(query_state {{ entry_dns_default_port }} example.com)"
 
-printf '\n%sDoT по умолчанию%s\n' "$cyan" "$reset"
-grep -E '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null |
-    sed -E 's/^[[:space:]]*forward-addr:[[:space:]]*/  /' || true
-[[ -e "$dot_override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
+# Зарубежные имена идут либо в резолвер EXIT внутри туннеля, либо на серверы DoT
+# напрямую с ENTRY. Режим виден по файлу: у пересылки на EXIT нет шифрования TLS.
+if grep -Eq '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null &&
+        ! grep -Eq '^[[:space:]]*forward-tls-upstream:[[:space:]]*yes' "$dot_config" 2>/dev/null; then
+    printf '\n%sЗарубежные имена: резолвер EXIT внутри туннеля%s\n' "$cyan" "$reset"
+    echo 'С ENTRY наружу запросы DNS о зарубежных узлах не уходят.'
+    # Действующий адрес берётся у Unbound: при работе через резервный EXIT его
+    # меняет переключатель путей, а файл хранит адрес основного.
+    current="$(unbound-control list_forwards 2>/dev/null | awk '$1 == "." { for (i = 4; i <= NF; i++) printf "%s ", $i }' || true)"
+    printf '  сейчас: %s\n' "${current:-адрес не получен, Unbound не отвечает}"
+    echo 'Выключить режим: kalimera-deploy --resume --disable-dns-via-exit'
+else
+    printf '\n%sЗарубежные имена: серверы DoT, запросы идут с ENTRY%s\n' "$cyan" "$reset"
+    grep -E '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null |
+        sed -E 's/^[[:space:]]*forward-addr:[[:space:]]*/  /' || true
+    [[ -e "$dot_override" ]] && echo 'Источник: локальное переопределение dot-switch' || echo 'Источник: зашифрованный inventory'
+{% if entry_dns_default_via_exit | default(false) | bool %}
+    printf '%sРежим «через резолвер EXIT» включён, но не действует: резолвер EXIT не ответил при deploy. Повторите kalimera-deploy --resume.%s\n' "$yellow" "$reset"
+{% else %}
+    echo 'Через резолвер EXIT внутри туннеля: kalimera-deploy --resume --enable-dns-via-exit'
+{% endif %}
+fi
 
 if [[ -f "$ru_dot_config" ]]; then
     # Режим без RU-прокси: файл зон собирает awg-ru-dns-sync. У всех российских зон

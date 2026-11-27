@@ -66,6 +66,15 @@ case "$action" in
     *) usage >&2; exit 2 ;;
 esac
 
+# Зарубежные имена идут через резолвер EXIT: серверов DoT в конфигурации нет, а
+# замена строк пересылки вернула бы запросы на ENTRY, причём без шифрования TLS.
+if grep -Eq '^[[:space:]]*forward-addr:' "$config" 2>/dev/null &&
+        ! grep -Eq '^[[:space:]]*forward-tls-upstream:[[:space:]]*yes' "$config" 2>/dev/null; then
+    echo 'Зарубежные имена разрешает резолвер EXIT внутри туннеля: серверы DoT не используются.' >&2
+    echo 'Вернуть серверы DoT: kalimera-deploy --resume --disable-dns-via-exit' >&2
+    exit 1
+fi
+
 validate_tls_name "${tls_name:-dns.invalid}" || {
     echo 'Некорректное TLS-имя' >&2
     exit 2

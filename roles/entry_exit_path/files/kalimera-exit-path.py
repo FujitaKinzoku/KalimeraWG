@@ -385,24 +385,44 @@ def flush_connections(cfg: Config, previous: str) -> None:
 
 
 def sync_dns(cfg: Config, name: str) -> None:
-    """Направить зарубежные запросы DNS в резолвер действующего EXIT."""
+    """Направить зарубежные запросы DNS в резолвер действующего EXIT.
+
+    Переводятся только зоны, которые уже смотрят в резолвер одного из EXIT: корневая
+    и исключения se-domain внутри российских зон. Пока Unbound работает через серверы
+    DoT - режим выключен либо идёт первое включение и резолвер на EXIT ещё не
+    установлен, - пересылка не трогается: иначе зарубежные имена перестали бы
+    разрешаться до конца deploy.
+    """
     if not cfg.dns_via_exit:
         return
     control = shutil.which("unbound-control")
     peer = str(cfg.paths[name].get("peer_tunnel_address", ""))
     if not control or not peer:
         return
+    peers = {str(path.get("peer_tunnel_address", "")) for path in cfg.paths.values()} - {""}
     try:
         listing = subprocess.run(
             [control, "list_forwards"], capture_output=True, text=True, timeout=10, check=False
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return
-    root = next((line for line in listing.splitlines() if line.startswith(". ")), "")
-    if any(word.split("@")[0] == peer for word in root.split()):
-        return
-    run_quiet([control, "forward", f"{peer}@53"])
-    run_quiet([control, "flush_infra", "all"])
+    changed = False
+    for line in listing.splitlines():
+        # Строка вида "зона. IN forward адрес[@порт][#имя] ...".
+        words = line.split()
+        if len(words) < 4 or words[1:3] != ["IN", "forward"]:
+            continue
+        addresses = {word.split("@")[0].split("#")[0] for word in words[3:]}
+        if not addresses & peers or addresses == {peer}:
+            continue
+        if words[0] == ".":
+            run_quiet([control, "forward", f"{peer}@53"])
+        else:
+            run_quiet([control, "forward_remove", words[0]])
+            run_quiet([control, "forward_add", words[0], f"{peer}@53"])
+        changed = True
+    if changed:
+        run_quiet([control, "flush_infra", "all"])
 
 
 def notify(cfg: Config, message: str) -> None:

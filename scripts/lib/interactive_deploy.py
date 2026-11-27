@@ -958,6 +958,36 @@ def disable_telegram_monitor(production: Path, vault_password: Path) -> bool:
     return vars_changed or vault_changed
 
 
+def set_dns_via_exit(production: Path, enabled: bool) -> bool:
+    """Включить или выключить разрешение зарубежных имён резолвером EXIT.
+
+    Меняется одна переменная inventory, общая для ENTRY и EXIT. Резолвер на EXIT,
+    правило UFW для него и пересылку в Unbound ENTRY настраивает обычный deploy.
+    При включении ENTRY остаётся на серверах DoT, пока резолвер EXIT не ответит
+    по туннелю: зарубежные имена не перестают разрешаться на время установки.
+    """
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if not all_vars_path.is_file():
+        fail("Для настройки DNS нужен production inventory")
+    all_vars = load_yaml(all_vars_path)
+    if bool(all_vars.get("entry_dns_default_via_exit", False)) == enabled:
+        print(
+            "Зарубежные имена уже разрешает резолвер EXIT."
+            if enabled
+            else "Зарубежные имена уже разрешают серверы DoT."
+        )
+        return False
+    all_vars["entry_dns_default_via_exit"] = enabled
+    yaml_write(all_vars_path, all_vars)
+    print(
+        "Production inventory обновлён: зарубежные имена будет разрешать резолвер EXIT "
+        "внутри туннеля."
+        if enabled
+        else "Production inventory обновлён: зарубежные имена будут разрешать серверы DoT."
+    )
+    return True
+
+
 _DOMAIN_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
 )
@@ -5637,6 +5667,19 @@ def main() -> None:
         help="при --resume выключить Telegram-уведомления и удалить токен из Vault",
     )
     parser.add_argument(
+        "--enable-dns-via-exit",
+        action="store_true",
+        help=(
+            "при --resume разрешать зарубежные имена резолвером EXIT внутри туннеля: с "
+            "ENTRY наружу не уходит ни одного запроса DNS о зарубежных узлах"
+        ),
+    )
+    parser.add_argument(
+        "--disable-dns-via-exit",
+        action="store_true",
+        help="при --resume вернуть зарубежные имена на серверы DoT, запросы идут с ENTRY",
+    )
+    parser.add_argument(
         "--replace-front",
         action="store_true",
         help="при --resume подготовить новый FRONT без отключения прежнего",
@@ -5775,11 +5818,15 @@ def main() -> None:
             ("--disable-ru-proxy", args.disable_ru_proxy),
             ("--enable-telegram", args.enable_telegram),
             ("--disable-telegram", args.disable_telegram),
+            ("--enable-dns-via-exit", args.enable_dns_via_exit),
+            ("--disable-dns-via-exit", args.disable_dns_via_exit),
         )
         if value
     ]
     if feature_flags and not args.resume:
         parser.error(f"{feature_flags[0]} используется только вместе с --resume")
+    if args.enable_dns_via_exit and args.disable_dns_via_exit:
+        parser.error("--enable-dns-via-exit и --disable-dns-via-exit нельзя указывать вместе")
     if args.enable_ru_proxy and args.disable_ru_proxy:
         parser.error("--enable-ru-proxy и --disable-ru-proxy нельзя указывать вместе")
     if args.enable_telegram and args.disable_telegram:
@@ -6035,6 +6082,10 @@ def main() -> None:
             enable_telegram_monitor(production, vault_password)
         if args.disable_telegram:
             disable_telegram_monitor(production, vault_password)
+        if args.enable_dns_via_exit:
+            set_dns_via_exit(production, True)
+        if args.disable_dns_via_exit:
+            set_dns_via_exit(production, False)
         update_saved_client_configs_cps(state_root / "clients")
         # Обновление пакетов AmneziaWG: полный набор компонентов или только сами
         # пакеты. В обоих случаях нужна транзакция пакетов с откатом.
@@ -6306,9 +6357,22 @@ def main() -> None:
             or args.disable_ru_proxy
             or args.enable_telegram
             or args.disable_telegram
+            or args.enable_dns_via_exit
+            or args.disable_dns_via_exit
         ):
             # Итог называет то, что изменилось: общее "повторно применена" не говорило,
             # включилась ли функция.
+            if args.enable_dns_via_exit:
+                print(
+                    "Зарубежные имена разрешает резолвер EXIT внутри туннеля, каскад проверен. "
+                    "С ENTRY наружу запросы DNS о зарубежных узлах не уходят; российские "
+                    "имена по-прежнему разрешает российский резолвер. Состояние: dns-status."
+                )
+            if args.disable_dns_via_exit:
+                print(
+                    "Зарубежные имена снова разрешают серверы DoT, запросы идут с ENTRY; "
+                    "каскад проверен. Состояние: dns-status."
+                )
             if args.enable_ru_proxy:
                 print(
                     "RU-прокси включён, каскад проверен. Состояние: ru-proxy status; "

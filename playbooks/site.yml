@@ -610,6 +610,37 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    # При первом включении ENTRY оставался на серверах DoT: резолвера EXIT ещё не
+    # было. Теперь он установлен: пересылка Unbound переводится на него, как
+    # только он ответит по туннелю.
+    - name: Перевод зарубежного DNS ENTRY на резолвер EXIT после его установки
+      ansible.builtin.include_role:
+        name: entry_dns
+        tasks_from: via_exit_switch
+      when:
+        - awg_adoption_mode == 'apply'
+        - entry_dns_default_via_exit | default(false) | bool
+        - not (entry_dns_via_exit_effective | default(false) | bool)
+
+    - name: Применение конфигурации DNS ENTRY
+      ansible.builtin.meta: flush_handlers
+
+    # Режим включён, а резолвер EXIT по туннелю так и не ответил: молча оставить
+    # запросы на серверах DoT значило бы не выполнить то, о чём просили.
+    - name: Проверка, что зарубежные имена идут через резолвер EXIT
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - entry_dns_via_exit_effective | default(false) | bool
+        fail_msg: >-
+          Резолвер EXIT не отвечает по туннелю: зарубежные имена оставлены на серверах
+          DoT, запросы по-прежнему идут с ENTRY. Проверьте EXIT (awg-health --strict
+          на нём) и повторите kalimera-deploy --resume; отказаться от режима:
+          kalimera-deploy --resume --disable-dns-via-exit.
+      when:
+        - awg_adoption_mode == 'apply'
+        - entry_dns_default_via_exit | default(false) | bool
+
     - name: Ожидание готовности рекурсивного резолвера EXIT
       ansible.builtin.command:
         argv: [/usr/bin/getent, ahostsv4, example.com]

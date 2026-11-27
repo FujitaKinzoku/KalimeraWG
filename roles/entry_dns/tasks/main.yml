@@ -159,6 +159,41 @@
   loop: "{{ entry_dnsmasq_managed_files }}"
   changed_when: false
 
+# Зарубежные имена через резолвер EXIT (entry_dns_default_via_exit). Резолвер на
+# EXIT ставит play EXIT, а он идёт после play ENTRY. При первом включении Unbound
+# поэтому остаётся на серверах DoT, пока резолвер EXIT не ответит по туннелю:
+# иначе зарубежные имена не разрешались бы несколько минут. Перевод завершает
+# отдельный play в конце site.yml. Режим, который уже действует, на DoT не
+# возвращается, даже если EXIT сейчас не отвечает: запросы о зарубежных узлах не
+# должны выходить с ENTRY напрямую.
+- name: Чтение действующей конфигурации зарубежного DNS
+  ansible.builtin.slurp:
+    path: "{{ entry_unbound_config_dir }}/90-awg-dot.conf"
+  register: entry_dns_current_dot_config
+  failed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: Проверка ответа резолвера EXIT по туннелю
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dig
+      - +short
+      - +time=2
+      - +tries=2
+      - "@{{ awg3_peer_tunnel_address }}"
+      - example.com
+      - A
+  register: entry_dns_exit_resolver_probe
+  changed_when: false
+  failed_when: false
+  when: entry_dns_default_via_exit | default(false) | bool
+
+- name: Выбор действующего режима зарубежного DNS
+  ansible.builtin.include_tasks: via_exit_mode.yml
+  vars:
+    entry_dns_current_dot_text: "{{ entry_dns_current_dot_config.content | default('') | b64decode }}"
+    entry_dns_exit_probe_output: "{{ entry_dns_exit_resolver_probe.stdout | default('') }}"
+
 - name: "Формирование: DNS ENTRY сервера - этап 10"
   ansible.builtin.template:
     src: 90-awg-dot.conf.j2
@@ -314,11 +349,11 @@
   until:
     - entry_dns_system_resolution.rc == 0
     - entry_dns_system_resolution.stdout | trim | length > 0
-  # При entry_dns_default_via_exit дефолтная ветка резолвится через EXIT, чья
-  # роль exit_dns выполняется позже в отдельном play - на этом шаге EXIT ещё
-  # не готов. Сквозная проверка перенесена в отдельный play после play EXIT
-  # (playbooks/site.yml, "Проверка DNS зарубежной ветки через EXIT").
-  when: not (entry_dns_default_via_exit | default(false) | bool)
+  # Пока зарубежные имена идут через EXIT, сквозная проверка выполняется отдельным
+  # play после play EXIT (playbooks/site.yml, "Проверка DNS зарубежной ветки через
+  # EXIT"): основной EXIT во время deploy может не отвечать, а пересылку на
+  # резервный переводит переключатель путей.
+  when: not (entry_dns_via_exit_effective | bool)
 
 - name: "Прогрев: DNS ENTRY сервера - этап 29"
   ansible.builtin.template:

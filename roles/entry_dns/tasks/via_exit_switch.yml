@@ -1,0 +1,71 @@
+---
+# Завершение первого включения режима "зарубежные имена через резолвер EXIT".
+# Выполняется отдельным play после play EXIT: к этому моменту резолвер на EXIT
+# установлен, а правило UFW для него применено. Здесь меняется только пересылка
+# Unbound: всё остальное роль уже применила в play ENTRY. Роль целиком повторно
+# не выполняется намеренно: вне play ENTRY ей не видны значения других ролей.
+- name: Ожидание ответа установленного резолвера EXIT по туннелю
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/dig
+      - +short
+      - +time=2
+      - +tries=1
+      - "@{{ awg3_peer_tunnel_address }}"
+      - example.com
+      - A
+  register: entry_dns_exit_resolver_probe
+  changed_when: false
+  failed_when: false
+  retries: 12
+  delay: 5
+  until: (entry_dns_exit_resolver_probe.stdout | default('')) is search('(?m)^([0-9]{1,3}[.]){3}[0-9]{1,3}$')
+
+- name: Режим зарубежного DNS после установки резолвера EXIT
+  ansible.builtin.set_fact:
+    entry_dns_via_exit_effective: >-
+      {{ (entry_dns_exit_resolver_probe.stdout | default('')) is search('(?m)^([0-9]{1,3}[.]){3}[0-9]{1,3}$') }}
+
+- name: Перевод пересылки Unbound на резолвер EXIT
+  when: entry_dns_via_exit_effective | bool
+  block:
+    - name: Создание каталога для новой конфигурации пересылки
+      ansible.builtin.file:
+        path: "{{ entry_dns_candidate_root }}/unbound"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      changed_when: false
+
+    - name: Формирование конфигурации пересылки на резолвер EXIT
+      ansible.builtin.template:
+        src: 90-awg-dot.conf.j2
+        dest: "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+        owner: root
+        group: root
+        mode: "0644"
+      changed_when: false
+
+    - name: Проверка конфигурации пересылки на резолвер EXIT
+      ansible.builtin.command:
+        argv:
+          - /usr/sbin/unbound-checkconf
+          - "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+      changed_when: false
+
+    - name: Установка конфигурации пересылки на резолвер EXIT
+      ansible.builtin.include_tasks: manage_file.yml
+      vars:
+        entry_dns_file:
+          name: 90-awg-dot.conf
+        entry_dns_source_path: "{{ entry_dns_candidate_root }}/unbound/90-awg-dot.conf"
+        entry_dns_destination_path: "{{ entry_unbound_config_dir }}/90-awg-dot.conf"
+        entry_dns_backup_dir: "{{ entry_dns_backup_root }}/unbound"
+        entry_dns_service_to_restart: unbound.service
+
+    - name: Удаление каталога новой конфигурации пересылки
+      ansible.builtin.file:
+        path: "{{ entry_dns_candidate_root }}"
+        state: absent
+      changed_when: false

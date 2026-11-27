@@ -1,0 +1,21 @@
+---
+# Куда Unbound пересылает зарубежные имена при entry_dns_default_via_exit.
+#
+# На входе: текст действующего файла пересылки (entry_dns_current_dot_text) и
+# ответ резолвера EXIT на пробный запрос по туннелю (entry_dns_exit_probe_output).
+#
+#   режим уже действует - остаётся, даже если EXIT сейчас не отвечает: запросы о
+#       зарубежных узлах не должны выходить с ENTRY напрямую;
+#   режим включается впервые - действует, только если резолвер EXIT уже ответил;
+#       иначе Unbound остаётся на серверах DoT до конца deploy, и перевод
+#       завершает via_exit_switch.yml после установки резолвера на EXIT.
+#
+# Пересылку на EXIT в файле выдаёт отсутствие TLS: её шифрует сам туннель.
+# Решение проверяет tests/check-dns-via-exit.yml.
+- name: Действующий режим зарубежного DNS
+  ansible.builtin.set_fact:
+    entry_dns_via_exit_effective: >-
+      {{ (entry_dns_default_via_exit | default(false) | bool) and
+         ((entry_dns_current_dot_text is search('forward-addr:') and
+           not (entry_dns_current_dot_text is search('forward-tls-upstream'))) or
+          (entry_dns_exit_probe_output is search('(?m)^([0-9]{1,3}[.]){3}[0-9]{1,3}$'))) }}
