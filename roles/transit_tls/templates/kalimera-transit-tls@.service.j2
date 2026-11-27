@@ -16,7 +16,12 @@ ConditionPathExists={{ transit_tls_config_dir }}/transit-%i.json
 Type=simple
 User=sing-box
 Group=sing-box
+{% if runtime_secrets_enabled | default(false) | bool %}
+{# Как у остальных защищённых служб: файл читается из открытого хранилища в tmpfs. #}
+LoadCredential=transit.json:{{ runtime_secrets_runtime_root | default('/run/kalimera-secrets') }}/sing-box/transit-%i.json
+{% else %}
 LoadCredential=transit.json:{{ transit_tls_config_dir }}/transit-%i.json
+{% endif %}
 ExecStart=/usr/bin/sing-box -D {{ transit_tls_state_dir }} -c %d/transit.json run
 Restart=on-failure
 RestartSec=2

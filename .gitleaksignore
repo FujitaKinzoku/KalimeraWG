@@ -11,3 +11,8 @@ dee4d253ee13e46d3a04161e13881cca272008db:tests/render-shell.yml:generic-api-key:
 # tests/test_standby_exit.py. Значение из теста убрано следующим коммитом: оно
 # не было нужно, установщик создаёт идентификатор сам.
 547c658e340d69808602a22df59162fcd40030f9:tests/test_standby_exit.py:generic-api-key:693
+
+# Исторический fingerprint образца из tests/test_fallback_transport.py: заголовок
+# и окончание PEM с четырьмя буквами между ними, ключа там не было. Следующим
+# коммитом образец собирается из частей, но исходная строка остаётся в истории.
+d2c36511fc4feef0fe56bba2c312bdf21e57a64e:tests/test_fallback_transport.py:private-key:207

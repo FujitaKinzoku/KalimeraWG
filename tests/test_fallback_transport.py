@@ -35,6 +35,7 @@ def environment() -> jinja2.Environment:
     env.filters["bool"] = lambda value: str(value).lower() in ("true", "yes", "1")
     env.filters["to_nice_json"] = lambda value, **kwargs: json.dumps(value, indent=4, **kwargs)
     env.filters["quote"] = lambda value: str(value)
+    env.filters["basename"] = lambda value: str(value).rsplit("/", 1)[-1]
     return env
 
 
@@ -202,9 +203,12 @@ class InstallerTests(TransportInstallerCase):
 
 
 class TemplateTests(unittest.TestCase):
+    # Заголовок ключа собран из частей: проверка секретов репозитория ищет его
+    # в файлах целиком, а здесь только образец без ключа.
+    key_header = "-----BEGIN " + "PRIVATE KEY-----"
     material = {"uuid": "11111111-2222-3333-4444-555555555555",
                 "certificate": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
-                "private_key": "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----\n"}
+                "private_key": key_header + "\nBBBB\n" + key_header.replace("BEGIN", "END") + "\n"}
 
     def server(self) -> dict:
         variables = {
@@ -243,7 +247,7 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(inbound["users"], [{"uuid": self.material["uuid"]}])
         tls = inbound["tls"]
         self.assertEqual((tls["server_name"], tls["min_version"]), ("st-4k7m2x.example.com", "1.3"))
-        self.assertEqual(tls["key"][0], "-----BEGIN PRIVATE KEY-----")
+        self.assertEqual(tls["key"][0], self.key_header)
 
     def test_client_listens_on_loopback_and_trusts_one_certificate(self) -> None:
         client = self.client()
@@ -342,6 +346,39 @@ class RoleTests(unittest.TestCase):
             if task.get("ansible.builtin.systemd_service", {}).get("state") == "started"
         ]
         self.assertEqual(started, ["Включение таймера сторожа транспорта"])
+
+    def test_units_read_the_configuration_from_the_unlocked_store(self) -> None:
+        """При защищённых секретах /etc/sing-box - ссылка в tmpfs, как у остальных служб."""
+        variables = dict(role_defaults(), transit_tls_server_config_path="/etc/sing-box/transit-server.json")
+        cases = {
+            "kalimera-transit-tls.service.j2": "transit-server.json",
+            "kalimera-transit-tls@.service.j2": "transit-%i.json",
+        }
+        for name, file_name in cases.items():
+            sealed = render(
+                ROLE / "templates" / name,
+                **variables,
+                runtime_secrets_enabled=True,
+                runtime_secrets_runtime_root="/run/kalimera-secrets",
+            )
+            self.assertIn(f"LoadCredential=transit.json:/run/kalimera-secrets/sing-box/{file_name}\n", sealed, name)
+            self.assertEqual(sealed.count("LoadCredential="), 1, name)
+            # Без открытого хранилища файла нет: служба ждёт его открытия.
+            self.assertIn("Requires=kalimera-secrets-unlock.service\n", sealed, name)
+            self.assertIn("After=kalimera-secrets-unlock.service\n", sealed, name)
+            plain = render(ROLE / "templates" / name, **variables)
+            self.assertIn(f"LoadCredential=transit.json:/etc/sing-box/{file_name}\n", plain, name)
+            self.assertEqual(plain.count("LoadCredential="), 1, name)
+            self.assertNotIn("kalimera-secrets", plain, name)
+
+    def test_runtime_store_carries_the_configuration_directory(self) -> None:
+        """Каталог с ключом транспорта входит в запечатанный набор на любом сервере."""
+        config = (ROOT / "roles" / "runtime_secrets" / "templates" / "config.json.j2").read_text(encoding="utf-8")
+        self.assertIn("{'source': '/etc/sing-box', 'target': 'sing-box'}", config)
+        self.assertEqual(role_defaults()["transit_tls_config_dir"], "/etc/sing-box")
+        # Набор запечатывается после ролей серверов: новый файл попадает в него в том же запуске.
+        site = (ROOT / "playbooks" / "site.yml").read_text(encoding="utf-8")
+        self.assertLess(site.rindex("role: transit_tls"), site.index("role: runtime_secrets"))
 
     def test_configuration_update_does_not_open_a_closed_transport(self) -> None:
         handlers = yaml.safe_load((ROLE / "handlers" / "main.yml").read_text(encoding="utf-8"))
