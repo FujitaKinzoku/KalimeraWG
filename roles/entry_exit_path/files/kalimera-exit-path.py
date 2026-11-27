@@ -50,6 +50,9 @@ QUALITY_MINUTES = 60
 QUALITY_MIN_PROBES = 60
 REASON_FAILBACK = "основной путь снова устойчиво отвечает"
 REASON_DRILL_END = "учебное переключение завершено"
+REASON_RETEST = "проверка прямого транспорта"
+REASON_TRANSPORT_DRILL = "учебный переход на запасной транспорт"
+REASON_TRANSPORT_DRILL_END = "учебный переход на запасной транспорт завершён"
 
 
 class Config:
@@ -139,6 +142,7 @@ def empty_state() -> dict:
                 "fail_since": None,
                 "retest_at": 0,
                 "retest_now": False,
+                "transport_drill_until": 0,
             }
             for name in PATH_NAMES
         },
@@ -354,6 +358,10 @@ def choose_transport(cfg: Config, state: dict, name: str, now: int) -> tuple[str
     entry = state["paths"][name]
     names = cfg.transport_names(name)
     current = entry["transport"]
+    # Учебный переход держит запасной транспорт до конца учения, даже если тот
+    # не отвечает: иначе учение не показало бы, что он не работает.
+    if int(entry.get("transport_drill_until") or 0) > now:
+        return names[1], (REASON_TRANSPORT_DRILL if current != names[1] else "")
     if int(entry["fail"]) > 0:
         if entry.get("transport_ok"):
             since, limit = entry.get("fail_since"), cfg.transport_fail_seconds
@@ -363,7 +371,7 @@ def choose_transport(cfg: Config, state: dict, name: str, now: int) -> tuple[str
             return names[(names.index(current) + 1) % len(names)], "путь не отвечает"
         return current, ""
     if current != names[0] and retest_due(cfg, state, name, now):
-        return names[0], "проверка прямого транспорта"
+        return names[0], REASON_RETEST
     return current, ""
 
 
@@ -413,9 +421,16 @@ def manage_transports(cfg: Config, state: dict, now: int) -> None:
         entry = state["paths"][name]
         if entry.get("transport") not in names:
             entry.update({"transport": names[0], "transport_since": now, "transport_ok": True})
+        # Учебный переход закончился: путь сразу проверяет прямой транспорт.
+        drill_ended = 0 < int(entry.get("transport_drill_until") or 0) <= now
+        if drill_ended:
+            entry["transport_drill_until"] = 0
+            entry["retest_now"] = True
         # Во время deploy интерфейсы перезапускаются: транспорт не меняется, только
         # восстанавливается.
         target, reason = (entry["transport"], "") if held else choose_transport(cfg, state, name, now)
+        if drill_ended and reason == REASON_RETEST:
+            reason = REASON_TRANSPORT_DRILL_END
         if target != entry["transport"]:
             previous = entry["transport"]
             # Устойчивость пути считается заново: на новом транспорте он ещё не отвечал.
@@ -435,8 +450,8 @@ def manage_transports(cfg: Config, state: dict, now: int) -> None:
                 f"{cfg.transport_label(name, target)}. Причина: {reason}."
             )
             log(message)
-            # О проверке прямого транспорта не сообщается: она идёт по расписанию.
-            if reason != "проверка прямого транспорта":
+            # О плановой проверке прямого транспорта и об учениях не сообщается.
+            if reason not in (REASON_RETEST, REASON_TRANSPORT_DRILL, REASON_TRANSPORT_DRILL_END):
                 notify(cfg, message)
         ensure_transport(cfg, name, entry["transport"])
 
@@ -711,6 +726,9 @@ def transport_text(cfg: Config, state: dict, name: str, now: int) -> str:
     if current not in names:
         return ""
     label = cfg.transport_label(name, current)
+    drill_left = int(entry.get("transport_drill_until") or 0) - now
+    if drill_left > 0:
+        return f"транспорт: {label} (учебный переход, ещё {format_age(drill_left)})"
     if current == names[0]:
         return f"транспорт: {label}"
     text = f"транспорт: {label} (запасной), {format_age(now - int(entry['transport_since']))}"
@@ -801,7 +819,9 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
     # этого сервера не проходит.
     for name in PATH_NAMES:
         entry = state["paths"][name]
-        if int(entry["fail"]) == 0 and transport_rank(cfg, state, name) > 0:
+        if int(entry.get("transport_drill_until") or 0) > now:
+            rows.append(("WARN", f"{cfg.label(name)}: идёт учебный переход на запасной транспорт"))
+        elif int(entry["fail"]) == 0 and transport_rank(cfg, state, name) > 0:
             rows.append(
                 (
                     "WARN",
@@ -909,6 +929,43 @@ def command_retest(cfg: Config, _args: argparse.Namespace) -> int:
     return 0
 
 
+def command_transport_drill(cfg: Config, args: argparse.Namespace) -> int:
+    """Учебный переход пути на запасной транспорт и обратно.
+
+    Блокировать для этого ничего не нужно: ENTRY сам перестаёт пользоваться
+    прямым транспортом и стучится в запасной. Сторож на EXIT видит то же, что при
+    настоящей блокировке: открытый транспорт молчит, в закрытый стучатся.
+    """
+    name = args.path
+    if not cfg.transport_names(name):
+        print("Запасной транспорт не включён: учебный переход невозможен.", file=sys.stderr)
+        return 1
+    if 0 < args.minutes < 3:
+        print(
+            "Учебный переход короче трёх минут ничего не покажет: сторож на EXIT "
+            "открывает запасной транспорт через полторы-две минуты.",
+            file=sys.stderr,
+        )
+        return 1
+    seconds = (args.minutes or 5) * 60
+    state = read_state(cfg)
+    state["paths"][name]["transport_drill_until"] = int(time.time()) + seconds
+    write_state(cfg, state)
+    state = tick(cfg)
+    carries = state["active"] == name
+    print(
+        f"{cfg.label(name)}: учебный переход на запасной транспорт на {format_age(seconds)}. "
+        "Сторож на EXIT откроет его через полторы-две минуты; затем путь ответит внутри TLS. "
+        + (
+            "Этот путь несёт трафик: на время перехода трафик уйдёт на другой сервер. "
+            if carries
+            else "Трафик идёт через другой сервер и переход не заметит. "
+        )
+        + "Ход: exit-path status; на EXIT: transport-guard status. Возврат произойдёт сам."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="exit-path",
@@ -926,6 +983,11 @@ def main(argv: list[str] | None = None) -> int:
     drill = commands.add_parser("drill", help="учебное переключение на резервный EXIT")
     drill.add_argument("--minutes", type=int, default=0, help="длительность, минут")
     commands.add_parser("retest", help="проверить прямой транспорт, если туннель идёт запасным")
+    transport_drill = commands.add_parser(
+        "transport-drill", help="учебный переход пути на запасной транспорт и обратно"
+    )
+    transport_drill.add_argument("path", nargs="?", choices=PATH_NAMES, default=STANDBY)
+    transport_drill.add_argument("--minutes", type=int, default=0, help="длительность, минут")
     args = parser.parse_args(argv)
     if args.command is None:
         args = parser.parse_args(["status"])
@@ -953,6 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
             "auto": command_auto,
             "drill": command_drill,
             "retest": command_retest,
+            "transport-drill": command_transport_drill,
         }[args.command]
         return handler(cfg, args)
 

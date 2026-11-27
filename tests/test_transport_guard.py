@@ -1,4 +1,4 @@
-"""Сторож транспорта на EXIT (roles/exit_transport/files/kalimera-transport-guard.py).
+"""Сторож транспорта на EXIT (roles/transit_tls/files/kalimera-transport-guard.py).
 
 Требование владельца: одновременно открыт один транспорт туннеля ENTRY - EXIT,
 второй не слушает и закрыт межсетевым экраном. Программа проверяется на
@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).parents[1]
-GUARD_PATH = ROOT / "roles" / "exit_transport" / "files" / "kalimera-transport-guard.py"
+GUARD_PATH = ROOT / "roles" / "transit_tls" / "files" / "kalimera-transport-guard.py"
 SPEC = importlib.util.spec_from_file_location("kalimera_transport_guard", GUARD_PATH)
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
@@ -143,6 +143,8 @@ class GuardCase(unittest.TestCase):
                 "idle_seconds": 75,
                 "knock_packets": 2,
                 "knock_fresh_seconds": 30,
+                # Отдельно проверяется в BootGraceTests; здесь сервер давно загружен.
+                "boot_grace_seconds": 0,
                 "state_dir": str(self.dir / "run"),
                 "active_file": str(self.dir / "lib" / "active"),
             }
@@ -364,6 +366,52 @@ class RestartTests(GuardCase):
         (self.dir / "run" / "state.json").write_text("{не json", encoding="utf-8")
         self.assertEqual(self.tick()["active"], "awg")
         json.loads((self.dir / "run" / "state.json").read_text(encoding="utf-8"))
+
+
+class BootGraceTests(GuardCase):
+    """Перезагрузка EXIT не должна уводить каскад на запасной транспорт."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.cfg.boot_grace_seconds = 300
+
+    def test_reboot_of_exit_does_not_move_the_tunnel_into_tls(self) -> None:
+        # Пока EXIT перезагружался, ENTRY не мог отличить это от блокировки и
+        # пробует транспорты по очереди. EXIT загрузился в тот момент, когда ENTRY
+        # стучится в TCP: без отсрочки сторож открыл бы запасной транспорт, и
+        # каскад остался бы на нём, хотя прямой путь исправен.
+        self.tick()
+        for _ in range(11):
+            self.server.knock("tls")
+            state = self.tick()
+        self.assertEqual(state["active"], "awg", "110 с стука сразу после загрузки")
+        # ENTRY перешёл к прямому транспорту: туннель поднялся, стук прекратился.
+        state = self.healthy_ticks(30)
+        self.assertEqual(state["active"], "awg")
+        self.assertEqual(self.messages, [])
+
+    def test_real_block_is_followed_once_the_grace_is_over(self) -> None:
+        self.tick()
+        switched = None
+        for step in range(1, 45):
+            self.server.knock("tls")
+            if self.tick()["active"] == "tls":
+                switched = step * 10
+                break
+        self.assertIsNotNone(switched)
+        self.assertGreaterEqual(switched, 300)
+        self.assertLessEqual(switched, 320)
+
+    def test_grace_counts_from_the_boot_not_from_a_guard_restart(self) -> None:
+        self.healthy_ticks(40)
+        booted = guard.read_state(self.cfg, self.now)["booted"]
+        # Служба сторожа перезапущена, состояние в /run на месте.
+        state = self.healthy_ticks(2)
+        self.assertEqual(state["booted"], booted)
+        for _ in range(10):
+            self.server.knock("tls")
+            state = self.tick()
+        self.assertEqual(state["active"], "tls", "после отсрочки сторож работает как обычно")
 
 
 class StatusTests(GuardCase):

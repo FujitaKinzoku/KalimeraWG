@@ -671,6 +671,41 @@
             dest: "{{ rendered_shell_root }}/kalimera-test-exit"
             mode: "0700"
 
+        # Запасной транспорт туннеля: ветви шаблонов EXIT со сторожем транспорта.
+        # В примерном inventory его нет, поэтому они формируются отдельно.
+        - name: Включение запасного транспорта для проверки шаблонов EXIT
+          ansible.builtin.set_fact:
+            transit_tls_enabled: true
+
+        - name: Формирование программ EXIT с запасным транспортом
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0700"
+          loop:
+            - src: roles/health/templates/awg-health.sh.j2
+              dest: awg-health-exit-transit
+            - src: roles/health/templates/awg-self-heal.sh.j2
+              dest: self-heal-exit-transit
+            - src: roles/operations/templates/server-audit.sh.j2
+              dest: server-audit-exit-transit
+
+        - name: Проверка ветвей запасного транспорта в сформированных программах
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fq "check 'таймер сторожа транспорта'" {{ rendered_shell_root }}/awg-health-exit-transit
+            grep -Fq "check 'сторож транспорта держит открытым один транспорт туннеля'" {{ rendered_shell_root }}/awg-health-exit-transit
+            ! grep -Fq 'сторож' {{ rendered_shell_root }}/awg-health-exit
+            grep -Fq 'timer_transport_guard) systemctl enable --now kalimera-transport-guard.timer' {{ rendered_shell_root }}/self-heal-exit-transit
+            grep -Fq 'known_tcp="$known_tcp 443"' {{ rendered_shell_root }}/server-audit-exit-transit
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Отключение запасного транспорта после проверки шаблонов
+          ansible.builtin.set_fact:
+            transit_tls_enabled: false
+
         - name: Загрузка defaults и безопасных переменных FRONT
           ansible.builtin.include_vars:
             file: "{{ playbook_dir }}/../{{ item }}"
@@ -780,6 +815,9 @@
               - "{{ rendered_shell_root }}/awg-ru-zone-update"
               - "{{ rendered_shell_root }}/awg-ru-proxy-watch"
               - "{{ rendered_shell_root }}/server-audit-entry"
+              - "{{ rendered_shell_root }}/server-audit-exit-transit"
+              - "{{ rendered_shell_root }}/awg-health-exit-transit"
+              - "{{ rendered_shell_root }}/self-heal-exit-transit"
               - "{{ rendered_shell_root }}/awg-managed-integrity-entry"
               - "{{ rendered_shell_root }}/telegram-monitor-entry"
               - "{{ rendered_shell_root }}/awg-kernel-guard"

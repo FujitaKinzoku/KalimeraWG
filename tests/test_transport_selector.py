@@ -293,6 +293,72 @@ class RetestTests(TransportCase):
         self.assertIn("проверять нечего", printed.call_args.args[0])
 
 
+class DrillTests(TransportCase):
+    """Учебный переход: проверка запасного транспорта без настоящей блокировки."""
+
+    def drill(self, name: str, minutes: int = 5) -> int:
+        self.reach[PRIMARY] = self.reach[STANDBY] = 3
+        self.now += 10
+        with mock.patch("builtins.print") as printed, mock.patch("sys.stderr"), \
+                mock.patch.object(selector.time, "time", return_value=self.now):
+            code = selector.command_transport_drill(self.cfg, mock.Mock(path=name, minutes=minutes))
+        self.printed = printed
+        return code
+
+    def test_drill_on_the_idle_path_does_not_touch_the_traffic(self) -> None:
+        self.steps(3)
+        routes = list(self.routes)
+        self.assertEqual(self.drill(STANDBY), 0)
+        self.assertIn("Трафик идёт через другой сервер", self.printed.call_args.args[0])
+        self.assertEqual(self.transport(STANDBY), "tls")
+        state = self.steps(6)
+        text = "\n".join(selector.status_lines(self.cfg, state, "auto", self.now))
+        self.assertIn("  транспорт: внутри TLS (учебный переход, ещё 4 мин)", text)
+        self.assertIn(
+            ("WARN", "резервный EXIT: идёт учебный переход на запасной транспорт"),
+            selector.report_rows(self.cfg, state, "auto", self.now),
+        )
+        # По истечении срока путь сам возвращается на прямой транспорт.
+        self.until(lambda current: current["paths"][STANDBY]["transport"] == "awg")
+        self.assertIn("учебный переход на запасной транспорт завершён", self.messages[-1])
+        state = self.steps(3)
+        self.assertEqual(state["paths"][STANDBY]["fail"], 0)
+        self.assertEqual(state["active"], PRIMARY)
+        self.assertEqual(self.routes, routes)
+        self.assertEqual(self.notices, [], "учения уведомлений не дают")
+
+    def test_drill_keeps_tls_even_when_it_does_not_answer(self) -> None:
+        # Запасной транспорт сломан: учение должно это показать, а не скрыть
+        # возвратом на прямой через две минуты.
+        self.steps(3)
+        self.passes[(STANDBY, "tls")] = False
+        self.drill(STANDBY)
+        started = self.now
+        seen = set()
+        while self.now - started < 290:
+            state = self.step()
+            seen.add(state["paths"][STANDBY]["transport"])
+        self.assertEqual(seen, {"tls"})
+        self.assertGreater(state["paths"][STANDBY]["fail"], 20)
+        self.until(lambda current: current["paths"][STANDBY]["transport"] == "awg" and
+                   current["paths"][STANDBY]["fail"] == 0)
+
+    def test_drill_on_the_path_that_carries_traffic_is_announced(self) -> None:
+        self.steps(3)
+        self.assertEqual(self.drill(PRIMARY), 0)
+        self.assertIn("на время перехода трафик уйдёт на другой сервер", self.printed.call_args.args[0])
+
+    def test_drill_shorter_than_the_guard_needs_is_refused(self) -> None:
+        self.steps(3)
+        self.assertEqual(self.drill(STANDBY, minutes=2), 1)
+        self.assertEqual(self.transport(STANDBY), "awg")
+
+    def test_drill_without_a_second_transport_is_refused(self) -> None:
+        for path in self.cfg.paths.values():
+            path.pop("transports")
+        self.assertEqual(self.drill(STANDBY), 1)
+
+
 class ReportTests(TransportCase):
     def test_status_and_report_name_the_fallback_transport(self) -> None:
         self.steps(3)

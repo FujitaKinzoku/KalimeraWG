@@ -25,6 +25,7 @@ import tempfile
 import textwrap
 import time
 import urllib.request
+import uuid
 import zoneinfo
 from pathlib import Path
 from typing import NamedTuple
@@ -1650,6 +1651,13 @@ def disable_standby_exit(production: Path, vault_password: Path) -> bool:
             "его. Сначала верните трафик на основной сервер: состояние - exit-path status, "
             "закрепить основной путь - exit-path use primary"
         )
+    all_vars_path = production / "group_vars" / "all" / "main.yml"
+    if all_vars_path.is_file() and load_yaml(all_vars_path).get("transit_tls_enabled"):
+        fail(
+            "Включён запасной транспорт туннеля, а им управляет переключатель путей, "
+            "который работает только с резервным EXIT. Сначала выключите транспорт: "
+            "kalimera-deploy --resume --disable-fallback-transport"
+        )
     standby: dict = {}
     if host_present:
         candidate = hosts_document["all"]["children"]["exit"]["hosts"][STANDBY_EXIT_HOST]
@@ -1686,6 +1694,180 @@ def disable_standby_exit(production: Path, vault_password: Path) -> bool:
     print(
         f"Production inventory обновлён: резервный EXIT ({address}) отключён; второй "
         "туннель и переключатель путей на ENTRY снимет текущий deploy."
+    )
+    return True
+
+
+TRANSIT_TLS_VAULT_KEY = "vault_transit_tls"
+_TRANSIT_TLS_NAME_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+
+def transit_tls_certificate(name: str) -> tuple[str, str]:
+    """Закрытый ключ и самоподписанный сертификат запасного транспорта (PEM).
+
+    Сертификат не публичный намеренно: подключается к этому порту только ENTRY, и
+    он доверяет именно этому сертификату. В TLS 1.3 сертификат сервера наблюдателю
+    не виден, а в журналы прозрачности сертификатов имя EXIT не попадает.
+    """
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+    return key_pem, certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def fallback_transport_in_use(entry_vars: dict) -> list[str]:
+    """Пути, чей туннель сейчас идёт запасным транспортом (по файлу переключателя)."""
+    state_dir = Path(str(entry_vars.get("entry_exit_path_state_dir") or "/run/kalimera-exit-path"))
+    try:
+        state = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    paths = state.get("paths") if isinstance(state, dict) else None
+    if not isinstance(paths, dict):
+        return []
+    return [
+        name
+        for name, entry in paths.items()
+        if isinstance(entry, dict) and entry.get("transport") not in (None, "awg")
+    ]
+
+
+def enable_fallback_transport(production: Path, vault_password: Path) -> bool:
+    """Включить запасной транспорт туннеля ENTRY - EXIT (docs/fallback-transport.md).
+
+    Меняются только inventory и Vault; серверы настраивает обычный deploy, который
+    идёт следом. Туннель при этом продолжает идти прямым транспортом: запасной
+    не слушает и закрыт, пока прямой работает.
+    """
+    hosts_path = production / "hosts.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    if not hosts_path.is_file() or not all_path.is_file() or not vault_password.is_file():
+        fail("Для включения запасного транспорта нужны production inventory и пароль Vault")
+    hosts_document = load_yaml(hosts_path)
+    all_vars = load_yaml(all_path)
+    if all_vars.get("transit_tls_enabled"):
+        print("Запасной транспорт уже включён; повторное включение не требуется.")
+        return False
+    if not standby_exit_configured(hosts_document):
+        fail(
+            "Запасной транспорт подключается к каскаду с резервным EXIT: транспортом "
+            "управляет переключатель путей. Сначала: kalimera-deploy --resume "
+            "--enable-standby-exit"
+        )
+    exit_hosts = hosts_document["all"]["children"]["exit"]["hosts"]
+    servers = [("exit-managed", "основного EXIT"), (STANDBY_EXIT_HOST, "резервного EXIT")]
+    ui_panel(
+        "ЗАПАСНОЙ ТРАНСПОРТ ТУННЕЛЯ ENTRY - EXIT",
+        [
+            "Тот же туннель AmneziaWG внутри TLS по TCP: для случая, когда прямой путь",
+            "по UDP перестаёт проходить. Одновременно открыт один транспорт; запасной",
+            "не слушает, и его порт закрыт, пока ENTRY его не запросит.",
+            "Каждому EXIT нужно своё имя, которое указывает на адрес этого сервера",
+            "(A-запись, без проксирования). Сертификат создаётся здесь же и публичным",
+            "не является: подключается только ENTRY.",
+        ],
+        "cyan",
+    )
+    port = prompt_port("TCP-порт запасного транспорта на EXIT", 443)
+    names: dict[str, str] = {}
+    for host, title in servers:
+        values = exit_hosts.get(host)
+        if not isinstance(values, dict):
+            fail(f"В inventory нет сервера {host}")
+        address = str(values.get("ansible_host", ""))
+        name = prompt(f"Имя для {title} ({address})").strip().lower().rstrip(".")
+        if not _TRANSIT_TLS_NAME_RE.match(name):
+            fail(f"Имя для {title} должно быть доменным именем вида st-4k7m2x.example.com")
+        if name in names.values():
+            fail("Каждому EXIT нужно своё имя: адреса у серверов разные")
+        resolved = resolve_single_public_ipv4(name, f"Имя для {title}")
+        expected = resolve_single_public_ipv4(address, f"Адрес {title}")
+        if resolved != expected:
+            fail(
+                f"Имя {name} указывает на {resolved}, а адрес {title} - {expected}. "
+                "Исправьте A-запись (без проксирования) и повторите команду."
+            )
+        names[host] = name
+
+    material: dict[str, dict[str, str]] = {}
+    for host, _title in servers:
+        private_key, certificate = transit_tls_certificate(names[host])
+        material[host] = {
+            "uuid": str(uuid.uuid4()),
+            "certificate": certificate,
+            "private_key": private_key,
+        }
+    update_production_vault(production, vault_password, {TRANSIT_TLS_VAULT_KEY: material})
+    for host, _title in servers:
+        exit_hosts[host]["transit_tls_server_name"] = names[host]
+    yaml_write(hosts_path, hosts_document)
+    all_vars["transit_tls_enabled"] = True
+    all_vars["transit_tls_port"] = port
+    yaml_write(all_path, all_vars)
+    print(
+        "Production inventory обновлён: запасной транспорт туннеля включён; серверы "
+        "настроит текущий deploy."
+    )
+    return True
+
+
+def disable_fallback_transport(production: Path, vault_password: Path) -> bool:
+    """Выключить запасной транспорт: на EXIT остаётся один прямой транспорт."""
+    hosts_path = production / "hosts.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    if not hosts_path.is_file() or not all_path.is_file() or not vault_password.is_file():
+        fail("Для выключения запасного транспорта нужны production inventory и пароль Vault")
+    all_vars = load_yaml(all_path)
+    if not all_vars.get("transit_tls_enabled"):
+        print("Запасной транспорт не включён: выключать нечего.")
+        return False
+    busy = fallback_transport_in_use(load_yaml(entry_path) if entry_path.is_file() else {})
+    if busy:
+        fail(
+            "Туннель сейчас идёт запасным транспортом, выключение оборвало бы его. "
+            "Сначала верните прямой транспорт: exit-path retest, затем exit-path status"
+        )
+    if not prompt_bool("Выключить запасной транспорт туннеля", False):
+        print("Запасной транспорт оставлен включённым.")
+        raise SystemExit(0)
+    for key in ("transit_tls_enabled", "transit_tls_port"):
+        all_vars.pop(key, None)
+    yaml_write(all_path, all_vars)
+    hosts_document = load_yaml(hosts_path)
+    exit_hosts = hosts_document.get("all", {}).get("children", {}).get("exit", {}).get("hosts", {})
+    for values in exit_hosts.values() if isinstance(exit_hosts, dict) else []:
+        if isinstance(values, dict):
+            values.pop("transit_tls_server_name", None)
+    yaml_write(hosts_path, hosts_document)
+    update_production_vault(production, vault_password, remove=(TRANSIT_TLS_VAULT_KEY,))
+    print(
+        "Production inventory обновлён: запасной транспорт выключен; службы и сторожа "
+        "транспорта на серверах снимет текущий deploy."
     )
     return True
 
@@ -5644,6 +5826,19 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--enable-fallback-transport",
+        action="store_true",
+        help=(
+            "при --resume включить запасной транспорт туннеля ENTRY - EXIT (TLS по TCP): "
+            "спросит имя для каждого EXIT; одновременно открыт один транспорт"
+        ),
+    )
+    parser.add_argument(
+        "--disable-fallback-transport",
+        action="store_true",
+        help="при --resume выключить запасной транспорт туннеля ENTRY - EXIT",
+    )
+    parser.add_argument(
         "--enable-ru-proxy",
         action="store_true",
         help=(
@@ -5935,9 +6130,21 @@ def main() -> None:
         or args.rollback_front_replacement
     ):
         parser.error("команды обслуживания нельзя объединять с другими режимами deploy")
-    if (args.enable_standby_exit or args.disable_standby_exit) and (
+    # Команды, которые спрашивают данные или подтверждение: каждая выполняется
+    # отдельным запуском.
+    exclusive_flags = [
+        name
+        for name, value in (
+            ("--enable-standby-exit", args.enable_standby_exit),
+            ("--disable-standby-exit", args.disable_standby_exit),
+            ("--enable-fallback-transport", args.enable_fallback_transport),
+            ("--disable-fallback-transport", args.disable_fallback_transport),
+        )
+        if value
+    ]
+    if exclusive_flags and (
         not args.resume
-        or (args.enable_standby_exit and args.disable_standby_exit)
+        or len(exclusive_flags) > 1
         or any(service_commands)
         or args.summary
         or args.terminal_only
@@ -5951,8 +6158,8 @@ def main() -> None:
         or args.rollback_front_replacement
     ):
         parser.error(
-            "--enable-standby-exit и --disable-standby-exit выполняются отдельным запуском: "
-            "kalimera-deploy --resume --enable-standby-exit"
+            f"{exclusive_flags[0]} выполняется отдельным запуском: "
+            f"kalimera-deploy --resume {exclusive_flags[0]}"
         )
     if any(service_commands) and not (production / "hosts.yml").is_file():
         fail("Не найден production inventory; сначала выполните установку")
@@ -6057,6 +6264,10 @@ def main() -> None:
             enable_standby_exit(production, vault_password)
         if args.disable_standby_exit:
             disable_standby_exit(production, vault_password)
+        if args.enable_fallback_transport:
+            enable_fallback_transport(production, vault_password)
+        if args.disable_fallback_transport:
+            disable_fallback_transport(production, vault_password)
         if args.replace_front:
             prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)
@@ -6351,6 +6562,18 @@ def main() -> None:
                 "Резервный EXIT отключён, каскад проверен. Зарубежный трафик идёт только "
                 "через основной EXIT. Отключённый сервер удалите у хостера или "
                 "переустановите на нём систему."
+            )
+        elif args.enable_fallback_transport:
+            print(
+                "Запасной транспорт туннеля установлен, каскад проверен. Сейчас туннель "
+                "идёт прямым транспортом: запасной не слушает и закрыт, пока прямой "
+                "работает. Состояние на ENTRY: exit-path status; на EXIT: transport-guard "
+                "status. Описание и проверка: docs/fallback-transport.md."
+            )
+        elif args.disable_fallback_transport:
+            print(
+                "Запасной транспорт туннеля выключен, каскад проверен. На EXIT остался "
+                "один прямой транспорт."
             )
         elif (
             args.enable_ru_proxy

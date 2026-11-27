@@ -1,0 +1,22 @@
+[Unit]
+Description=KalimeraWG: сторож транспорта туннеля ENTRY - EXIT
+After=awg-quick@{{ exit_awg_interface }}.service ufw.service
+ConditionPathExists={{ transport_guard_config_dir }}/config.json
+
+[Service]
+Type=oneshot
+ExecStart={{ transport_guard_script_path }} tick
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/run -{{ transport_guard_active_file | dirname }}
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0022
+TimeoutStartSec=120

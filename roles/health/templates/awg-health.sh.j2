@@ -1160,6 +1160,18 @@ check 'входящий TCP MSS EXIT сервера' iptables -w 10 -t mangle -C
 check 'рекурсивный DNS EXIT сервера активен' systemctl is-active --quiet unbound.service
 check 'рекурсивный DNS EXIT сервера отвечает' dns_resolves_a {{ exit_awg_address | ansible.utils.ipaddr('address') | quote }} example.com
 {% endif %}
+{% if transit_tls_enabled | default(false) | bool %}
+# Запасной транспорт туннеля: сторож держит открытым ровно один транспорт. Какой
+# именно - зависит от того, что проходит между хостингами, и ошибкой не является.
+transport_guard_keeps_one_open() {
+    local chain={{ transport_guard_chain | default('KALIMERA-TRANSPORT') | quote }} rules
+    iptables -w 10 -C INPUT -j "$chain" 2>/dev/null || return 1
+    rules="$(iptables -w 10 -S "$chain" 2>/dev/null)" || return 1
+    [[ "$(grep -c -- ' -j ACCEPT$' <<<"$rules")" == 1 ]]
+}
+check 'таймер сторожа транспорта' systemctl is-active --quiet {{ transport_guard_timer_name | default('kalimera-transport-guard.timer') | quote }}
+check 'сторож транспорта держит открытым один транспорт туннеля' transport_guard_keeps_one_open
+{% endif %}
 {% elif awg_node_role == 'front' %}
 nginx_no_logs_policy_is_active() {
     local effective

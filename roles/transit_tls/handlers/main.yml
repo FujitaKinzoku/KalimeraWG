@@ -1,0 +1,20 @@
+---
+- name: Перечитать модули systemd запасного транспорта
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# try-restart: служба перезапускается, только если работает. Запасной транспорт
+# запускается по запросу ENTRY, и обновление конфигурации не должно его открывать.
+- name: Перезапустить работающий запасной транспорт EXIT
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, try-restart, "{{ transit_tls_service_name }}"]
+  changed_when: true
+
+- name: Перезапустить работающий запасной транспорт ENTRY
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/systemctl
+      - try-restart
+      - "{{ transit_tls_client_unit | replace('@.service', '@primary.service') }}"
+      - "{{ transit_tls_client_unit | replace('@.service', '@standby.service') }}"
+  changed_when: true

@@ -1,0 +1,27 @@
+{{ {
+  'peer_ipv4': security_interserver_peer_ipv4,
+  'wan_interface': exit_wan_interface,
+  'awg_interface': exit_awg_interface,
+  'chain': transport_guard_chain,
+  'transports': [
+    {
+      'name': 'awg',
+      'label': 'прямой, AmneziaWG по UDP',
+      'proto': 'udp',
+      'port': exit_awg_listen_port | int
+    },
+    {
+      'name': 'tls',
+      'label': 'запасной, внутри TLS по TCP',
+      'proto': 'tcp',
+      'port': transit_tls_port | int,
+      'service': transit_tls_service_name
+    }
+  ],
+  'idle_seconds': transport_guard_idle_seconds | int,
+  'knock_packets': transport_guard_knock_packets | int,
+  'knock_fresh_seconds': transport_guard_knock_fresh_seconds | int,
+  'boot_grace_seconds': transport_guard_boot_grace_seconds | int,
+  'state_dir': transport_guard_state_dir,
+  'active_file': transport_guard_active_file
+} | to_nice_json(ensure_ascii=False) }}

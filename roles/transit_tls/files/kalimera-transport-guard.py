@@ -15,7 +15,9 @@
 
   * ENTRY выключен или перезагружается - стука нет, ничего не меняется;
   * транспорт заблокирован - пакеты по нему не приходят, а стук в другой есть;
-  * работающий транспорт закрыть стуком нельзя, в том числе подделав адрес ENTRY.
+  * работающий транспорт закрыть стуком нельзя, в том числе подделав адрес ENTRY;
+  * первые минуты после загрузки самого EXIT транспорт не меняется: ENTRY за это
+    время успевает попробовать прямой.
 
 Действующий транспорт хранится в /var/lib и переживает перезагрузку EXIT.
 """
@@ -65,6 +67,11 @@ class Config:
         # и сколько секунд стук остаётся свежим.
         self.knock_packets = int(document.get("knock_packets", 2))
         self.knock_fresh_seconds = int(document.get("knock_fresh_seconds", 30))
+        # Сколько секунд после загрузки сервера транспорт не меняется. Пока EXIT
+        # перезагружался, ENTRY не мог отличить это от блокировки и пробует оба
+        # транспорта по очереди. За это время он успевает попробовать прямой, и
+        # каскад не уходит на запасной транспорт из-за одной перезагрузки.
+        self.boot_grace_seconds = int(document.get("boot_grace_seconds", 300))
         self.state_dir = Path(document["state_dir"])
         self.active_file = Path(document["active_file"])
         if self.idle_seconds < 1 or self.knock_packets < 1:
@@ -118,6 +125,9 @@ def empty_state(cfg: Config, now: int) -> dict:
         "rx": None,
         "knock_at": {},
         "last_switch": None,
+        # Состояние лежит в /run и после перезагрузки создаётся заново: это время
+        # и есть момент загрузки для сторожа.
+        "booted": now,
     }
 
 
@@ -129,7 +139,7 @@ def read_state(cfg: Config, now: int) -> dict:
         return state
     if not isinstance(saved, dict) or saved.get("active") not in cfg.names():
         return state
-    for key in ("active", "since", "last_contact", "rx", "last_switch"):
+    for key in ("active", "since", "last_contact", "rx", "last_switch", "booted"):
         if key in saved:
             state[key] = saved[key]
     if isinstance(saved.get("knock_at"), dict):
@@ -244,6 +254,8 @@ def set_services(cfg: Config, active: str) -> None:
 def decide(cfg: Config, state: dict, now: int) -> str:
     """Какой транспорт должен быть открыт. Возвращает имя; прежнее - без перемен."""
     active = state["active"]
+    if now - int(state.get("booted") or 0) < cfg.boot_grace_seconds:
+        return active
     if now - int(state["last_contact"]) < cfg.idle_seconds:
         return active
     for name in cfg.names():

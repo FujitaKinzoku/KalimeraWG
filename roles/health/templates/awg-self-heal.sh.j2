@@ -118,6 +118,11 @@ classify() {
             plan_action=transit_standby ;;
         'таймер переключателя путей EXIT')
             plan_action=timer_exit_path ;;
+        'таймер сторожа транспорта')
+            plan_action=timer_transport_guard ;;
+        'сторож транспорта держит открытым один транспорт туннеля')
+            # Цепочку межсетевого экрана собирает сам сторож: достаточно его запустить.
+            plan_action=transport_guard_run ;;
         'служба AWG 3+ EXIT сервера'|'служба AWG EXIT сервера'|'интерфейс AWG EXIT сервера'|'состояние AWG 3+ EXIT сервера доступно'|'состояние AWG EXIT сервера доступно'|'свежий handshake EXIT–ENTRY')
             plan_action=transit ;;
         'ограниченный NAT EXIT сервера'|'изоляция клиентов EXIT сервера'|'исходящий TCP MSS EXIT сервера'|'входящий TCP MSS EXIT сервера')
@@ -194,8 +199,13 @@ classify_unit() {
     case "$1" in
         awg-maintenance.service)
             plan_action=unit_maintenance ;;
-        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|kalimera-exit-path.service|certbot.service|awg-local-peer-apply.service)
+        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|kalimera-exit-path.service|kalimera-transport-guard.service|certbot.service|awg-local-peer-apply.service)
             plan_action="unit_rerun:$1" ;;
+        kalimera-transit-tls.service|kalimera-transit-tls@*.service)
+            # Службу запасного транспорта запускают сторож транспорта на EXIT и
+            # переключатель путей на ENTRY, и только когда транспорт нужен. Здесь
+            # лишь снимается отметка о сбое: запуск открыл бы закрытый транспорт.
+            plan_action="unit_reset:$1" ;;
         *)
             plan_reason="manual:причина: sudo journalctl -u $1 -b --no-pager" ;;
     esac
@@ -223,7 +233,8 @@ readonly -a action_order=(
     mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
     domain_sync dnsmasq
     front_backend xray vless_sync nginx certbot
-    timer_audit timer_telegram timer_self timer_proxy_watch timer_exit_path unit_maintenance
+    timer_audit timer_telegram timer_self timer_proxy_watch timer_exit_path
+    timer_transport_guard transport_guard_run unit_maintenance
 )
 
 action_title() {
@@ -258,9 +269,11 @@ action_title() {
         vless_sync) echo 'синхронизация пользователей VLESS с Xray' ;;
         nginx) echo 'перезапуск Nginx' ;;
         certbot) echo 'продление TLS-сертификата' ;;
-        timer_audit|timer_telegram|timer_self|timer_proxy_watch|timer_exit_path) echo 'включение таймера' ;;
+        timer_audit|timer_telegram|timer_self|timer_proxy_watch|timer_exit_path|timer_transport_guard) echo 'включение таймера' ;;
+        transport_guard_run) echo 'запуск сторожа транспорта' ;;
         unit_maintenance) echo 'повторный запуск ночного обслуживания' ;;
         unit_rerun:*) echo "повторный запуск ${1#unit_rerun:}" ;;
+        unit_reset:*) echo "снятие отметки о сбое ${1#unit_reset:}" ;;
         *) echo "$1" ;;
     esac
 }
@@ -299,6 +312,9 @@ run_action() {
         unit_rerun:*)
             systemctl reset-failed "${1#unit_rerun:}" 2>/dev/null || true
             systemctl start --no-block "${1#unit_rerun:}"
+            ;;
+        unit_reset:*)
+            systemctl reset-failed "${1#unit_reset:}"
             ;;
         unit_maintenance)
             # Обслуживание идёт минуты и само повторяет аудит: результат виден в
@@ -377,6 +393,13 @@ run_action() {
         transit) restart_unit {{ awg3_transit_service_name | default('awg3-transit.service') | quote }} ;;
 {% else %}
         transit) restart_unit awg-quick@{{ exit_awg_interface | default('awg3') }}.service ;;
+{% endif %}
+{% if transit_tls_enabled | default(false) | bool %}
+        timer_transport_guard) systemctl enable --now {{ transport_guard_timer_name | default('kalimera-transport-guard.timer') | quote }} ;;
+        transport_guard_run)
+            systemctl reset-failed {{ transport_guard_service_name | default('kalimera-transport-guard.service') | quote }} 2>/dev/null || true
+            systemctl start {{ transport_guard_service_name | default('kalimera-transport-guard.service') | quote }}
+            ;;
 {% endif %}
 {% endif %}
 {% if awg_node_role | default('') == 'front' %}
