@@ -314,10 +314,16 @@ class TemplateTests(unittest.TestCase):
         )
         self.assertEqual(cfg.transports("standby")[1]["endpoint"], "127.0.0.1:20444")
         self.assertEqual(cfg.transport_retest_hour, 1)
+        # Цепочка, которой ENTRY закрывает у себя прямой транспорт пути на запасном:
+        # то же имя снимает роль при выключении запасного транспорта.
+        self.assertEqual(cfg.transport_chain, role_defaults()["transit_tls_entry_chain"])
+        self.assertEqual(cfg.transport_chain, "KALIMERA-TRANSIT")
+        self.assertNotEqual(cfg.transport_chain, role_defaults()["transport_guard_chain"])
         # Без запасного транспорта настройки прежние.
         plain = json.loads(render(template, **variables))
         self.assertNotIn("transports", plain["paths"][0])
         self.assertNotIn("transport_retest_hour_utc", plain)
+        self.assertNotIn("transport_chain", plain)
 
 
 class RoleTests(unittest.TestCase):
@@ -461,9 +467,29 @@ class RoleTests(unittest.TestCase):
             "Удаление цепочки сторожа транспорта",
             "Удаление файлов отключённого запасного транспорта EXIT",
             "Остановка отключённого запасного транспорта ENTRY",
+            "Удаление цепочки, закрывавшей прямой транспорт на ENTRY",
             "Удаление файлов отключённого запасного транспорта ENTRY",
         ):
             self.assertIn(expected, names)
+        # Оставшаяся цепочка держала бы прямой транспорт закрытым: она снимается из
+        # обеих цепочек, куда её подключает переключатель путей.
+        cleanup = next(
+            task for task in self.tasks
+            if task["name"] == "Удаление цепочки, закрывавшей прямой транспорт на ENTRY"
+        )
+        script = cleanup["ansible.builtin.shell"]
+        self.assertIn("chain={{ transit_tls_entry_chain | quote }}", script)
+        self.assertIn("for hook in INPUT OUTPUT; do", script)
+        self.assertIn('iptables -w 10 -X "$chain"', script)
+        self.assertEqual(
+            cleanup["when"],
+            [
+                "not (transit_tls_enabled | bool)",
+                "awg_node_role == 'entry'",
+                "transit_tls_stale_client.stat.exists",
+            ],
+        )
+        self.assertEqual(tuple(selector.TRANSPORT_HOOKS), ("INPUT", "OUTPUT"))
 
     def test_role_runs_before_the_selector_on_entry_and_on_every_exit(self) -> None:
         site = (ROOT / "playbooks" / "site.yml").read_text(encoding="utf-8")

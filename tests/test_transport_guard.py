@@ -381,10 +381,10 @@ class BootGraceTests(GuardCase):
         # стучится в TCP: без отсрочки сторож открыл бы запасной транспорт, и
         # каскад остался бы на нём, хотя прямой путь исправен.
         self.tick()
-        for _ in range(11):
+        for _ in range(15):
             self.server.knock("tls")
             state = self.tick()
-        self.assertEqual(state["active"], "awg", "110 с стука сразу после загрузки")
+        self.assertEqual(state["active"], "awg", "150 с стука сразу после загрузки")
         # ENTRY перешёл к прямому транспорту: туннель поднялся, стук прекратился.
         state = self.healthy_ticks(30)
         self.assertEqual(state["active"], "awg")

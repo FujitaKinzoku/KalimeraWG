@@ -472,6 +472,26 @@
     - awg_node_role == 'entry'
     - transit_tls_stale_client.stat.exists
 
+# Переключатель путей снимает цепочку сам, когда путь возвращается на прямой
+# транспорт, а выключение отказывает, пока туннель идёт запасным. Здесь - на
+# случай, если она всё же осталась: с ней прямой транспорт был бы закрыт.
+- name: Удаление цепочки, закрывавшей прямой транспорт на ENTRY
+  ansible.builtin.shell: |
+    set -u
+    chain={{ transit_tls_entry_chain | quote }}
+    for hook in INPUT OUTPUT; do
+      while iptables -w 10 -D "$hook" -j "$chain" 2>/dev/null; do :; done
+    done
+    iptables -w 10 -F "$chain" 2>/dev/null || true
+    iptables -w 10 -X "$chain" 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'entry'
+    - transit_tls_stale_client.stat.exists
+
 - name: Удаление файлов отключённого запасного транспорта ENTRY
   ansible.builtin.file:
     path: "{{ item }}"

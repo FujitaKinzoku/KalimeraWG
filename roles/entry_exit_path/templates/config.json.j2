@@ -22,8 +22,11 @@
    'endpoint': '127.0.0.1:' ~ local_ports.standby,
    'service': client_unit | replace('@.service', '@standby.service')}
 ]} if tls else {} %}
-{% set transport_extra = {'transport_retest_hour_utc': retest_hour | int}
+{% set retest_extra = {'transport_retest_hour_utc': retest_hour | int}
    if (tls and retest_hour is not none and retest_hour | string | length > 0) else {} %}
+{# Цепочка, которой ENTRY закрывает у себя прямой транспорт пути на запасном. #}
+{% set transport_extra = dict({'transport_chain': transit_tls_entry_chain | default('KALIMERA-TRANSIT')},
+                              **retest_extra) if tls else {} %}
 {{ dict({
   'paths': [
     dict({

@@ -53,6 +53,9 @@ REASON_DRILL_END = "учебное переключение завершено"
 REASON_RETEST = "проверка прямого транспорта"
 REASON_TRANSPORT_DRILL = "учебный переход на запасной транспорт"
 REASON_TRANSPORT_DRILL_END = "учебный переход на запасной транспорт завершён"
+IPTABLES = ("iptables", "-w", "10")
+# Цепочка, закрывающая прямой транспорт, подключается в начало обеих цепочек.
+TRANSPORT_HOOKS = ("INPUT", "OUTPUT")
 
 
 class Config:
@@ -82,14 +85,21 @@ class Config:
         self.notify_command = [str(part) for part in document.get("notify_command", [])]
         # Транспорты туннеля (см. раздел "Транспорт" ниже). Работавший транспорт
         # меняется после стольких секунд без ответа; только что выбранному даётся
-        # больше: сторож на EXIT открывает его не сразу.
+        # больше: сторож на EXIT открывает его не сразу. Сторожу нужно 75 с
+        # молчания прежнего транспорта, и считает он их своими проверками раз в
+        # 10 с - до 95 с; затем handshake туннеля и ближайшая проверка здесь. При
+        # 110 с запаса не оставалось вовсе, и одна потерянная секунда возвращала бы
+        # путь на прежний транспорт.
         self.transport_fail_seconds = int(document.get("transport_fail_seconds", 60))
-        self.transport_trial_seconds = int(document.get("transport_trial_seconds", 110))
+        self.transport_trial_seconds = int(document.get("transport_trial_seconds", 150))
         # Как часто путь на запасном транспорте проверяет прямой, пока не несёт
         # трафик, и в какой час по UTC это делает путь, который трафик несёт.
         self.transport_retest_seconds = int(document.get("transport_retest_seconds", 1800))
         hour = document.get("transport_retest_hour_utc")
         self.transport_retest_hour = None if hour is None else int(hour)
+        # Цепочка межсетевого экрана, которой ENTRY закрывает у себя прямой
+        # транспорт пути, пока тот идёт запасным.
+        self.transport_chain = str(document.get("transport_chain", "KALIMERA-TRANSIT"))
         if not self.targets or not (1 <= self.quorum <= len(self.targets)):
             raise ValueError("число ответивших адресов должно быть от 1 до числа адресов")
         if self.fail_threshold < 1 or self.failback_seconds < 0:
@@ -328,7 +338,9 @@ def path_is_healthy(state: dict, name: str) -> bool:
 #   * путь на запасном транспорте время от времени проверяет прямой: пока не
 #     несёт трафик - каждые transport_retest_seconds, иначе в назначенный час
 #     или по команде exit-path retest, потому что проверка прерывает связь;
-#   * прямой транспорт на любом сервере предпочтительнее запасного.
+#   * прямой транспорт на любом сервере предпочтительнее запасного;
+#   * пока путь идёт запасным транспортом, прямой закрыт и на ENTRY: иначе
+#     пакеты EXIT возвращали бы туннель на прямой (см. closed_transport_rules).
 
 
 def transport_rank(cfg: Config, state: dict, name: str) -> int:
@@ -412,12 +424,102 @@ def ensure_transport(cfg: Config, name: str, transport: str) -> None:
         run_quiet(["awg", "set", cfg.interface(name), "peer", key, "endpoint", wanted])
 
 
+def closed_transport_rules(cfg: Config, state: dict) -> list[list[str]]:
+    """Правила, которыми ENTRY закрывает у себя прямой транспорт путей на запасном.
+
+    Туннель отправляет пакеты туда, откуда пришёл последний подлинный пакет пира.
+    Пока сторож на EXIT не открыл запасной транспорт, EXIT продолжает слать пакеты
+    напрямую - хвосты прежних соединений, keepalive, - и каждый такой пакет
+    возвращал адрес пира на прямой транспорт. Найдено на рабочем каскаде: во
+    время учебного перехода путь всё время отвечал напрямую, ENTRY показывал
+    запасной транспорт, а сторож на EXIT так и не увидел, что открытый молчит.
+
+    Поэтому прямой транспорт пути закрыт здесь в обе стороны, пока путь идёт
+    запасным: входящие пакеты не трогают адрес пира, а исходящие не уходят на
+    EXIT двумя транспортами сразу, даже в секунды после перезапуска интерфейса.
+    """
+    rules: list[list[str]] = []
+    for name in PATH_NAMES:
+        names = cfg.transport_names(name)
+        current = state["paths"][name].get("transport")
+        if not names or current not in names or current == names[0]:
+            continue
+        host, _, port = str(cfg.transport(name, names[0])["endpoint"]).rpartition(":")
+        rules.append(["-s", host, "-p", "udp", "--sport", port, "-j", "DROP"])
+        rules.append(["-d", host, "-p", "udp", "--dport", port, "-j", "DROP"])
+    return rules
+
+
+def chain_rules(chain: str) -> list[str] | None:
+    """Правила цепочки межсетевого экрана; None, если цепочки нет."""
+    try:
+        result = subprocess.run(
+            [*IPTABLES, "-S", chain], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return [line for line in result.stdout.splitlines() if line.startswith("-A ")]
+
+
+def unhook_chain(hook: str, chain: str) -> None:
+    for _ in range(8):
+        if run_quiet([*IPTABLES, "-D", hook, "-j", chain]) != 0:
+            return
+
+
+def transport_firewall_matches(cfg: Config, rules: list[list[str]]) -> bool:
+    chain = cfg.transport_chain
+    present = chain_rules(chain)
+    if present is None or len(present) != len(rules):
+        return False
+    if any(run_quiet([*IPTABLES, "-C", chain, *rule]) != 0 for rule in rules):
+        return False
+    # Цепочка стоит первой: раньше правил UFW, которые принимают ответные пакеты.
+    for hook in TRANSPORT_HOOKS:
+        hooked = chain_rules(hook)
+        if not hooked or hooked[0].split() != ["-A", hook, "-j", chain]:
+            return False
+    return True
+
+
+def sync_transport_firewall(cfg: Config, state: dict) -> bool:
+    """Привести правила ENTRY к транспортам путей.
+
+    Выполняется при каждой проверке: цепочку могла сбросить пересборка
+    межсетевого экрана. Когда все пути идут прямым транспортом, цепочки нет.
+    Возвращает False, если правила применить не удалось.
+    """
+    chain = cfg.transport_chain
+    rules = closed_transport_rules(cfg, state)
+    if not rules:
+        if chain_rules(chain) is not None:
+            for hook in TRANSPORT_HOOKS:
+                unhook_chain(hook, chain)
+            run_quiet([*IPTABLES, "-F", chain])
+            run_quiet([*IPTABLES, "-X", chain])
+        return True
+    if transport_firewall_matches(cfg, rules):
+        return True
+    run_quiet([*IPTABLES, "-N", chain])
+    done = run_quiet([*IPTABLES, "-F", chain]) == 0
+    for rule in rules:
+        done = run_quiet([*IPTABLES, "-A", chain, *rule]) == 0 and done
+    for hook in TRANSPORT_HOOKS:
+        unhook_chain(hook, chain)
+        done = run_quiet([*IPTABLES, "-I", hook, "1", "-j", chain]) == 0 and done
+    return done
+
+
 def manage_transports(cfg: Config, state: dict, now: int) -> None:
     held = deploy_in_progress(cfg, now)
+    managed: list[str] = []
     for name in PATH_NAMES:
         names = cfg.transport_names(name)
         if not names:
             continue
+        managed.append(name)
         entry = state["paths"][name]
         if entry.get("transport") not in names:
             entry.update({"transport": names[0], "transport_since": now, "transport_ok": True})
@@ -453,7 +555,14 @@ def manage_transports(cfg: Config, state: dict, now: int) -> None:
             # О плановой проверке прямого транспорта и об учениях не сообщается.
             if reason not in (REASON_RETEST, REASON_TRANSPORT_DRILL, REASON_TRANSPORT_DRILL_END):
                 notify(cfg, message)
-        ensure_transport(cfg, name, entry["transport"])
+    if not managed:
+        return
+    # Сначала правила, потом адрес пира: пакет EXIT, пришедший между ними, вернул
+    # бы туннель на прямой транспорт до следующей проверки.
+    if not sync_transport_firewall(cfg, state):
+        log("правила, закрывающие прямой транспорт на ENTRY, применить не удалось")
+    for name in managed:
+        ensure_transport(cfg, name, state["paths"][name]["transport"])
 
 
 def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
@@ -923,7 +1032,7 @@ def command_retest(cfg: Config, _args: argparse.Namespace) -> int:
     tick(cfg)
     names = ", ".join(cfg.label(name) for name in waiting)
     print(
-        f"Проверка прямого транспорта начата: {names}. Она занимает до двух минут; путь, "
+        f"Проверка прямого транспорта начата: {names}. Она занимает до трёх минут; путь, "
         "который несёт трафик, на это время прерывается. Результат: exit-path status"
     )
     return 0
