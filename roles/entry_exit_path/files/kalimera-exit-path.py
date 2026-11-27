@@ -77,6 +77,16 @@ class Config:
         self.hold_file = Path(document["hold_file"]) if document.get("hold_file") else None
         self.dns_via_exit = bool(document.get("dns_via_exit", False))
         self.notify_command = [str(part) for part in document.get("notify_command", [])]
+        # Транспорты туннеля (см. раздел "Транспорт" ниже). Работавший транспорт
+        # меняется после стольких секунд без ответа; только что выбранному даётся
+        # больше: сторож на EXIT открывает его не сразу.
+        self.transport_fail_seconds = int(document.get("transport_fail_seconds", 60))
+        self.transport_trial_seconds = int(document.get("transport_trial_seconds", 110))
+        # Как часто путь на запасном транспорте проверяет прямой, пока не несёт
+        # трафик, и в какой час по UTC это делает путь, который трафик несёт.
+        self.transport_retest_seconds = int(document.get("transport_retest_seconds", 1800))
+        hour = document.get("transport_retest_hour_utc")
+        self.transport_retest_hour = None if hour is None else int(hour)
         if not self.targets or not (1 <= self.quorum <= len(self.targets)):
             raise ValueError("число ответивших адресов должно быть от 1 до числа адресов")
         if self.fail_threshold < 1 or self.failback_seconds < 0:
@@ -87,6 +97,20 @@ class Config:
 
     def label(self, name: str) -> str:
         return str(self.paths[name].get("label", name))
+
+    def transports(self, name: str) -> list[dict]:
+        """Транспорты пути по порядку предпочтения; пусто, если транспорт один."""
+        items = self.paths[name].get("transports") or []
+        return items if len(items) >= 2 else []
+
+    def transport_names(self, name: str) -> list[str]:
+        return [str(item["name"]) for item in self.transports(name)]
+
+    def transport(self, name: str, transport: str) -> dict:
+        return next(item for item in self.transports(name) if item["name"] == transport)
+
+    def transport_label(self, name: str, transport: str) -> str:
+        return str(self.transport(name, transport).get("label", transport))
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
@@ -107,6 +131,14 @@ def empty_state() -> dict:
                 "checked": 0,
                 "rtt_ms": None,
                 "quality": [],
+                # Транспорт туннеля: какой выбран, с какого времени, отвечал ли путь
+                # с тех пор, когда начались неудачи и когда проверять прямой.
+                "transport": None,
+                "transport_since": 0,
+                "transport_ok": True,
+                "fail_since": None,
+                "retest_at": 0,
+                "retest_now": False,
             }
             for name in PATH_NAMES
         },
@@ -244,9 +276,13 @@ def record_probe(
     entry["checked"] = now
     if len(answered) >= cfg.quorum:
         entry["fail"] = 0
+        entry["fail_since"] = None
+        entry["transport_ok"] = True
         if entry["healthy_since"] is None:
             entry["healthy_since"] = now
     else:
+        if int(entry["fail"]) == 0:
+            entry["fail_since"] = now
         entry["fail"] = int(entry["fail"]) + 1
         entry["healthy_since"] = None
     # Задержка пути - самое быстрое подключение без повторной отправки.
@@ -276,6 +312,135 @@ def path_is_healthy(state: dict, name: str) -> bool:
     return entry["healthy_since"] is not None and int(entry["fail"]) == 0
 
 
+# --- Транспорт туннеля ---
+#
+# Туннель до EXIT идёт одним из транспортов: напрямую по UDP либо внутри TLS по
+# TCP. На EXIT открыт только один; сторож транспорта открывает тот, в который
+# ENTRY стучится, когда открытый молчит. Поэтому ENTRY достаточно направить
+# туннель в нужный транспорт и подождать.
+#
+#   * путь перестал отвечать - через transport_fail_seconds пробуется следующий
+#     транспорт; только что выбранному даётся transport_trial_seconds;
+#   * путь на запасном транспорте время от времени проверяет прямой: пока не
+#     несёт трафик - каждые transport_retest_seconds, иначе в назначенный час
+#     или по команде exit-path retest, потому что проверка прерывает связь;
+#   * прямой транспорт на любом сервере предпочтительнее запасного.
+
+
+def transport_rank(cfg: Config, state: dict, name: str) -> int:
+    """0 - путь на прямом транспорте (или транспорт у него один), больше - на запасном."""
+    names = cfg.transport_names(name)
+    current = state["paths"][name].get("transport")
+    return names.index(current) if current in names else 0
+
+
+def retest_due(cfg: Config, state: dict, name: str, now: int) -> bool:
+    entry = state["paths"][name]
+    if entry.get("retest_now"):
+        return True
+    if state["active"] != name:
+        return now >= int(entry.get("retest_at") or 0)
+    # Путь несёт трафик: проверка прямого транспорта прерывает связь, поэтому она
+    # идёт в назначенный час и не чаще раза за него.
+    return (
+        cfg.transport_retest_hour is not None
+        and time.gmtime(now).tm_hour == cfg.transport_retest_hour
+        and now - int(entry.get("transport_since") or 0) >= 3600
+    )
+
+
+def choose_transport(cfg: Config, state: dict, name: str, now: int) -> tuple[str, str]:
+    """Каким транспортом идти пути. Причина пуста, если транспорт прежний."""
+    entry = state["paths"][name]
+    names = cfg.transport_names(name)
+    current = entry["transport"]
+    if int(entry["fail"]) > 0:
+        if entry.get("transport_ok"):
+            since, limit = entry.get("fail_since"), cfg.transport_fail_seconds
+        else:
+            since, limit = entry.get("transport_since"), cfg.transport_trial_seconds
+        if since is not None and now - int(since) >= limit:
+            return names[(names.index(current) + 1) % len(names)], "путь не отвечает"
+        return current, ""
+    if current != names[0] and retest_due(cfg, state, name, now):
+        return names[0], "проверка прямого транспорта"
+    return current, ""
+
+
+def tunnel_endpoint(cfg: Config, name: str) -> tuple[str, str]:
+    """Ключ пира туннеля и адрес, на который интерфейс отправляет пакеты."""
+    try:
+        output = subprocess.run(
+            ["awg", "show", cfg.interface(name), "endpoints"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    for line in output.splitlines():
+        words = line.split()
+        if len(words) == 2:
+            return words[0], words[1]
+    return "", ""
+
+
+def ensure_transport(cfg: Config, name: str, transport: str) -> None:
+    """Привести туннель пути к выбранному транспорту: служба и адрес пира.
+
+    Выполняется при каждой проверке: адрес пира возвращает к значению из
+    конфигурации любой перезапуск интерфейса, например во время deploy.
+    """
+    for item in cfg.transports(name):
+        unit = str(item.get("service") or "")
+        if not unit:
+            continue
+        running = run_quiet(["systemctl", "is-active", "--quiet", unit]) == 0
+        if item["name"] == transport and not running:
+            run_quiet(["systemctl", "start", unit], timeout=60)
+        elif item["name"] != transport and running:
+            run_quiet(["systemctl", "stop", unit], timeout=60)
+    key, endpoint = tunnel_endpoint(cfg, name)
+    wanted = str(cfg.transport(name, transport)["endpoint"])
+    if key and endpoint != wanted:
+        run_quiet(["awg", "set", cfg.interface(name), "peer", key, "endpoint", wanted])
+
+
+def manage_transports(cfg: Config, state: dict, now: int) -> None:
+    held = deploy_in_progress(cfg, now)
+    for name in PATH_NAMES:
+        names = cfg.transport_names(name)
+        if not names:
+            continue
+        entry = state["paths"][name]
+        if entry.get("transport") not in names:
+            entry.update({"transport": names[0], "transport_since": now, "transport_ok": True})
+        # Во время deploy интерфейсы перезапускаются: транспорт не меняется, только
+        # восстанавливается.
+        target, reason = (entry["transport"], "") if held else choose_transport(cfg, state, name, now)
+        if target != entry["transport"]:
+            previous = entry["transport"]
+            # Устойчивость пути считается заново: на новом транспорте он ещё не отвечал.
+            entry.update(
+                {
+                    "transport": target,
+                    "transport_since": now,
+                    "transport_ok": False,
+                    "retest_now": False,
+                    "healthy_since": None,
+                }
+            )
+            if target != names[0]:
+                entry["retest_at"] = now + cfg.transport_retest_seconds
+            message = (
+                f"{cfg.label(name)}: транспорт туннеля {cfg.transport_label(name, previous)} → "
+                f"{cfg.transport_label(name, target)}. Причина: {reason}."
+            )
+            log(message)
+            # О проверке прямого транспорта не сообщается: она идёт по расписанию.
+            if reason != "проверка прямого транспорта":
+                notify(cfg, message)
+        ensure_transport(cfg, name, entry["transport"])
+
+
 def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
     """Выбрать путь. Возвращает имя пути и причину; причина пуста, если путь прежний."""
     active = state["active"]
@@ -287,14 +452,28 @@ def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
     # перестал отвечать, действует обычное правило ниже и учение прекращается.
     if int(state.get("drill_until") or 0) > now and int(standby["fail"]) < cfg.fail_threshold:
         return STANDBY, ("учебное переключение" if active != STANDBY else "")
+    primary_rank = transport_rank(cfg, state, PRIMARY)
+    standby_rank = transport_rank(cfg, state, STANDBY)
     if active == PRIMARY:
         if int(primary["fail"]) >= cfg.fail_threshold and path_is_healthy(state, STANDBY):
             return STANDBY, "основной путь не отвечает"
+        # Основной путь держится на запасном транспорте, а резервный сервер
+        # устойчиво отвечает по прямому: прямой быстрее.
+        if (
+            primary_rank > standby_rank
+            and path_is_healthy(state, STANDBY)
+            and now - int(standby["healthy_since"]) >= cfg.failback_seconds
+        ):
+            return STANDBY, "основной путь работает через запасной транспорт"
         return PRIMARY, ""
     if int(standby["fail"]) >= cfg.fail_threshold and path_is_healthy(state, PRIMARY):
         return PRIMARY, "резервный путь не отвечает"
     healthy_since = primary["healthy_since"]
-    if healthy_since is not None and now - int(healthy_since) >= cfg.failback_seconds:
+    if (
+        healthy_since is not None
+        and now - int(healthy_since) >= cfg.failback_seconds
+        and primary_rank <= standby_rank
+    ):
         return PRIMARY, REASON_FAILBACK
     return STANDBY, ""
 
@@ -459,6 +638,7 @@ def tick(cfg: Config, now: int | None = None) -> dict:
     mode = read_mode(cfg)
     for name in PATH_NAMES:
         record_probe(state, name, probe_path(cfg, name), cfg, now)
+    manage_transports(cfg, state, now)
     drill_ended = 0 < int(state.get("drill_until") or 0) <= now
     if drill_ended:
         state["drill_until"] = 0
@@ -523,6 +703,29 @@ def quality_text(cfg: Config, entry: dict, now: int) -> str:
     return "; ".join(parts)
 
 
+def transport_text(cfg: Config, state: dict, name: str, now: int) -> str:
+    """Каким транспортом идёт туннель пути; пусто, если транспорт у пути один."""
+    names = cfg.transport_names(name)
+    entry = state["paths"][name]
+    current = entry.get("transport")
+    if current not in names:
+        return ""
+    label = cfg.transport_label(name, current)
+    if current == names[0]:
+        return f"транспорт: {label}"
+    text = f"транспорт: {label} (запасной), {format_age(now - int(entry['transport_since']))}"
+    if state["active"] != name:
+        wait = int(entry.get("retest_at") or 0) - now
+        when = "при следующей проверке" if wait <= 0 else f"через {format_age(wait)}"
+        return f"{text}; прямой проверится {when}"
+    if cfg.transport_retest_hour is None:
+        return f"{text}; прямой проверяется по команде exit-path retest"
+    return (
+        f"{text}; прямой проверится в {cfg.transport_retest_hour:02d}:00 UTC "
+        "или по команде exit-path retest"
+    )
+
+
 def status_lines(cfg: Config, state: dict, mode: str, now: int) -> list[str]:
     active = state["active"]
     lines = [f"Зарубежный трафик идёт через: {cfg.label(active)} ({cfg.interface(active)})"]
@@ -553,6 +756,9 @@ def status_lines(cfg: Config, state: dict, mode: str, now: int) -> list[str]:
         lines.append(f"{cfg.label(name)} ({cfg.interface(name)}): {verdict}")
         if entry["reached"] is not None:
             lines.append(f"  {quality_text(cfg, entry, now)}")
+        transport = transport_text(cfg, state, name, now)
+        if transport:
+            lines.append(f"  {transport}")
     last = state.get("last_switch")
     if isinstance(last, dict) and last.get("at"):
         lines.append(
@@ -591,6 +797,18 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
             "проверочных адресов"
         )
         rows.append(("OK" if int(entry["fail"]) == 0 else "WARN", text))
+    # Запасной транспорт - работающий каскад, но уже без запаса: прямой путь до
+    # этого сервера не проходит.
+    for name in PATH_NAMES:
+        entry = state["paths"][name]
+        if int(entry["fail"]) == 0 and transport_rank(cfg, state, name) > 0:
+            rows.append(
+                (
+                    "WARN",
+                    f"{cfg.label(name)}: туннель идёт запасным транспортом "
+                    f"({cfg.transport_label(name, entry['transport'])}), прямой не проходит",
+                )
+            )
     if int(state.get("drill_until") or 0) > now:
         rows.append(("WARN", "идёт учебное переключение на резервный EXIT"))
     elif mode != "auto":
@@ -668,6 +886,29 @@ def command_drill(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def command_retest(cfg: Config, _args: argparse.Namespace) -> int:
+    """Проверить прямой транспорт на путях, которые идут запасным."""
+    state = read_state(cfg)
+    waiting = [
+        name
+        for name in PATH_NAMES
+        if cfg.transport_names(name) and transport_rank(cfg, state, name) > 0
+    ]
+    if not waiting:
+        print("Запасным транспортом не идёт ни один путь: проверять нечего.")
+        return 0
+    for name in waiting:
+        state["paths"][name]["retest_now"] = True
+    write_state(cfg, state)
+    tick(cfg)
+    names = ", ".join(cfg.label(name) for name in waiting)
+    print(
+        f"Проверка прямого транспорта начата: {names}. Она занимает до двух минут; путь, "
+        "который несёт трафик, на это время прерывается. Результат: exit-path status"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="exit-path",
@@ -684,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("auto", help="вернуть автоматический выбор пути")
     drill = commands.add_parser("drill", help="учебное переключение на резервный EXIT")
     drill.add_argument("--minutes", type=int, default=0, help="длительность, минут")
+    commands.add_parser("retest", help="проверить прямой транспорт, если туннель идёт запасным")
     args = parser.parse_args(argv)
     if args.command is None:
         args = parser.parse_args(["status"])
@@ -710,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
             "use": command_use,
             "auto": command_auto,
             "drill": command_drill,
+            "retest": command_retest,
         }[args.command]
         return handler(cfg, args)
 
