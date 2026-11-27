@@ -590,6 +590,74 @@ class GuardTests(SelfHealCase):
         self.assertIn("восстановлено: служба dnsmasq (перезапуск dnsmasq)", output)
         self.assertIn("выполнено: перезапуск dnsmasq", output)
 
+    # Найдено на рабочем каскаде: итог «сбоев 15, восстановлено 4, прошло без
+    # действия службы 11» не называл, что это были за сбои; журнал последних
+    # событий вмещал десять строк.
+
+    def test_status_lists_every_failure_of_the_period_with_its_time(self) -> None:
+        self.run_heal("--scheduled")
+        now = int(time.time())
+
+        def stamp(epoch: int) -> str:
+            return time.strftime("%Y-%m-%d %H:%M", time.gmtime(epoch))
+
+        (self.state_dir / "events").write_text(
+            # Запись старше недели в список не входит.
+            f"{now - 9 * 86400}\x1fCLEARED\x1fслужба Unbound\x1f\x1f{now - 9 * 86400 - 60}\n"
+            f"{now - 3600}\x1fREPAIRED\x1fFail2Ban активен\x1fперезапуск Fail2Ban\x1f{now - 3600 - 20}\n"
+            f"{now - 1800}\x1fCLEARED\x1fпрослушивание российского DoH\x1f\x1f{now - 1800 - 900}\n"
+            # Запись прежнего формата, без времени появления.
+            f"{now - 600}\x1fCLEARED\x1fсвежий handshake ENTRY–EXIT\x1f\n",
+            encoding="utf-8",
+        )
+        output = self.run_heal("status").stdout
+        self.assertIn("Итог: за 7 дней сбоев 3, восстановлено 1, прошло без действия службы 2.", output)
+        self.assertIn(
+            "Сбои за 7 дней после загрузки сервера, время UTC:\n"
+            f"  {stamp(now - 3600)}  восстановлено службой: Fail2Ban активен (перезапуск Fail2Ban); "
+            "держалось меньше минуты\n"
+            f"  {stamp(now - 1800)}  прошло без действия службы: прослушивание российского DoH; "
+            "держалось около 15 мин\n"
+            f"  {stamp(now - 600)}  прошло без действия службы: свежий handshake ENTRY–EXIT\n",
+            output,
+        )
+        self.assertNotIn("служба Unbound", output)
+        # В cascade-check прошедшие без действия службы тоже названы по имени.
+        _segment, status, label, value, _hint, _ms = self.report_row()
+        self.assertEqual(
+            (status, label),
+            ("OK", "самовосстановление: за 7 дней сбоев 3, восстановлено 1, прошло без действия службы 2"),
+        )
+        self.assertEqual(
+            value,
+            "Fail2Ban активен (перезапуск Fail2Ban); "
+            "прослушивание российского DoH (прошло без действия службы); "
+            "свежий handshake ENTRY–EXIT (прошло без действия службы)",
+        )
+
+    def test_failure_records_when_it_was_noticed(self) -> None:
+        # Ошибка держится два цикла и проходит без действия службы: длительность
+        # считается с первого цикла, а не с последнего.
+        self.health("last", "UFW соответствует последней управляемой политике")
+        self.run_heal("--scheduled")
+        first_seen = int((self.state_dir / "open").read_text(encoding="utf-8").split("\x1f")[0])
+        self.health("last")
+        self.run_heal("--scheduled")
+        fields = (self.state_dir / "events").read_text(encoding="utf-8").rstrip("\n").split("\x1f")
+        self.assertEqual(fields[1:4], ["CLEARED", "UFW соответствует последней управляемой политике", ""])
+        self.assertEqual(int(fields[4]), first_seen)
+        self.assertLessEqual(int(fields[4]), int(fields[0]))
+
+    def test_failure_repaired_in_the_same_cycle_is_timed_from_the_cycle_start(self) -> None:
+        self.health(1, "служба dnsmasq")
+        self.health(2, "служба dnsmasq")
+        started = int(time.time())
+        self.run_heal("--scheduled")
+        fields = (self.state_dir / "events").read_text(encoding="utf-8").rstrip("\n").split("\x1f")
+        self.assertEqual(fields[1:4], ["REPAIRED", "служба dnsmasq", "перезапуск dnsmasq"])
+        self.assertGreaterEqual(int(fields[4]), started)
+        self.assertLessEqual(int(fields[4]), int(fields[0]))
+
 
 class OwnProbeTests(SelfHealCase):
     """Проверки самой службы: место на диске и часы. В awg-health их нет."""

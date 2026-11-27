@@ -554,6 +554,51 @@
             entry_ru_proxy_enabled: "{{ rendered_entry_ru_proxy_enabled | bool }}"
             entry_ru_proxy_scope: all
 
+        # Резервный EXIT: второй туннель и переключатель путей. В примерном
+        # inventory его нет, поэтому ветви шаблонов формируются отдельно.
+        - name: Включение резервного EXIT для проверки шаблонов
+          ansible.builtin.set_fact:
+            entry_standby_exit_enabled: true
+            entry_standby_exit_interface: awg4
+
+        - name: Формирование программ ENTRY с резервным EXIT
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../{{ item.src }}"
+            dest: "{{ rendered_shell_root }}/{{ item.dest }}"
+            mode: "0700"
+          loop:
+            - src: roles/entry_routing/templates/awg-entry-routing.sh.j2
+              dest: awg-entry-routing-standby
+            - src: roles/entry_watchdog/templates/awg-ru-proxy-watch.sh.j2
+              dest: awg-ru-proxy-watch-standby
+            - src: roles/health/templates/awg-health.sh.j2
+              dest: awg-health-entry-standby
+            - src: roles/health/templates/awg-self-heal.sh.j2
+              dest: self-heal-entry-standby
+            - src: roles/cascade_check/templates/kalimera-report.sh.j2
+              dest: kalimera-report-entry-standby
+
+        - name: Проверка ветвей резервного EXIT в сформированных программах
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fxq 'readonly -a EXIT_IFS=("$EXIT_IF" awg4)' {{ rendered_shell_root }}/awg-entry-routing-standby
+            grep -Fxq 'readonly -a EXIT_IFS=("$EXIT_IF")' {{ rendered_shell_root }}/awg-entry-routing
+            grep -Fxq 'readonly STANDBY_EXIT_IF=awg4' {{ rendered_shell_root }}/awg-ru-proxy-watch-standby
+            ! grep -Fq 'STANDBY_EXIT_IF' {{ rendered_shell_root }}/awg-ru-proxy-watch
+            grep -Fq "check 'служба AWG до резервного EXIT'" {{ rendered_shell_root }}/awg-health-entry-standby
+            grep -Fq "check 'таймер переключателя путей EXIT'" {{ rendered_shell_root }}/awg-health-entry-standby
+            grep -Fq 'exit_route_is_active_path' {{ rendered_shell_root }}/awg-health-entry-standby
+            ! grep -Fq 'резервного EXIT' {{ rendered_shell_root }}/awg-health-entry
+            grep -Fq 'transit_standby) restart_unit awg-quick@awg4.service' {{ rendered_shell_root }}/self-heal-entry-standby
+            grep -Fxq 'readonly entry_standby_iface=awg4' {{ rendered_shell_root }}/kalimera-report-entry-standby
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Отключение резервного EXIT после проверки шаблонов
+          ansible.builtin.set_fact:
+            entry_standby_exit_enabled: false
+
         - name: Загрузка безопасных примерных переменных EXIT
           ansible.builtin.include_vars:
             file: "{{ playbook_dir }}/../inventory/example/group_vars/exit.yml"

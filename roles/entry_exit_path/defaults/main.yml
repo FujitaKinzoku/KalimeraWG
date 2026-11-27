@@ -1,0 +1,35 @@
+---
+# Переключатель путей до EXIT (docs/standby-exit.md). Работает только на ENTRY и
+# только при подключённом резервном EXIT (entry_standby_exit_enabled).
+entry_exit_path_script_path: /usr/local/sbin/kalimera-exit-path
+entry_exit_path_command_path: /usr/local/sbin/exit-path
+entry_exit_path_config_dir: /etc/kalimera-exit-path
+entry_exit_path_state_dir: /run/kalimera-exit-path
+entry_exit_path_active_file: "{{ entry_exit_path_state_dir }}/active"
+entry_exit_path_mode_file: /var/lib/kalimera-exit-path/mode
+entry_exit_path_service_name: kalimera-exit-path.service
+entry_exit_path_timer_name: kalimera-exit-path.timer
+# Как часто проверяются оба туннеля.
+entry_exit_path_interval: 10s
+# Проверочные адреса: TCP-соединение через туннель, без передачи данных. Три
+# независимых оператора; путь считается живым, пока отвечают entry_exit_path_probe_quorum.
+entry_exit_path_probe_targets:
+  - [1.1.1.1, 443]
+  - [8.8.8.8, 443]
+  - [9.9.9.9, 443]
+entry_exit_path_probe_quorum: 2
+entry_exit_path_probe_timeout_seconds: 3
+# Сколько неудачных проверок подряд переводят трафик на другой путь.
+entry_exit_path_fail_threshold: 3
+# Сколько секунд основной путь должен отвечать без сбоев, чтобы трафик вернулся
+# на него с резервного.
+entry_exit_path_failback_seconds: 900
+# Длительность учебного переключения командой exit-path drill.
+entry_exit_path_drill_seconds: 300
+# Проверка, занявшая столько секунд и больше, прошла со второй попытки: первый
+# пакет соединения ядро повторяет через 1 с. Такие проверки и проверки без
+# ответа считаются потерями пакетов. На выбор пути этот счёт не влияет.
+entry_exit_path_slow_probe_seconds: 0.9
+# При какой доле потерь за последний час exit-path status и cascade-check
+# сообщают, что путь теряет пакеты, в процентах.
+entry_exit_path_loss_warn_percent: 2

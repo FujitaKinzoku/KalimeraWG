@@ -121,6 +121,14 @@
     awg_mtu_wan_interface: >-
       {{ entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface }}
     awg_mtu_peer_ipv4: "{{ security_interserver_peer_ipv4 }}"
+    # ENTRY с резервным EXIT измеряет путь до обоих серверов и отвечает на ICMP
+    # каждому из них. Общий MTU каскада - наименьший из всех измерений: размер
+    # пакета клиента обязан проходить по любому из двух путей.
+    awg_mtu_peer_ipv4s: >-
+      {{ [security_interserver_peer_ipv4] +
+         ([entry_standby_exit_public_ipv4]
+          if (awg_node_role | default('') == 'entry' and
+              entry_standby_exit_enabled | default(false) | bool) else []) }}
     awg_mtu_participants: >-
       {{ (groups['entry'] | default([])) + (groups['exit'] | default([])) }}
   tasks:
@@ -146,7 +154,7 @@
           - -i
           - "{{ awg_mtu_wan_interface }}"
           - -s
-          - "{{ awg_mtu_peer_ipv4 }}/32"
+          - "{{ item }}/32"
           - -p
           - icmp
           - --icmp-type
@@ -157,6 +165,7 @@
           - awg-mtu-peer-temporary
           - -j
           - ACCEPT
+      loop: "{{ awg_mtu_peer_ipv4s }}"
       changed_when: false
       failed_when: false
       when:
@@ -237,7 +246,7 @@
               - -i
               - "{{ awg_mtu_wan_interface }}"
               - -s
-              - "{{ awg_mtu_peer_ipv4 }}/32"
+              - "{{ item }}/32"
               - -p
               - icmp
               - --icmp-type
@@ -248,37 +257,44 @@
               - awg-mtu-peer-temporary
               - -j
               - ACCEPT
+          loop: "{{ awg_mtu_peer_ipv4s }}"
           changed_when: false
 
         - name: Определение максимального двустороннего IPv4 PMTU
           ansible.builtin.shell: |
             set -Eeuo pipefail
-            peer={{ awg_mtu_peer_ipv4 | quote }}
+            peers=({{ awg_mtu_peer_ipv4s | map('quote') | join(' ') }})
             route_mtu="$(ip -o link show dev {{ awg_mtu_wan_interface | quote }} |
               sed -n 's/.* mtu \([0-9][0-9]*\).*/\1/p')"
             route_mtu="${route_mtu:-1500}"
-            low=1000
-            high=$((route_mtu - 28))
-            discovered=1280
             # Размер считается проходящим, если ответил хотя бы один пакет из трёх.
             # С одним пакетом единственная потеря на линии занижала результат, и
             # deploy в такой момент понижал MTU всего каскада до следующего запуска.
             fits() {
               ping -4 -c 3 -i 0.2 -W 1 -M do -s "$1" "$peer" >/dev/null 2>&1
             }
-            if fits "$low"; then
-              while (( low < high )); do
-                mid=$(((low + high + 1) / 2))
-                if fits "$mid"; then
-                  low="$mid"
-                else
-                  high=$((mid - 1))
-                fi
-              done
-              discovered=$((low + 28))
-            fi
-            (( discovered <= route_mtu )) || discovered="$route_mtu"
-            printf '%s\n' "$discovered"
+            result=""
+            for peer in "${peers[@]}"; do
+              low=1000
+              high=$((route_mtu - 28))
+              discovered=1280
+              if fits "$low"; then
+                while (( low < high )); do
+                  mid=$(((low + high + 1) / 2))
+                  if fits "$mid"; then
+                    low="$mid"
+                  else
+                    high=$((mid - 1))
+                  fi
+                done
+                discovered=$((low + 28))
+              fi
+              (( discovered <= route_mtu )) || discovered="$route_mtu"
+              if [[ -z "$result" ]] || (( discovered < result )); then
+                result="$discovered"
+              fi
+            done
+            printf '%s\n' "$result"
           args:
             executable: /bin/bash
           register: awg_mtu_outer_probe
@@ -305,7 +321,7 @@
               - -i
               - "{{ awg_mtu_wan_interface }}"
               - -s
-              - "{{ awg_mtu_peer_ipv4 }}/32"
+              - "{{ item }}/32"
               - -p
               - icmp
               - --icmp-type
@@ -316,6 +332,7 @@
               - awg-mtu-peer-temporary
               - -j
               - ACCEPT
+          loop: "{{ awg_mtu_peer_ipv4s }}"
           changed_when: false
           failed_when: false
 
@@ -456,6 +473,8 @@
       when: awg_adoption_mode == 'apply'
     - role: entry_routing
       when: awg_adoption_mode == 'apply'
+    - role: entry_exit_path
+      when: awg_adoption_mode == 'apply'
     - role: entry_dns
       when: awg_adoption_mode == 'apply'
     - role: operations
@@ -591,6 +610,37 @@
   gather_facts: false
   any_errors_fatal: true
   tasks:
+    # При первом включении ENTRY оставался на серверах DoT: резолвера EXIT ещё не
+    # было. Теперь он установлен: пересылка Unbound переводится на него, как
+    # только он ответит по туннелю.
+    - name: Перевод зарубежного DNS ENTRY на резолвер EXIT после его установки
+      ansible.builtin.include_role:
+        name: entry_dns
+        tasks_from: via_exit_switch
+      when:
+        - awg_adoption_mode == 'apply'
+        - entry_dns_default_via_exit | default(false) | bool
+        - not (entry_dns_via_exit_effective | default(false) | bool)
+
+    - name: Применение конфигурации DNS ENTRY
+      ansible.builtin.meta: flush_handlers
+
+    # Режим включён, а резолвер EXIT по туннелю так и не ответил: молча оставить
+    # запросы на серверах DoT значило бы не выполнить то, о чём просили.
+    - name: Проверка, что зарубежные имена идут через резолвер EXIT
+      ansible.builtin.assert:
+        quiet: true
+        that:
+          - entry_dns_via_exit_effective | default(false) | bool
+        fail_msg: >-
+          Резолвер EXIT не отвечает по туннелю: зарубежные имена оставлены на серверах
+          DoT, запросы по-прежнему идут с ENTRY. Проверьте EXIT (awg-health --strict
+          на нём) и повторите kalimera-deploy --resume; отказаться от режима:
+          kalimera-deploy --resume --disable-dns-via-exit.
+      when:
+        - awg_adoption_mode == 'apply'
+        - entry_dns_default_via_exit | default(false) | bool
+
     - name: Ожидание готовности рекурсивного резолвера EXIT
       ansible.builtin.command:
         argv: [/usr/bin/getent, ahostsv4, example.com]

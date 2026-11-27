@@ -11,9 +11,17 @@ readonly entry_client_listen={{ (entry_client_listen_address | default('')) | qu
 readonly entry_dns_port={{ (entry_dns_default_port | default(5353)) | int }}
 readonly entry_dns_ru_port={{ (entry_dns_ru_port | default(5354)) | int }}
 readonly entry_exit_iface={{ (entry_exit_interface | default('')) | quote }}
+# Резервный EXIT: на ENTRY - интерфейс второго туннеля (пусто, если его нет), на
+# самом резервном EXIT - признак, по которому его строки связи отличаются от основного.
+readonly entry_standby_iface={{ ((entry_standby_exit_interface | default('awg4')) if (entry_standby_exit_enabled | default(false) | bool) else '') | quote }}
+readonly exit_title={{ ('резервного EXIT' if (exit_standby | default(false) | bool) else 'EXIT') | quote }}
 readonly ru_proxy_enabled={{ 'true' if (entry_ru_proxy_enabled | default(false) | bool) else 'false' }}
 readonly ru_dot_active={{ 'true' if (entry_dns_ru_dot_active | default(false) | bool) else 'false' }}
 readonly ru_proxy_selected={{ 'true' if ((entry_ru_proxy_enabled | default(false) | bool) and (entry_ru_proxy_scope | default('all')) == 'selected') else 'false' }}
+# Зарубежные имена через резолвер EXIT: что задано в inventory и файл, по которому
+# видно, что действует на самом деле.
+readonly dns_via_exit={{ 'true' if (entry_dns_default_via_exit | default(false) | bool) else 'false' }}
+readonly dot_config={{ ((entry_unbound_config_dir | default('/etc/unbound/unbound.conf.d')) ~ '/90-awg-dot.conf') | quote }}
 readonly ru_proxy_service={{ (sing_box_service_name | default('sing-box.service')) | quote }}
 readonly ru_proxy_manual_flag={{ (entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off')) | quote }}
 readonly ru_proxy_failopen_flag={{ (entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled')) | quote }}
@@ -371,8 +379,20 @@ dns_row() {
     fi
 }
 
+# Пересылка Unbound на резолвер EXIT идёт без TLS: шифрует её сам туннель. По
+# этому признаку режим виден в файле конфигурации.
+foreign_dns_via_exit() {
+    grep -Eq '^[[:space:]]*forward-addr:' "$dot_config" 2>/dev/null &&
+        ! grep -Eq '^[[:space:]]*forward-tls-upstream:[[:space:]]*yes' "$dot_config" 2>/dev/null
+}
+
 check_dns() {
-    local route_ru dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
+    local route_ru route_foreign dns_hint='sudo systemctl restart unbound.service dnsmasq.service; текущие DNS-серверы: dns-status'
+    if foreign_dns_via_exit; then
+        route_foreign='маршрут: Unbound → резолвер EXIT внутри туннеля, с ENTRY наружу запрос не уходит'
+    else
+        route_foreign='маршрут: Unbound → серверы DoT напрямую с ENTRY'
+    fi
     if [[ "$ru_state" == active && "$ru_proxy_selected" != true ]]; then
         route_ru='маршрут: RU DoH через RU-прокси'
     elif [[ "$ru_dot_active" == true && "$ru_proxy_selected" == true ]]; then
@@ -383,8 +403,15 @@ check_dns() {
         route_ru='маршрут: Unbound (RU DoH недоступен, RU-прокси выключен)'
     fi
     dns_row 'DNS: yandex.ru (РФ) через клиентский резолвер' "$entry_client_listen" 53 yandex.ru "$route_ru" "$dns_hint"
-    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com 'маршрут: Unbound (DoT или EXIT по политике ENTRY)' "$dns_hint"
+    dns_row 'DNS: example.com (не РФ) через клиентский резолвер' "$entry_client_listen" 53 example.com "$route_foreign" "$dns_hint"
     dns_row 'DNS: example.com напрямую через Unbound' 127.0.0.1 "$entry_dns_port" example.com 'маршрут: Unbound на 127.0.0.1' "$dns_hint"
+    # Режим включён, а действует прежний: при deploy резолвер EXIT не ответил, и
+    # зарубежные имена остались на серверах DoT.
+    if [[ "$dns_via_exit" == true ]] && ! foreign_dns_via_exit; then
+        emit DNS WARN 'зарубежные имена: режим «через резолвер EXIT» включён, но не действует' \
+            'запросы идут с ENTRY на серверы DoT' \
+            'резолвер EXIT не ответил при deploy: awg-health --strict на EXIT, затем на ENTRY kalimera-deploy --resume'
+    fi
     if [[ "$ru_state" == active ]]; then
         # RU DoH отвечает через внешний SOCKS5-прокси. В области selected через
         # него идут только выбранные домены и адреса: его сбой - замечание, а не
@@ -402,32 +429,41 @@ check_dns() {
 # ENTRY–EXIT, то есть выход через EXIT. Считается только установление
 # соединения, без DNS. Рекурсивный DNS EXIT здесь не нужен: по умолчанию он
 # выключен (entry_dns_default_via_exit: false), и его адрес не отвечает.
+# Дальний маршрут замедляет все три подключения одинаково. Если же одно из них
+# дольше другого на секунду и более, оно ждало повторной отправки первого
+# пакета: ядро повторяет его через 1 с. Это потери в туннеле, а не расстояние.
 check_tunnel() {
-    local output code lookup connect ms ok=0 sum=0 avg
-    [[ -n "$entry_exit_iface" ]] || return 0
+    local iface="${1:-$entry_exit_iface}" pair="${2:-ENTRY–EXIT}" target="${3:-EXIT}"
+    local ssh_row="${4:-ENTRY → EXIT: SSH}"
+    local output code lookup connect ms ok=0 sum=0 avg min=0 max=0
+    [[ -n "$iface" ]] || return 0
     for _ in 1 2 3; do
-        if output="$(curl -4 -sS -o /dev/null --max-time 10 --interface "$entry_exit_iface" -w '%{http_code} %{time_namelookup} %{time_connect}' https://example.com/ 2>/dev/null)"; then
+        if output="$(curl -4 -sS -o /dev/null --max-time 10 --interface "$iface" -w '%{http_code} %{time_namelookup} %{time_connect}' https://example.com/ 2>/dev/null)"; then
             read -r code lookup connect <<<"$output"
             case "$code" in
                 2??|3??)
                     ms="$(awk -v c="$connect" -v l="$lookup" 'BEGIN { printf "%d", (c - l) * 1000 }')"
                     ok=$((ok + 1))
                     sum=$((sum + ms))
+                    if (( ok == 1 || ms < min )); then min="$ms"; fi
+                    if (( ms > max )); then max="$ms"; fi
                     ;;
             esac
         fi
     done
     if (( ok == 0 )); then
-        emit LINK FAIL 'туннель ENTRY–EXIT: TCP через туннель' 'ни одного подключения за 10 с' 'проверьте handshake туннеля: awg-health --strict; затем на ENTRY: kalimera-deploy --resume'
+        emit LINK FAIL "туннель $pair: TCP через туннель" 'ни одного подключения за 10 с' 'проверьте handshake туннеля: awg-health --strict; затем на ENTRY: kalimera-deploy --resume'
         return 0
     fi
     avg=$((sum / ok))
     if (( ok < 3 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" 'проверьте канал до EXIT и нагрузку: awg-health --strict' "$avg"
+        emit LINK WARN "туннель $pair: TCP через туннель" "$ok из 3 подключений, среднее $avg мс: часть подключений не прошла" "проверьте канал до $target и нагрузку: awg-health --strict" "$avg"
+    elif (( max - min >= 900 )); then
+        emit LINK WARN "туннель $pair: TCP через туннель" "3 из 3 подключений, от $min до $max мс: неустойчиво, похоже на потери пакетов" "подключение, которое дольше остальных на секунду и более, ждало повторной отправки первого пакета: в туннеле до $target теряются пакеты (потери или ограничение UDP между хостингами), сами серверы исправны - повторите проверку позже" "$avg"
     elif (( avg > 250 )); then
-        emit LINK WARN 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс: высокая задержка" 'сравните со строкой «ENTRY → EXIT: SSH»: если задержка высока и там, медленный маршрут между хостингами ENTRY и EXIT, серверы исправны - повторите проверку позже; если только здесь - нагрузка EXIT: awg-health --strict на EXIT' "$avg"
+        emit LINK WARN "туннель $pair: TCP через туннель" "3 из 3 подключений, среднее $avg мс: высокая задержка" "сравните со строкой «$ssh_row»: если задержка высока и там, медленный маршрут между хостингами ENTRY и $target, серверы исправны - повторите проверку позже; если только здесь - нагрузка $target: awg-health --strict на этом сервере" "$avg"
     else
-        emit LINK OK 'туннель ENTRY–EXIT: TCP через туннель' "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
+        emit LINK OK "туннель $pair: TCP через туннель" "3 из 3 подключений, среднее $avg мс (без DNS)" '' "$avg"
     fi
 }
 
@@ -504,10 +540,14 @@ main() {
             check_dns
             check_tunnel
             report_http LINK 'выход через EXIT: example.com' "$entry_exit_iface" https://example.com/ 'туннель и NAT EXIT: awg-health --strict на ENTRY и EXIT'
+            if [[ -n "$entry_standby_iface" ]]; then
+                check_tunnel "$entry_standby_iface" 'ENTRY–EXIT резервный' 'резервного EXIT' 'ENTRY → EXIT резервный: SSH'
+                report_http LINK 'выход через EXIT резервный: example.com' "$entry_standby_iface" https://example.com/ 'туннель и NAT резервного EXIT: awg-health --strict на ENTRY и на резервном EXIT'
+            fi
             report_http LINK 'выход напрямую с ENTRY: yandex.ru' '' https://yandex.ru/ 'проверьте WAN ENTRY и DNS: dns-status'
             ;;
         EXIT)
-            report_http LINK 'выход в Интернет с EXIT: example.com' '' https://example.com/ 'проверьте WAN EXIT и NAT: awg-health --strict'
+            report_http LINK "выход в Интернет с $exit_title: example.com" '' https://example.com/ 'проверьте WAN EXIT и NAT: awg-health --strict'
             ;;
         FRONT)
             check_front_backend

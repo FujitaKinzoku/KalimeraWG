@@ -542,7 +542,7 @@
 - name: "Расчёт отпечатка требуемой политики UFW"
   ansible.builtin.set_fact:
     security_ufw_policy_fingerprint: >-
-      {{ ([
+      {{ (([
           awg_node_role,
           (entry_wan_interface if awg_node_role == 'entry' else exit_wan_interface),
           (ansible_port | default(22) | string),
@@ -567,7 +567,11 @@
           (exit_awg_subnet | default('') | string),
           (front_enabled | default(false) | bool | string),
           (front_origin_domain | default('') | string)
-        ] | join('|')) | hash('sha256') }}
+        ] + ([
+          (entry_standby_exit_interface | default('awg4') | string),
+          (entry_standby_exit_subnet | default('') | string)
+        ] if entry_standby_exit_enabled | default(false) | bool else []))
+        | join('|')) | hash('sha256') }}
 
 - name: "Проверка отпечатка действующей политики UFW"
   ansible.builtin.slurp:
@@ -1021,10 +1025,10 @@
     interface_out: "{{ item }}"
     from_ip: "{{ entry_client_subnet }}"
     comment: Управляемая пересылка AWG ENTRY сервера
-  loop:
-    - "{{ entry_wan_interface }}"
-    - "{{ entry_exit_interface }}"
-    - "{{ entry_ru_proxy_interface }}"
+  loop: >-
+    {{ [entry_wan_interface, entry_exit_interface, entry_ru_proxy_interface] +
+       ([entry_standby_exit_interface | default('awg4')]
+        if entry_standby_exit_enabled | default(false) | bool else []) }}
   when: awg_node_role == 'entry'
 
 - name: "Запрет доступа обычных AWG-клиентов к cloud metadata"
@@ -1082,6 +1086,27 @@
        if entry_legacy_client_available | default(false) | bool else [])
     }}
   when: awg_node_role == 'entry'
+
+- name: "Запрет доступа клиентских зон к служебной подсети резервного EXIT"
+  community.general.ufw:
+    rule: deny
+    route: true
+    insert: 1
+    interface_in: "{{ item.interface }}"
+    from_ip: "{{ item.subnet }}"
+    to_ip: "{{ entry_standby_exit_subnet }}"
+    comment: Изоляция служебного AWG резервного EXIT
+  loop: >-
+    {{
+      [{'interface': entry_client_interface, 'subnet': entry_client_subnet}] +
+      ([{'interface': entry_mobile_client_interface, 'subnet': entry_mobile_client_subnet}]
+       if entry_mobile_client_available | default(false) | bool else []) +
+      ([{'interface': entry_legacy_client_interface, 'subnet': entry_legacy_client_subnet}]
+       if entry_legacy_client_available | default(false) | bool else [])
+    }}
+  when:
+    - awg_node_role == 'entry'
+    - entry_standby_exit_enabled | default(false) | bool
 
 - name: "Запрет пересылки между клиентскими AWG-зонами"
   community.general.ufw:
@@ -1146,10 +1171,10 @@
     interface_out: "{{ item }}"
     from_ip: "{{ entry_legacy_client_subnet }}"
     comment: Пересылка совместимого AWG ENTRY сервера
-  loop:
-    - "{{ entry_wan_interface }}"
-    - "{{ entry_exit_interface }}"
-    - "{{ entry_ru_proxy_interface }}"
+  loop: >-
+    {{ [entry_wan_interface, entry_exit_interface, entry_ru_proxy_interface] +
+       ([entry_standby_exit_interface | default('awg4')]
+        if entry_standby_exit_enabled | default(false) | bool else []) }}
   when:
     - awg_node_role == 'entry'
     - entry_legacy_client_available | default(false) | bool
@@ -1162,10 +1187,10 @@
     interface_out: "{{ item }}"
     from_ip: "{{ entry_mobile_client_subnet }}"
     comment: Пересылка мобильного AWG ENTRY сервера
-  loop:
-    - "{{ entry_wan_interface }}"
-    - "{{ entry_exit_interface }}"
-    - "{{ entry_ru_proxy_interface }}"
+  loop: >-
+    {{ [entry_wan_interface, entry_exit_interface, entry_ru_proxy_interface] +
+       ([entry_standby_exit_interface | default('awg4')]
+        if entry_standby_exit_enabled | default(false) | bool else []) }}
   when:
     - awg_node_role == 'entry'
     - entry_mobile_client_available | default(false) | bool

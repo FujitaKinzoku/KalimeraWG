@@ -12,6 +12,10 @@ readonly known_hosts_path={{ cascade_check_known_hosts_path | quote }}
 readonly remote_user={{ cascade_check_user | quote }}
 readonly exit_host={{ cascade_check_exit_host | quote }}
 readonly exit_port={{ cascade_check_exit_port | int }}
+readonly standby_present={{ 'true' if (cascade_check_standby_present | default(false) | bool) else 'false' }}
+readonly standby_host={{ cascade_check_standby_host | default('') | quote }}
+readonly standby_port={{ cascade_check_standby_port | default(22) | int }}
+readonly exit_path_bin={{ entry_exit_path_command_path | default('/usr/local/sbin/exit-path') | quote }}
 readonly front_present={{ 'true' if (cascade_check_front_present | bool) else 'false' }}
 readonly front_host={{ cascade_check_front_host | quote }}
 readonly front_port={{ cascade_check_front_port | int }}
@@ -291,8 +295,49 @@ tcp_row() {
     fi
 }
 
+# Название раздела сервера в сводке: резервный EXIT хранится под именем EXIT2.
+section_name() {
+    if [[ "$1" == EXIT2 ]]; then
+        printf 'EXIT резервный'
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# Разделы серверов, которых в этом каскаде нет.
+section_absent() {
+    [[ ( "$1" == FRONT && "$front_present" != true ) ||
+       ( "$1" == EXIT2 && "$standby_present" != true ) ]]
+}
+
+# Состояние путей до EXIT по данным переключателя: отвечает ли каждый туннель и
+# через какой сейчас идёт зарубежный трафик. Работа на резервном пути и не
+# отвечающий резерв - замечания: каскад работает, но запаса больше нет.
+path_rows() {
+    local level text seen=0
+    if [[ ! -x "$exit_path_bin" ]]; then
+        emit_row ENTRY WARN 'пути до EXIT' 'команда exit-path не установлена' 'на ENTRY: kalimera-deploy --resume'
+        return 0
+    fi
+    while IFS=$'\t' read -r level text; do
+        [[ "$level" == OK || "$level" == WARN ]] || continue
+        seen=$((seen + 1))
+        if [[ "$level" == OK ]]; then
+            emit_row ENTRY OK "пути до EXIT: $text" '' ''
+        else
+            emit_row ENTRY WARN "пути до EXIT: $text" '' 'состояние путей: exit-path status; если не отвечает сам сервер, awg-health --strict на нём'
+        fi
+    done < <("$exit_path_bin" status --report 2>/dev/null || true)
+    if (( seen == 0 )); then
+        emit_row ENTRY WARN 'пути до EXIT' 'переключатель путей не сообщил состояние' 'на ENTRY: systemctl --no-pager status kalimera-exit-path.timer'
+    fi
+}
+
 link_rows() {
     tcp_row 'ENTRY → EXIT: SSH' "$exit_host" "$exit_port"
+    if [[ "$standby_present" == true ]]; then
+        tcp_row 'ENTRY → EXIT резервный: SSH' "$standby_host" "$standby_port"
+    fi
     if [[ "$front_present" == true ]]; then
         tcp_row 'ENTRY → FRONT: SSH' "$front_host" "$front_port"
     fi
@@ -308,6 +353,9 @@ collect_local() {
     import_rows local "$raw"
     if (( rc != 0 )); then
         emit_row ENTRY FAIL 'локальный отчёт ENTRY' "код возврата $rc" 'на ENTRY: kalimera-deploy --resume; сообщите вывод cascade-check'
+    fi
+    if [[ "$standby_present" == true ]]; then
+        path_rows
     fi
 }
 
@@ -490,7 +538,7 @@ build_summary() {
     local re_cert_date='(действует до|истекает|истёк) ([0-9]{4}-[0-9]{2}-[0-9]{2})'
     local re_cert_left='осталось ([0-9]+) дн'
 
-    for section in ENTRY EXIT FRONT LINK CDN DNS; do
+    for section in ENTRY EXIT EXIT2 FRONT LINK CDN DNS; do
         ok="${counts[$section:OK]:-0}"
         warn="${counts[$section:WARN]:-0}"
         fail="${counts[$section:FAIL]:-0}"
@@ -516,8 +564,8 @@ build_summary() {
     fi
 
     sum_head 'СЕРВЕРЫ'
-    for section in ENTRY EXIT FRONT; do
-        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+    for section in ENTRY EXIT EXIT2 FRONT; do
+        if section_absent "$section"; then
             continue
         fi
         ok="${counts[$section:OK]:-0}"
@@ -533,9 +581,10 @@ build_summary() {
         case "$section" in
             ENTRY) reach='локальный узел' ;;
             EXIT) reach="$(reach_text "$(rtt_of 'ENTRY → EXIT: SSH')")" ;;
+            EXIT2) reach="$(reach_text "$(rtt_of 'ENTRY → EXIT резервный: SSH')")" ;;
             *) reach="$(reach_text "$(rtt_of 'ENTRY → FRONT: SSH')")" ;;
         esac
-        sum_add "$(status_color "$worst")" "$section: OK $ok · WARN $warn · FAIL $fail · $reach"
+        sum_add "$(status_color "$worst")" "$(section_name "$section"): OK $ok · WARN $warn · FAIL $fail · $reach"
     done
 
     # Самовосстановление по серверам: сколько было сбоев за неделю и сколько из
@@ -543,7 +592,7 @@ build_summary() {
     sum_head 'САМОВОССТАНОВЛЕНИЕ'
     while IFS= read -r line; do
         split_row "$line"
-        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == EXIT2 || "$seg" == FRONT ]] || continue
         [[ "$label" == самовосстановление* ]] || continue
         if [[ "$label" == 'самовосстановление: '* ]]; then
             # Итог за период; значение при OK - перечень восстановленного, он уже
@@ -578,14 +627,14 @@ build_summary() {
         heal_text[$seg]="$text"
         heal_status[$seg]="$status"
     done <"$rows_file"
-    for section in ENTRY EXIT FRONT; do
-        if [[ "$section" == FRONT && "$front_present" != true ]]; then
+    for section in ENTRY EXIT EXIT2 FRONT; do
+        if section_absent "$section"; then
             continue
         fi
         if [[ -n "${heal_status[$section]:-}" ]]; then
-            sum_add "$(status_color "${heal_status[$section]}")" "$section: ${heal_text[$section]}"
+            sum_add "$(status_color "${heal_status[$section]}")" "$(section_name "$section"): ${heal_text[$section]}"
         else
-            sum_add "$c_info" "$section: сведений нет (служба выключена или отчёт не получен)"
+            sum_add "$c_info" "$(section_name "$section"): сведений нет (служба выключена или отчёт не получен)"
         fi
     done
 
@@ -628,7 +677,7 @@ build_summary() {
     sum_head 'СЕРТИФИКАТЫ'
     while IFS= read -r line; do
         split_row "$line"
-        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == EXIT2 || "$seg" == FRONT ]] || continue
         [[ "$label" == 'сертификат '* || "$label" == 'срок сертификата '* ]] || continue
         cert_total=$((cert_total + 1))
         if [[ "$status" != OK ]]; then
@@ -688,7 +737,7 @@ build_summary() {
     sum_head 'ОБНОВЛЕНИЯ'
     while IFS= read -r line; do
         split_row "$line"
-        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == FRONT ]] || continue
+        [[ "$seg" == ENTRY || "$seg" == EXIT || "$seg" == EXIT2 || "$seg" == FRONT ]] || continue
         [[ "$label" == 'обновление компонента: '* ]] || continue
         text="${label#обновление компонента: }"
         [[ -z "${update_seen[$text]+set}" ]] || continue
@@ -765,16 +814,21 @@ print_summary() {
 
 render() {
     local section seg status label value hint text line
-    local -a sections=(ENTRY DNS LINK CDN EXIT FRONT)
+    local -a sections=(ENTRY DNS LINK CDN EXIT EXIT2 FRONT)
     local -A titles=()
     titles[ENTRY]='ENTRY: локальные проверки'
     titles[DNS]='DNS: резолверы и маршруты'
     titles[LINK]='СВЯЗИ КАСКАДА: задержки и выход'
     titles[EXIT]='EXIT: удалённый отчёт'
+    titles[EXIT2]='EXIT резервный: удалённый отчёт'
     titles[FRONT]='FRONT: удалённый отчёт'
     titles[CDN]='CDN: проверка с ENTRY'
 
     for section in "${sections[@]}"; do
+        # Каскад без резервного EXIT выглядит как прежде: раздела нет вовсе.
+        if [[ "$section" == EXIT2 && "$standby_present" != true ]]; then
+            continue
+        fi
         section_title "${titles[$section]}"
         if [[ ( "$section" == FRONT && "$front_present" != true ) || ( "$section" == CDN && "$cdn_enabled" != true ) ]]; then
             printf 'в каскаде не используется\n'
@@ -828,6 +882,9 @@ main() {
         cdn_rows
     fi
     collect_remote EXIT "$exit_host" "$exit_port"
+    if [[ "$standby_present" == true ]]; then
+        collect_remote EXIT2 "$standby_host" "$standby_port"
+    fi
     if [[ "$front_present" == true ]]; then
         collect_remote FRONT "$front_host" "$front_port"
     fi

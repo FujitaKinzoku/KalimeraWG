@@ -103,8 +103,21 @@ classify() {
             plan_action=mobile_firewall_apply ;;
         'внешний UDP/8443 неактивного мобильного AWG закрыт')
             plan_action=mobile_firewall_remove ;;
-        'служба AWG 3+ до EXIT сервера'|'служба AWG до EXIT сервера'|'интерфейс AWG до EXIT сервера'|'состояние AWG 3+ до EXIT сервера доступно'|'состояние AWG до EXIT сервера доступно'|'свежий handshake ENTRY–EXIT')
+        'служба AWG 3+ до EXIT сервера'|'служба AWG до EXIT сервера'|'интерфейс AWG до EXIT сервера'|'состояние AWG 3+ до EXIT сервера доступно'|'состояние AWG до EXIT сервера доступно')
             plan_action=transit ;;
+        'свежий handshake ENTRY–EXIT')
+            # Основной EXIT не отвечает, и трафик уже идёт через резервный:
+            # перезапуск туннеля ничего не исправит, а каждая попытка заново
+            # применяла бы маршрутизацию и обрывала соединения клиентов.
+            if exit_path_uses_standby; then
+                plan_reason='external:основной EXIT не отвечает, трафик идёт через резервный; состояние: exit-path status'
+            else
+                plan_action=transit
+            fi ;;
+        'служба AWG до резервного EXIT'|'интерфейс AWG до резервного EXIT'|'состояние AWG до резервного EXIT доступно')
+            plan_action=transit_standby ;;
+        'таймер переключателя путей EXIT')
+            plan_action=timer_exit_path ;;
         'служба AWG 3+ EXIT сервера'|'служба AWG EXIT сервера'|'интерфейс AWG EXIT сервера'|'состояние AWG 3+ EXIT сервера доступно'|'состояние AWG EXIT сервера доступно'|'свежий handshake EXIT–ENTRY')
             plan_action=transit ;;
         'ограниченный NAT EXIT сервера'|'изоляция клиентов EXIT сервера'|'исходящий TCP MSS EXIT сервера'|'входящий TCP MSS EXIT сервера')
@@ -181,22 +194,36 @@ classify_unit() {
     case "$1" in
         awg-maintenance.service)
             plan_action=unit_maintenance ;;
-        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|certbot.service|awg-local-peer-apply.service)
+        kalimera-updates.service|awg-ru-zone-update.service|kalimera-dns-warm.service|awg-telegram-monitor.service|awg-ru-proxy-watch.service|kalimera-exit-path.service|certbot.service|awg-local-peer-apply.service)
             plan_action="unit_rerun:$1" ;;
         *)
             plan_reason="manual:причина: sudo journalctl -u $1 -b --no-pager" ;;
     esac
 }
 
+# Идёт ли зарубежный трафик через резервный EXIT. Путь выбирает переключатель
+# путей (exit-path); без резервного EXIT ответ всегда отрицательный.
+exit_path_uses_standby() {
+{% if awg_node_role | default('') == 'entry' and (entry_standby_exit_enabled | default(false) | bool) %}
+    local active=""
+    if [[ -r {{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} ]]; then
+        read -r active <{{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} || active=""
+    fi
+    [[ "$active" == {{ entry_standby_exit_interface | default('awg4') | quote }} ]]
+{% else %}
+    return 1
+{% endif %}
+}
+
 # Порядок выполнения: сначала то, от чего зависят остальные.
 readonly -a action_order=(
     disk_cleanup time_sync
     secrets_unlock kernel_module sysctl ufw_enable ufw_logging_off ssh fail2ban
-    awg_client awg_legacy awg_mobile transit local_peers ru_zone sing_box routing
+    awg_client awg_legacy awg_mobile transit transit_standby local_peers ru_zone sing_box routing
     mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
     domain_sync dnsmasq
     front_backend xray vless_sync nginx certbot
-    timer_audit timer_telegram timer_self timer_proxy_watch unit_maintenance
+    timer_audit timer_telegram timer_self timer_proxy_watch timer_exit_path unit_maintenance
 )
 
 action_title() {
@@ -214,6 +241,7 @@ action_title() {
         awg_legacy) echo 'перезапуск совместимого интерфейса AWG' ;;
         awg_mobile) echo 'перезапуск интерфейса mobile/AWG3+' ;;
         transit) echo 'перезапуск межсерверного интерфейса AWG' ;;
+        transit_standby) echo 'перезапуск интерфейса AWG до резервного EXIT' ;;
         local_peers) echo 'повторное применение локальных VPN-пиров' ;;
         ru_zone) echo 'загрузка набора российских сетей' ;;
         sing_box) echo 'перезапуск sing-box' ;;
@@ -230,7 +258,7 @@ action_title() {
         vless_sync) echo 'синхронизация пользователей VLESS с Xray' ;;
         nginx) echo 'перезапуск Nginx' ;;
         certbot) echo 'продление TLS-сертификата' ;;
-        timer_audit|timer_telegram|timer_self|timer_proxy_watch) echo 'включение таймера' ;;
+        timer_audit|timer_telegram|timer_self|timer_proxy_watch|timer_exit_path) echo 'включение таймера' ;;
         unit_maintenance) echo 'повторный запуск ночного обслуживания' ;;
         unit_rerun:*) echo "повторный запуск ${1#unit_rerun:}" ;;
         *) echo "$1" ;;
@@ -339,6 +367,10 @@ run_action() {
         sing_box) restart_unit {{ sing_box_service_name | default('sing-box.service') | quote }} ;;
         front_backend) restart_unit {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }} ;;
         timer_proxy_watch) systemctl enable --now {{ entry_ru_proxy_watch_timer_name | default('awg-ru-proxy-watch.timer') | quote }} ;;
+{% if entry_standby_exit_enabled | default(false) | bool %}
+        transit_standby) restart_unit awg-quick@{{ entry_standby_exit_interface | default('awg4') }}.service ;;
+        timer_exit_path) systemctl enable --now {{ entry_exit_path_timer_name | default('kalimera-exit-path.timer') | quote }} ;;
+{% endif %}
 {% endif %}
 {% if awg_node_role | default('') == 'exit' %}
 {% if awg3_transit_enabled | default(false) | bool %}
@@ -499,9 +531,20 @@ contains() {
 
 # Журнал восстановлений: "время<US>вид<US>проверка<US>действие". Вид REPAIRED -
 # восстановлено службой, CLEARED - ошибка прошла без её действия.
+# Журнал сбоев: "время, когда прошёл<US>REPAIRED|CLEARED<US>проверка<US>действие
+# <US>время, когда служба его заметила". Последнее поле есть с версии, которая
+# показывает длительность; в прежних записях его нет.
 event_add() {
-    printf '%s\x1f%s\x1f%s\x1f%s\n' "$(date +%s)" "$1" "$2" "${3:-}" >>"$events_file"
+    local now
+    now="$(date +%s)"
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$now" "$1" "$2" "${3:-}" "${4:-$now}" >>"$events_file"
     tail -n 500 "$events_file" >"$events_file.tmp" && mv -f "$events_file.tmp" "$events_file"
+}
+
+# Когда служба впервые заметила ещё не устранённую ошибку; пусто, если её нет.
+open_first() {
+    [[ -s "$open_file" ]] || return 0
+    awk -F "$sep" -v label="$1" '$2 == label { print $1; exit }' "$open_file"
 }
 
 # Список неустранённых ошибок: "время первого появления<US>проверка<US>причина
@@ -514,10 +557,8 @@ open_remove() {
 }
 
 open_set() {
-    local first=''
-    if [[ -s "$open_file" ]]; then
-        first="$(awk -F "$sep" -v label="$1" '$2 == label { print $1; exit }' "$open_file")"
-    fi
+    local first
+    first="$(open_first "$1")"
     open_remove "$1"
     printf '%s\x1f%s\x1f%s\x1f%s\n' "${first:-$(date +%s)}" "$1" "$2" "${3:-}" >>"$open_file"
 }
@@ -534,10 +575,10 @@ close_cleared() {
         if contains "$label" "$@"; then
             printf '%s\x1f%s\x1f%s\x1f%s\n' "$epoch" "$label" "$reason" "$action" >>"$open_file.keep"
         elif [[ -n "$action" ]]; then
-            event_add REPAIRED "$label" "$action"
+            event_add REPAIRED "$label" "$action" "$epoch"
             history_add "восстановлено: $label ($action)"
         else
-            event_add CLEARED "$label"
+            event_add CLEARED "$label" '' "$epoch"
             history_add "прошло без действия службы: $label"
         fi
     done <"$open_file"
@@ -553,27 +594,53 @@ last_from() {
     fi
 }
 
+# Длительность сбоя от момента, когда служба его заметила: "; держалось около 5 мин".
+# Служба проверяет сервер по таймеру, поэтому время приблизительное.
+event_duration() {
+    local first="$1" closed="$2" seconds
+    [[ "$first" =~ ^[0-9]+$ ]] && (( first <= closed )) || return 0
+    seconds=$(( closed - first ))
+    if (( seconds < 60 )); then
+        printf '; держалось меньше минуты'
+    elif (( seconds < 5400 )); then
+        printf '; держалось около %d мин' $(( (seconds + 30) / 60 ))
+    else
+        printf '; держалось около %d ч' $(( (seconds + 1800) / 3600 ))
+    fi
+}
+
 # Итог за период: сколько было сбоев, сколько восстановлено и что не устранено.
 # Сбой - проверка, не прошедшая дважды подряд; разовые сбои сюда не входят.
+# С аргументом lines собирается и построчный список сбоев для self-heal status.
 summary_load() {
-    local since epoch kind label detail reason _action
+    local since epoch kind label detail first reason _action line
     since=$(( $(date +%s) - summary_window ))
     sum_repaired=0
     sum_cleared=0
-    sum_repaired_items=()
+    sum_closed_items=()
+    sum_event_lines=()
     sum_open_items=()
     if [[ -s "$events_file" ]]; then
-        while IFS="$sep" read -r epoch kind label detail; do
+        while IFS="$sep" read -r epoch kind label detail first; do
             if [[ ! "$epoch" =~ ^[0-9]+$ ]] || (( epoch < since )); then
                 continue
             fi
             case "$kind" in
                 REPAIRED)
                     sum_repaired=$((sum_repaired + 1))
-                    sum_repaired_items+=("$label ($detail)")
+                    sum_closed_items+=("$label ($detail)")
+                    line="восстановлено службой: $label ($detail)"
                     ;;
-                CLEARED) sum_cleared=$((sum_cleared + 1)) ;;
+                CLEARED)
+                    sum_cleared=$((sum_cleared + 1))
+                    sum_closed_items+=("$label (прошло без действия службы)")
+                    line="прошло без действия службы: $label"
+                    ;;
+                *) continue ;;
             esac
+            if [[ "${1:-}" == lines ]]; then
+                sum_event_lines+=("$(date -u -d "@$epoch" '+%Y-%m-%d %H:%M')  $line$(event_duration "$first" "$epoch")")
+            fi
         done <"$events_file"
     fi
     if [[ -s "$open_file" ]]; then
@@ -632,9 +699,11 @@ report_row() {
     if (( sum_open > 0 )); then
         printf 'WARN\x1f%s\x1f%s\x1f%s\n' "самовосстановление: $(summary_text)" \
             "$(join_items "${sum_open_items[@]}")" 'подробности: self-heal status'
-    elif (( sum_repaired > 0 )); then
+    elif (( sum_repaired + sum_cleared > 0 )); then
+        # Названы последние пять сбоев, и прошедшие без действия службы тоже:
+        # иначе в отчёте было только их число.
         printf 'OK\x1f%s\x1f%s\x1f\n' "самовосстановление: $(summary_text)" \
-            "$(join_items "${sum_repaired_items[@]:$(last_from 5 "${#sum_repaired_items[@]}")}")"
+            "$(join_items "${sum_closed_items[@]:$(last_from 5 "${#sum_closed_items[@]}")}")"
     else
         printf 'OK\x1f%s\x1f\x1f\n' "самовосстановление: $(summary_text)"
     fi
@@ -657,7 +726,7 @@ reason_text() {
 }
 
 show_status() {
-    local status when repaired unresolved
+    local status when repaired unresolved hidden
     if [[ -e "$manual_off_flag" ]]; then
         echo 'Самовосстановление: выключено вручную. Включить: self-heal on'
     elif systemctl is-active --quiet "$timer"; then
@@ -665,15 +734,20 @@ show_status() {
     else
         echo 'Самовосстановление: таймер не активен. Включить: self-heal on'
     fi
-    summary_load
+    summary_load lines
     echo "Итог: $(summary_text)."
     if (( sum_open > 0 )); then
         echo 'Не восстановлено:'
         printf '  %s\n' "${sum_open_items[@]}"
     fi
-    if (( sum_repaired > 0 )); then
-        echo "Восстановлено $(period_text):"
-        printf '  %s\n' "${sum_repaired_items[@]:$(last_from 10 "${#sum_repaired_items[@]}")}"
+    # Каждый сбой периода с временем: итог называл только их число, а журнал
+    # последних событий вмещает десять строк. Журнал хранится в памяти и
+    # начинается заново после перезагрузки сервера.
+    if (( ${#sum_event_lines[@]} > 0 )); then
+        echo "Сбои $(period_text) после загрузки сервера, время UTC:"
+        hidden=$(last_from 50 "${#sum_event_lines[@]}")
+        (( hidden == 0 )) || echo "  более ранних не показано: $hidden"
+        printf '  %s\n' "${sum_event_lines[@]:$hidden}"
     fi
     if [[ ! -r "$state_file" ]]; then
         echo 'Запусков после загрузки сервера ещё не было.'
@@ -739,6 +813,7 @@ if systemctl is-active --quiet awg-maintenance.service 2>/dev/null ||
 fi
 
 declare -a failures=()
+cycle_started="$(date +%s)"
 collect_failures
 if (( ${#failures[@]} == 0 )); then
     close_cleared
@@ -839,12 +914,15 @@ for label in "${confirmed[@]}"; do
     title=''
     [[ -z "$action" ]] || title="$(action_title "$action")"
     if ! contains "$label" "${failures[@]}"; then
+        # Ошибка могла держаться с прошлых циклов: тогда длительность считается
+        # с того, когда служба заметила её впервые.
+        first_seen="$(open_first "$label")"
         if [[ -n "$action" && "${action_result[$action]:-}" == completed ]]; then
             repaired+=("$label ($title)")
-            event_add REPAIRED "$label" "$title"
+            event_add REPAIRED "$label" "$title" "${first_seen:-$cycle_started}"
         else
             repaired+=("$label (прошло без действия)")
-            event_add CLEARED "$label"
+            event_add CLEARED "$label" '' "${first_seen:-$cycle_started}"
         fi
         open_remove "$label"
         continue

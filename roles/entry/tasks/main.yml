@@ -70,6 +70,35 @@
   when: entry_manage_awg_configs | bool
   no_log: true
 
+# Резервный туннель поднимает kernel-модуль тем же awg-quick, что и основной.
+# Userspace-движок держит один интерфейс на службу и второй туннель не обслуживает.
+- name: "Проверка параметров резервного EXIT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - not (awg3_transit_enabled | default(false) | bool)
+      - entry_standby_exit_interface | length > 0
+      - entry_standby_exit_interface != entry_exit_interface
+      - entry_standby_exit_endpoint | default('') | length > 0
+      - entry_standby_exit_tunnel_address | default('') | length > 0
+      - (entry_standby_exit_peer_tunnel_address | default('') | ansible.utils.ipv4) == entry_standby_exit_peer_tunnel_address | default('')
+      - entry_standby_exit_listen_port | default(0) | int >= 1
+      - entry_standby_exit_listen_port | default(0) | int <= 65535
+      - entry_standby_exit_listen_port | default(0) | int != awg3_transit_listen_port | int
+      - entry_standby_exit_obfuscation is mapping
+      - vault_awg_entry_standby_exit_private_key is defined
+      - vault_awg_entry_standby_exit_peer_public_key is defined
+      - vault_awg_entry_standby_exit_psk is defined
+      - vault_awg_standby_header_protection_key is defined
+    fail_msg: >-
+      Резервный EXIT включён, но его параметры неполны либо межсерверный канал
+      работает на userspace-движке. Подключите резервный EXIT командой
+      kalimera-deploy --resume --enable-standby-exit.
+  when:
+    - entry_manage_awg_configs | bool
+    - entry_standby_exit_enabled | bool
+  no_log: true
+
 - name: "Создание: ENTRY сервер - этап 2"
   ansible.builtin.file:
     path: "{{ entry_awg_config_dir }}"
@@ -121,6 +150,9 @@
     - interface: "{{ entry_exit_interface }}"
       template: awg1.conf.j2
       enabled: "{{ not (awg3_transit_enabled | default(false) | bool) }}"
+    - interface: "{{ entry_standby_exit_interface }}"
+      template: awg-standby.conf.j2
+      enabled: "{{ entry_standby_exit_enabled | bool }}"
   loop_control:
     loop_var: entry_awg_config_item
     label: "{{ entry_awg_config_item.interface }}"
@@ -137,9 +169,39 @@
   loop: >-
     {{ [entry_client_interface] +
        ([entry_legacy_client_interface] if entry_legacy_client_enabled | bool else []) +
-       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) +
+       ([entry_standby_exit_interface] if entry_standby_exit_enabled | bool else []) }}
   when:
     - entry_manage_awg_configs | bool
+
+# Резервный EXIT отключён, а его конфигурация осталась от прежнего включения:
+# интерфейс останавливается и удаляется, иначе второй туннель жил бы без надзора.
+- name: "Поиск конфигурации отключённого резервного EXIT"
+  ansible.builtin.stat:
+    path: "{{ entry_awg_config_dir }}/{{ entry_standby_exit_interface }}.conf"
+  register: entry_standby_exit_stale_config
+  when:
+    - entry_manage_awg_configs | bool
+    - not (entry_standby_exit_enabled | bool)
+
+- name: "Остановка туннеля отключённого резервного EXIT"
+  ansible.builtin.systemd_service:
+    name: "awg-quick@{{ entry_standby_exit_interface }}.service"
+    enabled: false
+    state: stopped
+  when:
+    - entry_manage_awg_configs | bool
+    - not (entry_standby_exit_enabled | bool)
+    - entry_standby_exit_stale_config.stat.exists
+
+- name: "Удаление конфигурации отключённого резервного EXIT"
+  ansible.builtin.file:
+    path: "{{ entry_awg_config_dir }}/{{ entry_standby_exit_interface }}.conf"
+    state: absent
+  when:
+    - entry_manage_awg_configs | bool
+    - not (entry_standby_exit_enabled | bool)
+    - entry_standby_exit_stale_config.stat.exists
 
 - name: "Определение состояния мобильного AWG после применения UFW"
   ansible.builtin.command:

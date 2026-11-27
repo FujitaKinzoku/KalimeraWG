@@ -6,5 +6,6 @@
   loop: >-
     {{ [entry_client_interface] +
        ([entry_legacy_client_interface] if entry_legacy_client_enabled | bool else []) +
-       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) }}
+       ([entry_exit_interface] if not (awg3_transit_enabled | default(false) | bool) else []) +
+       ([entry_standby_exit_interface] if entry_standby_exit_enabled | bool else []) }}
   listen: Перезапустить интерфейсы AWG ENTRY сервера

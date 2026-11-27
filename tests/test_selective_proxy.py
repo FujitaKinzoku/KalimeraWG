@@ -1028,7 +1028,14 @@ class PolicyWiringTests(unittest.TestCase):
         self.assertIn("check 'ipset force_proxy' ipset list force_proxy", text)
         self.assertIn("check 'ipset force_proxy_net' ipset list force_proxy_net", text)
         self.assertIn(
-            "check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked", text
+            "check 'списки proxy-domain и proxy-address направляются в RU-прокси' "
+            "unless_ru_proxy_failopen proxy_lists_marked",
+            text,
+        )
+        # Сторож может перейти в fail-open во время проверок рабочего режима: тогда
+        # не прошедшая проверка правил прокси ошибкой не считается.
+        self.assertIn(
+            '"$@" || [[ -e {{ entry_ru_proxy_disabled_flag | quote }} ]]', text
         )
         # Блок с проверкой сетей; условие по области выше него относится к DNS прокси.
         condition = "{% if (entry_ru_proxy_scope | default('all')) == 'selected' %}"

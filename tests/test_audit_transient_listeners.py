@@ -123,6 +123,36 @@ def run_check(first: str, second: str) -> tuple[int, str]:
     return int(lines["status"]), lines["ports"]
 
 
+def run_report(snapshot: str) -> str:
+    """Строка аудита о неожиданных портах для неизменного набора сокетов."""
+    bash = shutil.which("bash")
+    if bash is None or not Path("/proc/sys/net/ipv4/ip_local_port_range").exists():
+        raise unittest.SkipTest("нужен bash на Linux")
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        (root / "snapshot").write_text(snapshot, encoding="utf-8")
+        script = textwrap.dedent(
+            f"""\
+            set -Eeuo pipefail
+            ss() {{ cat "{root.as_posix()}/snapshot"; }}
+            systemctl() {{ echo 0; }}
+            """
+        )
+        script += listener_functions()
+        script += 'known_public_listeners_only || true\nlistener_report\n'
+        script_path = root / "report.sh"
+        script_path.write_text(script, encoding="utf-8", newline="\n")
+        result = subprocess.run(
+            [bash, script_path.as_posix()],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={**os.environ, "SERVER_AUDIT_LISTENER_RECHECK_SECONDS": "0"},
+            check=True,
+        )
+    return result.stdout
+
+
 class TransientListenerTests(unittest.TestCase):
     def test_only_known_listeners_pass(self) -> None:
         self.assertEqual(run_check(KNOWN, KNOWN), (0, ""))
@@ -147,6 +177,19 @@ class TransientListenerTests(unittest.TestCase):
     def test_private_addresses_are_not_checked(self) -> None:
         private = KNOWN + "tcp LISTEN 0 4096 10.0.0.5:9100 0.0.0.0:*\n"
         self.assertEqual(run_check(private, private), (0, ""))
+
+    def test_report_names_the_program_behind_each_port(self) -> None:
+        # У рабочего администратора нет sudo для ss: программу называет сам аудит.
+        snapshot = (
+            KNOWN
+            + 'tcp LISTEN 0 4096 0.0.0.0:5201 0.0.0.0:* users:(("iperf3",pid=4242,fd=3))\n'
+            + "tcp LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:*\n"
+            + 'tcp LISTEN 0 4096 0.0.0.0:15201 0.0.0.0:* users:(("other",pid=4243,fd=3))\n'
+        )
+        self.assertEqual(
+            run_report(snapshot),
+            "tcp/15201 (other), tcp/5201 (iperf3), tcp/8080",
+        )
 
 
 class SingBoxOutboundTests(unittest.TestCase):

@@ -50,6 +50,7 @@ CONFIG = {
     "mobile_service": {{ terminal_summary_mobile_service | to_json }},
     "exit_transit_interface": {{ terminal_summary_exit_transit_interface | to_json }},
     "transit_engine": {{ terminal_summary_transit_engine | trim | to_json }},
+    "standby_exit": {{ 'True' if (entry_standby_exit_enabled | default(false) | bool) else 'False' }},
     "proxy_disabled_flag": {{ entry_ru_proxy_disabled_flag | default('/run/awg-ru-proxy.disabled') | to_json }},
     "proxy_manual_flag": {{ entry_ru_proxy_manual_disabled_flag | default('/var/lib/awg-routing/ru-proxy.manual-off') | to_json }},
     "default_dot": {{ (entry_dns_dot_upstreams_resolved | default([]) | map(attribute='address') | join(', ')) | to_json }},
@@ -612,6 +613,17 @@ def command_panels() -> None:
             ],
             preferred_label_width=COMMAND_LABEL_WIDTH,
         )
+        if CONFIG["standby_exit"]:
+            panel(
+                "РЕЗЕРВНЫЙ EXIT",
+                [
+                    ("exit-path status", "через какой EXIT идёт трафик и состояние обоих туннелей", "INFO"),
+                    ("exit-path drill", "учебное переключение на резервный EXIT на 5 минут", "INFO"),
+                    ("exit-path use standby|primary", "закрепить путь на время работ с сервером", "INFO"),
+                    ("exit-path auto", "вернуть автоматический выбор пути", "INFO"),
+                ],
+                preferred_label_width=COMMAND_LABEL_WIDTH,
+            )
         if CONFIG["front_present"]:
             panel(
                 "УПРАВЛЕНИЕ FRONT",

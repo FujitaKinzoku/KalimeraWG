@@ -37,6 +37,8 @@
       when: awg_adoption_mode == 'apply'
     - role: entry_routing
       when: awg_adoption_mode == 'apply'
+    - role: entry_exit_path
+      when: awg_adoption_mode == 'apply'
     - role: entry_dns
       when: awg_adoption_mode == 'apply'
     - role: operations

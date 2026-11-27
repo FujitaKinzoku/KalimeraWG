@@ -1,0 +1,80 @@
+---
+# Решение роли entry_dns о том, куда Unbound пересылает зарубежные имена
+# (roles/entry_dns/tasks/via_exit_mode.yml). Выполняется настоящим Ansible:
+# выражение написано на Jinja внутри задачи, и юнит-тесты Python его не видят.
+- name: Проверка выбора режима зарубежного DNS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    dot_conf: |
+      forward-zone:
+          name: "."
+          forward-tls-upstream: yes
+          forward-addr: 162.254.86.13@853#vno01.dnscry.pt
+    exit_conf: |
+      forward-zone:
+          name: "."
+          forward-addr: 10.77.0.1@53
+    answer: |
+      93.184.216.34
+  tasks:
+    - name: Режим выключен
+      ansible.builtin.include_tasks: ../roles/entry_dns/tasks/via_exit_mode.yml
+      vars:
+        entry_dns_default_via_exit: false
+        entry_dns_current_dot_text: "{{ exit_conf }}"
+        entry_dns_exit_probe_output: "{{ answer }}"
+
+    - name: Выключенный режим не действует, что бы ни отвечал EXIT
+      ansible.builtin.assert:
+        that:
+          - not (entry_dns_via_exit_effective | bool)
+
+    - name: Первое включение, резолвера на EXIT ещё нет
+      ansible.builtin.include_tasks: ../roles/entry_dns/tasks/via_exit_mode.yml
+      vars:
+        entry_dns_default_via_exit: true
+        entry_dns_current_dot_text: "{{ dot_conf }}"
+        entry_dns_exit_probe_output: ""
+
+    - name: До установки резолвера EXIT Unbound остаётся на серверах DoT
+      ansible.builtin.assert:
+        that:
+          - not (entry_dns_via_exit_effective | bool)
+
+    - name: Первое включение, резолвер EXIT уже отвечает
+      ansible.builtin.include_tasks: ../roles/entry_dns/tasks/via_exit_mode.yml
+      vars:
+        entry_dns_default_via_exit: true
+        entry_dns_current_dot_text: "{{ dot_conf }}"
+        entry_dns_exit_probe_output: "{{ answer }}"
+
+    - name: Ответивший резолвер EXIT включает режим сразу
+      ansible.builtin.assert:
+        that:
+          - entry_dns_via_exit_effective | bool
+
+    - name: Режим действует, основной EXIT во время deploy не отвечает
+      ansible.builtin.include_tasks: ../roles/entry_dns/tasks/via_exit_mode.yml
+      vars:
+        entry_dns_default_via_exit: true
+        entry_dns_current_dot_text: "{{ exit_conf }}"
+        entry_dns_exit_probe_output: ";; communications error to 10.77.0.1#53: timed out"
+
+    - name: Действующий режим не возвращается на серверы DoT
+      ansible.builtin.assert:
+        that:
+          - entry_dns_via_exit_effective | bool
+
+    - name: Файла пересылки ещё нет, резолвер EXIT не отвечает
+      ansible.builtin.include_tasks: ../roles/entry_dns/tasks/via_exit_mode.yml
+      vars:
+        entry_dns_default_via_exit: true
+        entry_dns_current_dot_text: ""
+        entry_dns_exit_probe_output: ""
+
+    - name: Новая установка начинает с серверов DoT
+      ansible.builtin.assert:
+        that:
+          - not (entry_dns_via_exit_effective | bool)

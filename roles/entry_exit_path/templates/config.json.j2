@@ -1,0 +1,33 @@
+{{ {
+  'paths': [
+    {
+      'name': 'primary',
+      'label': 'основной EXIT',
+      'interface': entry_exit_interface,
+      'tunnel_address': (entry_exit_tunnel_address | string).split('/')[0],
+      'peer_tunnel_address': awg3_peer_tunnel_address
+    },
+    {
+      'name': 'standby',
+      'label': 'резервный EXIT',
+      'interface': entry_standby_exit_interface,
+      'tunnel_address': (entry_standby_exit_tunnel_address | string).split('/')[0],
+      'peer_tunnel_address': entry_standby_exit_peer_tunnel_address
+    }
+  ],
+  'probe_targets': entry_exit_path_probe_targets,
+  'probe_quorum': entry_exit_path_probe_quorum | int,
+  'probe_timeout_seconds': entry_exit_path_probe_timeout_seconds | int,
+  'fail_threshold': entry_exit_path_fail_threshold | int,
+  'failback_seconds': entry_exit_path_failback_seconds | int,
+  'drill_seconds': entry_exit_path_drill_seconds | int,
+  'slow_probe_seconds': entry_exit_path_slow_probe_seconds | float,
+  'loss_warn_percent': entry_exit_path_loss_warn_percent | float,
+  'table': entry_exit_table | int,
+  'state_dir': entry_exit_path_state_dir,
+  'mode_file': entry_exit_path_mode_file,
+  'hold_file': kalimera_deploy_marker_path | default('/run/kalimera-deploy.active'),
+  'dns_via_exit': entry_dns_default_via_exit | default(false) | bool,
+  'notify_command': ([awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor'), '--notify']
+                     if (awg_telegram_monitor_enabled | default(false) | bool) else [])
+} | to_nice_json(ensure_ascii=False) }}

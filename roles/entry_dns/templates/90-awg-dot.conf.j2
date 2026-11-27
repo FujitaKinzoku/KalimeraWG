@@ -49,7 +49,9 @@ remote-control:
 
 forward-zone:
     name: "."
-{% if entry_dns_default_via_exit | default(false) | bool %}
+{% if entry_dns_via_exit_effective | default(entry_dns_default_via_exit | default(false)) | bool %}
+    # Резолвер EXIT внутри туннеля: запросы о зарубежных узлах с ENTRY наружу не
+    # уходят. При работе через резервный EXIT адрес меняет переключатель путей.
     forward-addr: {{ awg3_peer_tunnel_address }}@53
 {% else %}
     forward-tls-upstream: yes

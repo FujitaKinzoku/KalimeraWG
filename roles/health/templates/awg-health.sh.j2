@@ -558,6 +558,31 @@ handshake_recent() {
         (( latest > 0 && now >= latest && now - latest <= max_age ))
 }
 
+{% if awg_node_role == 'entry' and (entry_standby_exit_enabled | default(false) | bool) %}
+# Туннель, в который сейчас ведёт маршрут таблицы EXIT: его выбирает переключатель
+# путей (exit-path). Пока он ничего не выбрал - основной.
+active_exit_if() {
+    local candidate=""
+    if [[ -r {{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} ]]; then
+        read -r candidate <{{ entry_exit_path_active_file | default('/run/kalimera-exit-path/active') | quote }} || candidate=""
+    fi
+    if [[ "$candidate" == {{ entry_standby_exit_interface | default('awg4') | quote }} ]] &&
+            ip link show "$candidate" >/dev/null 2>&1; then
+        printf '%s' "$candidate"
+    else
+        printf '%s' {{ entry_exit_interface | quote }}
+    fi
+}
+
+exit_route_is_active_path() {
+    has_default_route "$1" "$(active_exit_if)"
+}
+
+exit_mark_uses_active_path() {
+    route_uses_interface "$1" "$2" "$(active_exit_if)"
+}
+
+{% endif %}
 has_default_route() {
     local table="$1" interface="$2"
     ip -4 route show table "$table" | grep -Eq "^default .*dev ${interface}( |$)"
@@ -888,6 +913,14 @@ check 'свежий handshake ENTRY–EXIT' handshake_recent {{ entry_exit_inter
 check 'MTU межсерверного интерфейса применён' interface_mtu_is {{ entry_exit_interface | quote }} {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
 check 'полный профиль AWG 3+ до EXIT сервера применён' awg3_transit_profile_is_complete {{ entry_exit_interface | quote }}
 {% endif %}
+{% if entry_standby_exit_enabled | default(false) | bool %}
+check 'служба AWG до резервного EXIT' systemctl is-active --quiet awg-quick@{{ entry_standby_exit_interface | default('awg4') }}.service
+check 'интерфейс AWG до резервного EXIT' ip link show {{ entry_standby_exit_interface | default('awg4') | quote }}
+check 'состояние AWG до резервного EXIT доступно' awg show {{ entry_standby_exit_interface | default('awg4') | quote }}
+check 'MTU интерфейса резервного EXIT применён' interface_mtu_is {{ entry_standby_exit_interface | default('awg4') | quote }} {{ awg3_shared_effective_mtu | default(entry_awg1_mtu, true) | int }}
+check 'полный профиль AWG 3+ до резервного EXIT применён' awg3_transit_profile_is_complete {{ entry_standby_exit_interface | default('awg4') | quote }}
+check 'таймер переключателя путей EXIT' systemctl is-active --quiet {{ entry_exit_path_timer_name | default('kalimera-exit-path.timer') | quote }}
+{% endif %}
 check 'согласование локальных VPN-пиров' systemctl is-active --quiet awg-local-peer-apply.service
 check 'служба маршрутизации' systemctl is-active --quiet {{ entry_routing_service_name | quote }}
 check 'служба dnsmasq' systemctl is-active --quiet dnsmasq.service
@@ -918,8 +951,13 @@ if systemctl is-active --quiet {{ awg3_mobile_service_name | quote }}; then
 fi
 {% endif %}
 check 'правило policy routing для mark 0x1' has_rule {{ entry_exit_mark | quote }} {{ entry_exit_table }} {{ entry_exit_rule_priority }}
+{% if entry_standby_exit_enabled | default(false) | bool %}
+check 'маршрут по умолчанию в таблице 100' exit_route_is_active_path {{ entry_exit_table }}
+check 'mark 0x1 направляется через EXIT сервер' exit_mark_uses_active_path 8.8.8.8 {{ entry_exit_mark | quote }}
+{% else %}
 check 'маршрут по умолчанию в таблице 100' has_default_route {{ entry_exit_table }} {{ entry_exit_interface | quote }}
 check 'mark 0x1 направляется через EXIT сервер' route_uses_interface 8.8.8.8 {{ entry_exit_mark | quote }} {{ entry_exit_interface | quote }}
+{% endif %}
 check 'запасной маршрут unreachable в таблице 100' has_backstop_route {{ entry_exit_table }}
 check 'mark 0x1 не выходит через WAN ENTRY сервера' exit_guard_present {{ entry_wan_interface | quote }} {{ entry_exit_mark | quote }}
 check_minor 'systemd-networkd не удаляет правила policy routing' grep -Fqx 'ManageForeignRoutingPolicyRules=no' /etc/systemd/networkd.conf.d/60-kalimerawg-policy-rules.conf
@@ -986,6 +1024,13 @@ check 'почтовый порт 25 не обходится' mail_port_25_absent
 check 'исходящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -i {{ entry_client_interface | quote }} -s {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 check 'входящий TCP MSS clamp ENTRY сервера' iptables -w 10 -t mangle -C FORWARD -o {{ entry_client_interface | quote }} -d {{ entry_client_subnet | quote }} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 {% if entry_ru_proxy_enabled | bool %}
+# Сторож прокси может перейти в fail-open, пока идут проверки рабочего режима:
+# условие ветви уже проверено, а правила прокси сняты. Не прошедшая в этот момент
+# проверка ошибкой не считается: состояние покажет следующий запуск.
+unless_ru_proxy_failopen() {
+    "$@" || [[ -e {{ entry_ru_proxy_disabled_flag | quote }} ]]
+}
+
 {% if entry_ru_proxy_manual_disabled_flag is defined %}
 if [[ -e {{ entry_ru_proxy_manual_disabled_flag | quote }} ]]; then
     check 'sing-box вручную отключён' service_inactive {{ sing_box_service_name | quote }}
@@ -998,9 +1043,9 @@ check 'служба sing-box' systemctl is-active --quiet {{ sing_box_service_na
 check 'российский TUN-интерфейс' ip link show {{ entry_ru_proxy_interface | quote }}
 check 'таймер watchdog российского прокси' systemctl is-active --quiet {{ entry_ru_proxy_watch_timer_name | quote }}
 if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
-    check 'правило policy routing для mark 0x2' has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
-    check 'маршрут по умолчанию в таблице 200' has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
-    check 'mark 0x2 направляется через российский TUN' route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
+    check 'правило policy routing для mark 0x2' unless_ru_proxy_failopen has_rule {{ entry_ru_mark | quote }} {{ entry_ru_table }} {{ entry_ru_rule_priority }}
+    check 'маршрут по умолчанию в таблице 200' unless_ru_proxy_failopen has_default_route {{ entry_ru_table }} {{ entry_ru_proxy_interface | quote }}
+    check 'mark 0x2 направляется через российский TUN' unless_ru_proxy_failopen route_uses_interface {{ entry_dns_doh_server | quote }} {{ entry_ru_mark | quote }} {{ entry_ru_proxy_interface | quote }}
 {% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
     # Ответ идёт через внешний SOCKS5-прокси. В области selected через него
     # направляются только выбранные домены и адреса: сбой прокси - замечание, а не
@@ -1009,19 +1054,19 @@ if [[ ! -e {{ entry_ru_proxy_disabled_flag | quote }} ]]; then
 {% else %}
     check 'прослушивание российского DoH' dns_resolves_a 127.0.0.1 yandex.ru {{ entry_dns_ru_port | int }}
 {% endif %}
-    check 'списки proxy-domain и proxy-address направляются в RU-прокси' proxy_lists_marked {{ entry_ru_mark | quote }}
+    check 'списки proxy-domain и proxy-address направляются в RU-прокси' unless_ru_proxy_failopen proxy_lists_marked {{ entry_ru_mark | quote }}
     proxy_udp_mode="$(cat {{ entry_ru_proxy_udp_mode_path | quote }} 2>/dev/null || printf direct)"
     if [[ "$proxy_udp_mode" != proxy ]]; then
-        check 'UDP списков proxy-* не выходит мимо прокси' proxy_udp_rejected {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }}
+        check 'UDP списков proxy-* не выходит мимо прокси' unless_ru_proxy_failopen proxy_udp_rejected {{ entry_client_interface | quote }} {{ entry_client_subnet | quote }}
     fi
 {% if (entry_ru_proxy_scope | default('all')) == 'selected' %}
     check 'российские сети выходят напрямую с ENTRY, область selected' ru_networks_bypass_proxy
 {% else %}
     if [[ "$proxy_udp_mode" == proxy ]]; then
-        check 'RU UDP направляется через SOCKS5' udp_ru_bypass_absent
+        check 'RU UDP направляется через SOCKS5' unless_ru_proxy_failopen udp_ru_bypass_absent
     else
-        check 'force_ru UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy force_ru
-        check 'российский UDP обходит несовместимый SOCKS5' udp_ru_bypasses_proxy ru
+        check 'force_ru UDP обходит несовместимый SOCKS5' unless_ru_proxy_failopen udp_ru_bypasses_proxy force_ru
+        check 'российский UDP обходит несовместимый SOCKS5' unless_ru_proxy_failopen udp_ru_bypasses_proxy ru
     fi
 {% endif %}
 else

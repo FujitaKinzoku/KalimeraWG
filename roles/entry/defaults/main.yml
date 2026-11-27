@@ -17,6 +17,15 @@ entry_awg_client_mode: modern
 entry_awg_client_mtu: 1380
 entry_awg0_listen_port: 443
 awg3_transit_enabled: false
+# Резервный EXIT (docs/standby-exit.md): второй межсерверный туннель до другого
+# зарубежного сервера. Включает его установщик командой
+# kalimera-deploy --resume --enable-standby-exit; адреса, порт, профиль и ключи
+# он же записывает в inventory и Vault. Работает только на kernel-модуле.
+entry_standby_exit_enabled: false
+entry_standby_exit_interface: awg4
+entry_standby_exit_allowed_ips:
+  - 0.0.0.0/0
+entry_standby_exit_persistent_keepalive: 25
 entry_legacy_client_available: false
 entry_legacy_client_enabled: false
 entry_legacy_client_interface: awg-old
