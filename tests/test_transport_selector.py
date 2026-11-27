@@ -391,6 +391,35 @@ class DrillTests(TransportCase):
         self.assertEqual(self.routes, routes)
         self.assertEqual(self.notices, [], "учения уведомлений не дают")
 
+    def test_status_between_the_end_of_the_drill_and_the_next_check(self) -> None:
+        # Найдено на рабочем каскаде: в секунды между концом учения и очередной
+        # проверкой статус обещал проверку прямого транспорта «через 24 мин», хотя
+        # путь возвращается на него следующей же проверкой.
+        self.steps(3)
+        self.drill(STANDBY)
+        state = self.steps(29)
+        until = state["paths"][STANDBY]["transport_drill_until"]
+        self.assertEqual(until - self.now, 10)
+        self.assertEqual(state["paths"][STANDBY]["transport"], "tls")
+        moment = until + 3
+        text = "\n".join(selector.status_lines(self.cfg, state, "auto", moment))
+        self.assertIn(
+            "  транспорт: внутри TLS (учебный переход завершён, возврат на прямой при "
+            "следующей проверке)",
+            text,
+        )
+        self.assertNotIn("прямой проверится", text)
+        rows = selector.report_rows(self.cfg, state, "auto", moment)
+        self.assertIn(("WARN", "резервный EXIT: идёт учебный переход на запасной транспорт"), rows)
+        self.assertFalse(any("прямой не проходит" in row for _level, row in rows))
+        # Следующая проверка возвращает путь на прямой транспорт и снимает отметку.
+        self.now = moment
+        state = self.step(7)
+        self.assertEqual(state["paths"][STANDBY]["transport"], "awg")
+        self.assertEqual(state["paths"][STANDBY]["transport_drill_until"], 0)
+        text = "\n".join(selector.status_lines(self.cfg, state, "auto", self.now))
+        self.assertNotIn("учебный переход", text)
+
     def test_drill_keeps_tls_even_when_it_does_not_answer(self) -> None:
         # Запасной транспорт сломан: учение должно это показать, а не скрыть
         # возвратом на прямой через две минуты.

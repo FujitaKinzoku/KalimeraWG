@@ -835,9 +835,17 @@ def transport_text(cfg: Config, state: dict, name: str, now: int) -> str:
     if current not in names:
         return ""
     label = cfg.transport_label(name, current)
-    drill_left = int(entry.get("transport_drill_until") or 0) - now
-    if drill_left > 0:
-        return f"транспорт: {label} (учебный переход, ещё {format_age(drill_left)})"
+    drill_until = int(entry.get("transport_drill_until") or 0)
+    if drill_until > now:
+        return f"транспорт: {label} (учебный переход, ещё {format_age(drill_until - now)})"
+    if drill_until and current != names[0]:
+        # Срок учения вышел, а очередная проверка ещё не прошла: она и вернёт путь
+        # на прямой транспорт. Найдено на рабочем каскаде: в эти секунды статус
+        # обещал проверку прямого транспорта через полчаса.
+        return (
+            f"транспорт: {label} (учебный переход завершён, возврат на прямой при "
+            "следующей проверке)"
+        )
     if current == names[0]:
         return f"транспорт: {label}"
     text = f"транспорт: {label} (запасной), {format_age(now - int(entry['transport_since']))}"
@@ -928,7 +936,9 @@ def report_rows(cfg: Config, state: dict, mode: str, now: int) -> list[tuple[str
     # этого сервера не проходит.
     for name in PATH_NAMES:
         entry = state["paths"][name]
-        if int(entry.get("transport_drill_until") or 0) > now:
+        # Отметка учения снимается проверкой, которая возвращает путь на прямой
+        # транспорт: до неё путь на запасном - это ещё учение, а не закрытый прямой.
+        if int(entry.get("transport_drill_until") or 0):
             rows.append(("WARN", f"{cfg.label(name)}: идёт учебный переход на запасной транспорт"))
         elif int(entry["fail"]) == 0 and transport_rank(cfg, state, name) > 0:
             rows.append(
