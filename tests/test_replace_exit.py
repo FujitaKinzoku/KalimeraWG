@@ -197,10 +197,15 @@ class ReplaceTests(ReplaceCase):
         before = read_vault(self.vault_path)
         self.replace()
         vault = read_vault(self.vault_path)
+        # По одному имени в строке: два имени переменных подряд сканер секретов
+        # принимает за пару «ключ - значение».
         rotated = (
-            "vault_awg_entry_exit_private_key", "vault_awg_entry_exit_peer_public_key",
-            "vault_awg_entry_exit_entry_public_key", "vault_awg_entry_exit_psk",
-            "vault_awg_exit_private_key", "vault_awg3_header_protection_key",
+            "vault_awg_entry_exit_private_key",
+            "vault_awg_entry_exit_peer_public_key",
+            "vault_awg_entry_exit_entry_public_key",
+            "vault_awg_entry_exit_psk",
+            "vault_awg_exit_private_key",
+            "vault_awg3_header_protection_key",
         )
         for key in rotated:
             self.assertNotEqual(vault[key], before[key], key)

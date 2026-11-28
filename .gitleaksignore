@@ -16,3 +16,8 @@ dee4d253ee13e46d3a04161e13881cca272008db:tests/render-shell.yml:generic-api-key:
 # и окончание PEM с четырьмя буквами между ними, ключа там не было. Следующим
 # коммитом образец собирается из частей, но исходная строка остаётся в истории.
 d2c36511fc4feef0fe56bba2c312bdf21e57a64e:tests/test_fallback_transport.py:private-key:207
+
+# Исторический fingerprint строки из tests/test_replace_exit.py: два имени
+# переменных Vault подряд, значений там не было. Следующим коммитом имена
+# разнесены по строкам, но исходная строка остаётся в истории.
+3dd2ab6f3c2c31ef542fdd729b9f3fbb4a824037:tests/test_replace_exit.py:generic-api-key:203
