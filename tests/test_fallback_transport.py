@@ -261,7 +261,8 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual((outbound["server"], outbound["server_port"]), ("192.0.2.20", 443))
         tls = outbound["tls"]
         self.assertEqual(tls["certificate"], self.material["certificate"].strip().splitlines())
-        self.assertEqual(tls["utls"], {"enabled": True, "fingerprint": "chrome"})
+        # Не chrome: в закреплённом sing-box это Chrome 133, который ТСПУ ограничивает.
+        self.assertEqual(tls["utls"], {"enabled": True, "fingerprint": "firefox"})
         self.assertNotIn("insecure", tls)
         self.assertNotIn("key", tls, "закрытый ключ EXIT на ENTRY не попадает")
 
@@ -319,6 +320,12 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(cfg.transport_chain, role_defaults()["transit_tls_entry_chain"])
         self.assertEqual(cfg.transport_chain, "KALIMERA-TRANSIT")
         self.assertNotEqual(cfg.transport_chain, role_defaults()["transport_guard_chain"])
+        # Адрес для exit-path speed: размер файла подставляется вместо {bytes}.
+        self.assertEqual(cfg.speed_url, "https://speed.cloudflare.com/__down?bytes={bytes}")
+        self.assertEqual(cfg.speed_url, selector.Config(
+            {key: value for key, value in json.loads(render(template, **variables)).items()
+             if key != "speed_url"}
+        ).speed_url, "значение роли совпадает со значением программы по умолчанию")
         # Без запасного транспорта настройки прежние.
         plain = json.loads(render(template, **variables))
         self.assertNotIn("transports", plain["paths"][0])

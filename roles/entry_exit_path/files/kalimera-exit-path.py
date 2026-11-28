@@ -77,6 +77,10 @@ class Config:
         # занявшее столько, прошло со второй попытки: пакет или ответ потерян.
         self.slow_probe_seconds = float(document.get("slow_probe_seconds", 0.9))
         self.loss_warn_percent = float(document.get("loss_warn_percent", 2))
+        # Откуда exit-path speed загружает файл через туннель; {bytes} - размер.
+        self.speed_url = str(
+            document.get("speed_url", "https://speed.cloudflare.com/__down?bytes={bytes}")
+        )
         self.table = int(document["table"])
         self.state_dir = Path(document["state_dir"])
         self.mode_file = Path(document["mode_file"])
@@ -1097,9 +1101,107 @@ def command_transport_drill(cfg: Config, args: argparse.Namespace) -> int:
             if carries
             else "Трафик идёт через другой сервер и переход не заметит. "
         )
-        + "Ход: exit-path status; на EXIT: transport-guard status. Возврат произойдёт сам."
+        + "Ход: exit-path status; на EXIT: transport-guard status. Когда путь ответит внутри "
+        f"TLS, проверьте объём: exit-path speed {name}. Возврат произойдёт сам."
     )
     return 0
+
+
+# --- Скорость и объём через путь ---
+#
+# Проверки пути - подключения без передачи данных. Блокировка, при которой
+# соединение замирает после первых килобайт, для них невидима: путь «отвечает», а
+# трафик не идёт. Команда speed загружает через туннель файл и показывает,
+# сколько пришло и с какой скоростью. Состояние переключателя она не меняет.
+
+
+def format_number(value: float) -> str:
+    return f"{value:.1f}".replace(".", ",")
+
+
+def format_size(size: int) -> str:
+    if size >= 1_000_000:
+        return f"{format_number(size / 1_000_000)} МБ"
+    return f"{size // 1000} КБ"
+
+
+def speed_limit_seconds(megabytes: int) -> int:
+    """Сколько ждать загрузку: хватает канала от 1,5 Мбит/с."""
+    return 30 + 3 * megabytes
+
+
+def measure_speed(cfg: Config, name: str, megabytes: int) -> tuple[int, float, str]:
+    """Загрузить файл через туннель пути.
+
+    Возвращает число полученных байт, время в секундах и код ответа HTTP; код
+    пуст, если curl выполнить не удалось, и 000, если соединение не открылось.
+    """
+    limit = speed_limit_seconds(megabytes)
+    url = cfg.speed_url.replace("{bytes}", str(megabytes * 1_000_000))
+    try:
+        output = subprocess.run(
+            ["curl", "-4", "-s", "-o", "/dev/null", "--max-time", str(limit),
+             "--interface", cfg.interface(name),
+             "-w", "%{size_download} %{time_total} %{http_code}", url],
+            capture_output=True, text=True, timeout=limit + 15, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0, 0.0, ""
+    words = output.split()
+    try:
+        return int(float(words[0])), float(words[1].replace(",", ".")), words[2]
+    except (IndexError, ValueError):
+        return 0, 0.0, ""
+
+
+def speed_line(cfg: Config, state: dict, name: str, megabytes: int) -> tuple[str, bool]:
+    """Строка о загрузке через путь и признак, что файл пришёл целиком."""
+    head = f"{cfg.label(name)} ({cfg.interface(name)})"
+    current = state["paths"][name].get("transport")
+    if current in cfg.transport_names(name):
+        head += f", транспорт {cfg.transport_label(name, current)}"
+    wanted = megabytes * 1_000_000
+    size, seconds, code = measure_speed(cfg, name, megabytes)
+    if not code:
+        return f"{head}: проверку выполнить не удалось: curl не запустился или не ответил", False
+    if code == "000" and size == 0:
+        return (
+            f"{head}: соединение не открылось: путь не отвечает или адрес проверки "
+            "недоступен с этого EXIT",
+            False,
+        )
+    if code != "200":
+        return f"{head}: адрес проверки ответил кодом {code}: о пути это ничего не говорит", False
+    rate = size * 8 / seconds / 1_000_000 if seconds > 0 else 0.0
+    if size >= wanted:
+        return (
+            f"{head}: {format_size(size)} за {format_number(seconds)} с, "
+            f"{format_number(rate)} Мбит/с",
+            True,
+        )
+    text = f"{head}: пришло {format_size(size)} из {megabytes} МБ за {format_number(seconds)} с"
+    if size < 200_000:
+        # Заморозка по объёму: первые 15-20 КБ проходят, дальше пакеты сервера
+        # не доходят, а соединение не разрывается.
+        return (
+            f"{text}, дальше поток остановился. Так выглядит заморозка соединения после "
+            "первых килобайт: трафик через этот путь идти не будет",
+            False,
+        )
+    return f"{text}: файл не успел загрузиться, скорость {format_number(rate)} Мбит/с", False
+
+
+def command_speed(cfg: Config, args: argparse.Namespace) -> int:
+    state = read_state(cfg)
+    megabytes = args.mb
+    host = cfg.speed_url.split("//", 1)[-1].split("/", 1)[0]
+    print(f"Загрузка {megabytes} МБ через туннель пути, адрес проверки: {host}", flush=True)
+    complete = True
+    for name in [args.path] if args.path else list(PATH_NAMES):
+        line, good = speed_line(cfg, state, name, megabytes)
+        print(line, flush=True)
+        complete = complete and good
+    return 0 if complete else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1124,11 +1226,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     transport_drill.add_argument("path", nargs="?", choices=PATH_NAMES, default=STANDBY)
     transport_drill.add_argument("--minutes", type=int, default=0, help="длительность, минут")
+    speed = commands.add_parser(
+        "speed", help="скорость и объём через путь: загрузка файла через туннель"
+    )
+    speed.add_argument("path", nargs="?", choices=PATH_NAMES, help="без имени - оба пути")
+    speed.add_argument("--mb", type=int, default=10, help="размер файла, МБ")
     args = parser.parse_args(argv)
     if args.command is None:
         args = parser.parse_args(["status"])
     if getattr(args, "minutes", 0) < 0 or getattr(args, "minutes", 0) > 240:
         parser.error("длительность учебного переключения: от 1 до 240 минут")
+    # Адрес проверки по умолчанию отдаёт до 75 МБ, а на 100 МБ отвечает отказом.
+    if not 1 <= getattr(args, "mb", 10) <= 50:
+        parser.error("размер файла для проверки скорости: от 1 до 50 МБ")
     try:
         cfg = load_config(args.config)
     except (OSError, ValueError, KeyError) as error:
@@ -1136,6 +1246,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.command == "status":
         return command_status(cfg, args)
+    # Загрузка идёт до минуты: блокировку переключателя она не берёт, иначе
+    # проверки путей на это время остановились бы.
+    if args.command == "speed":
+        return command_speed(cfg, args)
     if os.geteuid() != 0:
         print("Команда меняет маршрутизацию и требует прав root.", file=sys.stderr)
         return 2

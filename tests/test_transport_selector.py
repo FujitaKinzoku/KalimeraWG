@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import subprocess
 import time
 import unittest
@@ -509,6 +510,134 @@ class ReportTests(TransportCase):
             [level for level, _ in selector.report_rows(self.cfg, state, "auto", self.now)],
             ["OK", "OK", "OK"],
         )
+
+
+class SpeedTests(TransportCase):
+    """exit-path speed: объём через путь, а не только «отвечает».
+
+    Проверки пути - подключения без передачи данных. Блокировку, при которой
+    соединение замирает после первых килобайт, они не видят.
+    """
+
+    def speed(self, answers: dict[str, str | None], path: str | None = None,
+              megabytes: int = 10) -> tuple[int, list[str]]:
+        self.curl: list[list[str]] = []
+
+        def run(argv: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+            self.curl.append(list(argv))
+            answer = answers[argv[argv.index("--interface") + 1]]
+            if answer is None:
+                raise OSError("нет curl")
+            return subprocess.CompletedProcess(argv, 0, answer, "")
+
+        with mock.patch.object(selector.subprocess, "run", side_effect=run), \
+                mock.patch("builtins.print") as printed:
+            code = selector.command_speed(self.cfg, mock.Mock(path=path, mb=megabytes))
+        return code, [call.args[0] for call in printed.call_args_list]
+
+    def test_both_paths_are_measured_through_their_tunnels(self) -> None:
+        self.steps(3)
+        before = (self.dir / "run" / "state.json").read_text(encoding="utf-8")
+        code, lines = self.speed({"awg3": "10000000 3.200 200", "awg4": "10000000 1.000 200"})
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            lines,
+            [
+                "Загрузка 10 МБ через туннель пути, адрес проверки: speed.cloudflare.com",
+                "основной EXIT (awg3), транспорт прямой: 10,0 МБ за 3,2 с, 25,0 Мбит/с",
+                "резервный EXIT (awg4), транспорт прямой: 10,0 МБ за 1,0 с, 80,0 Мбит/с",
+            ],
+        )
+        first = self.curl[0]
+        self.assertEqual(first[first.index("--interface") + 1], "awg3")
+        self.assertEqual(first[first.index("--max-time") + 1], "60")
+        self.assertEqual(first[-1], "https://speed.cloudflare.com/__down?bytes=10000000")
+        # Измерение ничего не меняет и не занимает блокировку переключателя: за
+        # минуту загрузки проверки путей не должны остановиться.
+        self.assertEqual((self.dir / "run" / "state.json").read_text(encoding="utf-8"), before)
+        self.assertFalse((self.dir / "run" / "lock").exists())
+
+    def test_connection_frozen_after_the_first_kilobytes_is_named(self) -> None:
+        self.steps(3)
+        self.passes[(STANDBY, "awg")] = False
+        self.until(lambda state: state["paths"][STANDBY]["transport"] == "tls" and
+                   state["paths"][STANDBY]["fail"] == 0)
+        # Путь «отвечает», но сервер после 18 КБ замолчал, и curl ждал до предела.
+        code, lines = self.speed({"awg4": "18000 60.001 200"}, path=STANDBY)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.curl), 1, "измеряется только названный путь")
+        self.assertEqual(
+            lines[1],
+            "резервный EXIT (awg4), транспорт внутри TLS: пришло 18 КБ из 10 МБ за 60,0 с, "
+            "дальше поток остановился. Так выглядит заморозка соединения после первых "
+            "килобайт: трафик через этот путь идти не будет",
+        )
+
+    def test_slow_path_is_not_called_a_freeze(self) -> None:
+        self.steps(3)
+        code, lines = self.speed({"awg3": "4000000 60.000 200"}, path=PRIMARY)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            lines[1],
+            "основной EXIT (awg3), транспорт прямой: пришло 4,0 МБ из 10 МБ за 60,0 с: "
+            "файл не успел загрузиться, скорость 0,5 Мбит/с",
+        )
+
+    def test_failures_of_the_check_itself_are_told_apart(self) -> None:
+        self.steps(3)
+        code, lines = self.speed({"awg3": "0 0.000 000", "awg4": "1500 0.200 403"})
+        self.assertEqual(code, 1)
+        self.assertIn("соединение не открылось", lines[1])
+        self.assertIn("адрес проверки ответил кодом 403: о пути это ничего не говорит", lines[2])
+        code, lines = self.speed({"awg3": None}, path=PRIMARY)
+        self.assertEqual(code, 1)
+        self.assertIn("проверку выполнить не удалось", lines[1])
+        code, lines = self.speed({"awg3": "мусор"}, path=PRIMARY)
+        self.assertIn("проверку выполнить не удалось", lines[1])
+
+    def test_size_sets_the_request_and_the_waiting_time(self) -> None:
+        self.steps(3)
+        code, lines = self.speed({"awg4": "50000000 20.000 200"}, path=STANDBY, megabytes=50)
+        self.assertEqual(code, 0)
+        self.assertIn("50,0 МБ за 20,0 с, 20,0 Мбит/с", lines[1])
+        call = self.curl[0]
+        self.assertEqual(call[-1], "https://speed.cloudflare.com/__down?bytes=50000000")
+        self.assertEqual(call[call.index("--max-time") + 1], "180")
+
+    def test_cascade_without_a_second_transport_is_measured_too(self) -> None:
+        for path in self.cfg.paths.values():
+            path.pop("transports")
+        self.steps(3)
+        code, lines = self.speed({"awg3": "10000000 2.000 200"}, path=PRIMARY)
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[1], "основной EXIT (awg3): 10,0 МБ за 2,0 с, 40,0 Мбит/с")
+
+    def test_command_needs_no_root_and_checks_the_size(self) -> None:
+        self.steps(3)
+        config = self.dir / "config.json"
+        config.write_text(json.dumps(self.document), encoding="utf-8")
+
+        def run(argv: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(argv, 0, "5000000 1.000 200", "")
+
+        with mock.patch.object(selector.subprocess, "run", side_effect=run), \
+                mock.patch.object(selector.os, "geteuid", return_value=1000), \
+                mock.patch("builtins.print") as printed:
+            code = selector.main(["--config", str(config), "speed", "standby", "--mb", "5"])
+        self.assertEqual(code, 0)
+        self.assertIn("5,0 МБ за 1,0 с, 40,0 Мбит/с", printed.call_args.args[0])
+        for size in ("0", "51"):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
+                selector.main(["--config", str(config), "speed", "--mb", size])
+
+    def test_drill_points_at_the_volume_check(self) -> None:
+        self.steps(3)
+        self.reach[PRIMARY] = self.reach[STANDBY] = 3
+        self.now += 10
+        with mock.patch("builtins.print") as printed, \
+                mock.patch.object(selector.time, "time", return_value=self.now):
+            selector.command_transport_drill(self.cfg, mock.Mock(path=STANDBY, minutes=5))
+        self.assertIn("проверьте объём: exit-path speed standby", printed.call_args.args[0])
 
 
 class EndpointTests(unittest.TestCase):

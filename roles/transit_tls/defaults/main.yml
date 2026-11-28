@@ -9,8 +9,12 @@ transit_tls_port: 443
 # Имя в TLS-соединении. Задаётся отдельно каждому EXIT и должно указывать на его
 # адрес: наблюдатель может сверить имя с адресом.
 transit_tls_server_name: ""
-# Отпечаток TLS-клиента на ENTRY.
-transit_tls_fingerprint: chrome
+# Отпечаток TLS-клиента на ENTRY. В закреплённом sing-box 1.13.19 (uTLS 1.8.4)
+# chrome - это Chrome 133: его ТСПУ ограничивает с осени 2026 года
+# (XTLS/Xray-core#7131), Chrome 155 в этой сборке нет. firefox там же - Firefox
+# 120: по тем же сообщениям он проходит, и им же пользуются клиентские профили
+# VLESS каскада. С sing-box 1.14.5 и новее firefox станет Firefox 148.
+transit_tls_fingerprint: firefox
 transit_tls_config_dir: /etc/sing-box
 transit_tls_server_config_path: "{{ transit_tls_config_dir }}/transit-server.json"
 transit_tls_state_dir: /var/lib/sing-box-transit
