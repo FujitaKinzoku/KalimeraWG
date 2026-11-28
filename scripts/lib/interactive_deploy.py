@@ -1396,11 +1396,15 @@ def standby_transit_profile(primary: object) -> dict[str, object]:
     """Профиль обфускации туннеля до резервного EXIT.
 
     Профиль свой, но S4 совпадает с основным туннелем: S4 добавляется к каждому
-    пакету данных и входит в расчёт MTU, а MTU каскада один на оба пути.
+    пакету данных и входит в расчёт MTU, а MTU каскада один на оба пути. Вид I1
+    тоже берётся у основного туннеля: если там оставлен QUIC-подобный пакет,
+    новый путь получает такой же, а не другой вид без ведома владельца.
     """
     profile = awg3_transit_obfuscation()
     if isinstance(primary, dict) and primary.get("s4") is not None:
         profile["s4"] = int(primary["s4"])
+    if isinstance(primary, dict) and awg_signature_kind(primary.get("i1")) == "quic":
+        profile["i1"] = transit_signature("quic")
     validate_awg_obfuscation(profile)
     return profile
 
@@ -3618,6 +3622,82 @@ def awg_quic_short_signature(size_bounds: tuple[int, int]) -> str:
     return f"<b 0x{first_byte:02x}><r {packet_size - 1}>"
 
 
+# Имена для I1 в форме ответа DNS: только крупные российские сервисы. Таких
+# имён нет в списках, по которым фильтр сверяет запросы.
+AWG_DNS_SIGNATURE_NAMES = (
+    "yandex.ru", "ya.ru", "mail.ru", "vk.com", "vk.ru", "ok.ru", "dzen.ru",
+    "rambler.ru", "ozon.ru", "wildberries.ru", "avito.ru", "kinopoisk.ru",
+    "rutube.ru", "gosuslugi.ru", "mos.ru", "sberbank.ru", "tbank.ru",
+    "alfabank.ru", "vtb.ru", "2gis.ru", "hh.ru", "rbc.ru", "ria.ru", "tass.ru",
+    "kp.ru", "gazeta.ru", "mts.ru", "megafon.ru", "beeline.ru", "rt.ru",
+    "pochta.ru", "rzd.ru", "aeroflot.ru", "cdek.ru", "dns-shop.ru", "mvideo.ru",
+    "citilink.ru", "lamoda.ru", "sportmaster.ru", "ivi.ru", "litres.ru",
+    "drom.ru", "auto.ru", "cian.ru", "tutu.ru", "pikabu.ru", "sports.ru",
+    "kaspersky.ru", "consultant.ru", "championat.com",
+)
+AWG_DNS_SIGNATURE_PREFIXES = ("www", "m", "api", "static", "cdn", "id", "img")
+# Первые октеты адресов в ответе: обычные маршрутизируемые сети европейского
+# реестра, без служебных и частных диапазонов.
+AWG_DNS_SIGNATURE_FIRST_OCTETS = (
+    5, 31, 37, 46, 62, 77, 78, 79, 80, 81, 82, 83, 84, 85, 87, 88, 89, 90, 91,
+    92, 93, 94, 95, 109, 176, 178, 185, 188, 193, 194, 195, 212, 213, 217,
+)
+AWG_DNS_SIGNATURE_MAX_SIZE = 96
+
+
+def awg_dns_response_signature() -> str:
+    """Создать I1 в форме ответа DNS с адресами российского сервиса.
+
+    Так выглядит I1 официального приложения AmneziaVPN: два случайных байта
+    номера запроса и ответ с одной записью A, всего 44 байта. Там он один на все
+    установки. Здесь имя, число записей, срок жизни и сеть адресов выбираются
+    при создании профиля, а номер запроса и последний октет каждого адреса
+    меняются при каждой отправке.
+
+    Пакет нужен межсерверному каналу вместо QUIC-подобного I1. Тот подходит под
+    правило, которым в 2022 году блокировали весь QUIC за границу: UDP, первый
+    пакет не короче 1001 байта, версия QUIC 1. Ответ DNS короче ста байт, а байты
+    на месте версии QUIC в нём никогда не равны 00000001 (второй из них - 0x81).
+    """
+    name = AWG_DNS_SIGNATURE_NAMES[secrets.randbelow(len(AWG_DNS_SIGNATURE_NAMES))]
+    if secrets.randbelow(2):
+        prefix = AWG_DNS_SIGNATURE_PREFIXES[secrets.randbelow(len(AWG_DNS_SIGNATURE_PREFIXES))]
+        name = f"{prefix}.{name}"
+    answers = random_between((1, 3))
+    question = b"".join(
+        bytes([len(label)]) + label.encode("ascii") for label in name.split(".")
+    ) + b"\x00\x00\x01\x00\x01"
+    # Флаги 0x8180: ответ рекурсивного резолвера без ошибки; один вопрос.
+    header = b"\x81\x80\x00\x01" + answers.to_bytes(2, "big") + b"\x00\x00\x00\x00"
+    ttl = random_between((20, 600)).to_bytes(4, "big")
+    network = bytes([
+        AWG_DNS_SIGNATURE_FIRST_OCTETS[secrets.randbelow(len(AWG_DNS_SIGNATURE_FIRST_OCTETS))],
+        secrets.randbelow(256),
+        secrets.randbelow(256),
+    ])
+    # Запись A: указатель на имя из вопроса, тип, класс, срок жизни, длина 4.
+    record = b"\xc0\x0c\x00\x01\x00\x01" + ttl + b"\x00\x04" + network
+    parts = ["<r 2>"]
+    fixed = header + question
+    for _ in range(answers):
+        parts.append(f"<b 0x{(fixed + record).hex()}><r 1>")
+        fixed = b""
+    signature = "".join(parts)
+    if awg_cps_signature_size(signature) > AWG_DNS_SIGNATURE_MAX_SIZE:
+        fail("Не удалось сформировать I1 в форме ответа DNS допустимого размера")
+    return signature
+
+
+def awg_signature_kind(signature: object) -> str:
+    """Вид I1 профиля: dns, quic или other (включая пустой)."""
+    text = str(signature or "")
+    if re.match(r"<r 2><b 0x8[15]800001", text):
+        return "dns"
+    if re.match(r"<b 0xc[0-3]00000001", text):
+        return "quic"
+    return "other"
+
+
 def awg_message_padding() -> tuple[int, int, int]:
     """Создать S1-S3 без совпадения размеров служебных сообщений AWG."""
     s1 = random_between((16, 64))
@@ -3794,18 +3874,17 @@ def awg3_transit_obfuscation() -> dict[str, object]:
     (в отличие от KeeneticOS/mobile), а сами эти поля - junk и
     handshake-смежные пакеты, а не поле, применяемое к каждому
     транспортному пакету, поэтому увеличение почти не стоит пропускной
-    способности (см. docs/awg3.md). I1 не переопределяется - у него уже
-    нет своего "потолка на профиль", он и так тянется к общему защитному
-    пределу `+28 <= 1280` в `validate_awg_obfuscation` (используется её
-    MTU-независимый дефолт, а не фактический согласованный MTU канала -
-    профиль должен оставаться безопасным даже при самом низком допустимом
-    MTU), поэтому отдельное значение для transit не добавило бы запаса.
+    способности (см. docs/awg3.md). I1 у канала свой: короткий пакет в форме
+    ответа DNS вместо QUIC-подобного, см. awg_dns_response_signature. Канал
+    пересекает границу, а QUIC-подобный I1 подходит под правило, которым там
+    уже блокировали QUIC целиком.
     """
     result = awg_server_obfuscation()
     result.update({
         "jc": random_between((8, 16)),
         "jmin": random_between((48, 80)),
         "jmax": random_between((384, 640)),
+        "i1": awg_dns_response_signature(),
         "i2": awg_quic_short_signature(
             (random_between((80, 112)), random_between((340, 430)))
         ),
@@ -3960,6 +4039,113 @@ def set_size_masking(production: Path, enabled: bool) -> bool:
     yaml_write(entry_path, entry_vars)
     yaml_write(all_path, all_vars)
     print("Production inventory обновлён: маскировка размеров пакетов включена.")
+    return True
+
+
+def transit_signature(kind: str) -> str:
+    """Новый I1 межсерверного канала заданного вида: dns или quic."""
+    if kind == "dns":
+        return awg_dns_response_signature()
+    if kind == "quic":
+        return awg_quic_initial_signature(random_between((1200, 1252)))
+    fail(f"Неизвестный вид I1 межсерверного канала: {kind}")
+
+
+def awg_profile_with_signature(profile: dict, signature: str) -> dict:
+    """Тот же профиль с другим I1; остальные поля не меняются."""
+    result = {**profile, "i1": signature}
+    validate_awg_obfuscation(result)
+    return result
+
+
+def transit_signature_state(production: Path) -> dict[str, str]:
+    """Вид I1 на каждом пути до EXIT по inventory: primary и, если есть, standby."""
+    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+    state: dict[str, str] = {}
+    for key in SIZE_MASKING_ENTRY_TRANSIT_KEYS:
+        if isinstance(entry_vars.get(key), dict):
+            state["primary"] = awg_signature_kind(entry_vars[key].get("i1"))
+            break
+    if isinstance(entry_vars.get("entry_standby_exit_obfuscation"), dict):
+        state["standby"] = awg_signature_kind(entry_vars["entry_standby_exit_obfuscation"].get("i1"))
+    return state
+
+
+def set_transit_signature(production: Path, dns: bool) -> bool:
+    """Сменить вид I1 на канале ENTRY-EXIT: ответ DNS или QUIC-подобный пакет.
+
+    I1 - пакет-приманка перед каждым рукопожатием. Его формирует отправитель, а
+    приёмник отбрасывает, поэтому остальные поля профиля, ключи и клиенты не
+    меняются, а стороны канала не обязаны получить его одновременно. Меняется
+    канал до каждого EXIT; у клиентских профилей I1 остаётся прежним.
+    """
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    hosts_path = production / "hosts.yml"
+    if not all(path.is_file() for path in (entry_path, exit_path, hosts_path)):
+        fail("Для смены I1 межсерверного канала нужен production inventory")
+    entry_vars, exit_vars = load_yaml(entry_path), load_yaml(exit_path)
+    hosts_document = load_yaml(hosts_path)
+    kind = "dns" if dns else "quic"
+    title = "ответ DNS" if dns else "QUIC-подобный пакет"
+
+    entry_keys = [key for key in SIZE_MASKING_ENTRY_TRANSIT_KEYS if isinstance(entry_vars.get(key), dict)]
+    exit_keys = [key for key in SIZE_MASKING_EXIT_TRANSIT_KEYS if isinstance(exit_vars.get(key), dict)]
+    if not entry_keys or not exit_keys:
+        fail("В inventory нет профиля канала ENTRY-EXIT: I1 сменить нельзя")
+    standby = None
+    if standby_exit_configured(hosts_document):
+        standby = hosts_document["all"]["children"]["exit"]["hosts"][STANDBY_EXIT_HOST]
+        if not isinstance(standby, dict) or not isinstance(standby.get("exit_awg_obfuscation"), dict) \
+                or not isinstance(entry_vars.get("entry_standby_exit_obfuscation"), dict):
+            fail("В inventory нет профиля канала до резервного EXIT: выполните kalimera-deploy --resume")
+
+    state = transit_signature_state(production)
+    if state and all(value == kind for value in state.values()):
+        print(f"I1 межсерверного канала уже имеет вид «{title}».")
+        return False
+
+    lines = (
+        [
+            "Первый пакет перед рукопожатием на канале ENTRY-EXIT станет коротким",
+            "пакетом в форме ответа DNS. Прежний пакет в форме QUIC версии 1 длиннее",
+            "1200 байт и подходит под правило, которым в 2022 году блокировали весь",
+            "QUIC за границу.",
+        ]
+        if dns
+        else [
+            "Первый пакет перед рукопожатием на канале ENTRY-EXIT снова станет пакетом",
+            "в форме QUIC версии 1 длиной 1200-1252 байта.",
+        ]
+    )
+    lines.extend([
+        "Остальные поля профиля и ключи не меняются. Туннель до каждого EXIT",
+        "перезапустится, зарубежный трафик на это время прервётся.",
+        "Клиенты AmneziaWG, KeeneticOS и VLESS не затрагиваются.",
+    ])
+    ui_panel("ПЕРВЫЙ ПАКЕТ МЕЖСЕРВЕРНОГО КАНАЛА", lines, "cyan")
+    if not prompt_bool("Продолжить", False):
+        fail("I1 межсерверного канала не изменён")
+
+    # Обе стороны канала получают один I1: профиль в inventory общий.
+    primary_signature = transit_signature(kind)
+    for key in entry_keys:
+        entry_vars[key] = awg_profile_with_signature(entry_vars[key], primary_signature)
+    for key in exit_keys:
+        exit_vars[key] = awg_profile_with_signature(exit_vars[key], primary_signature)
+    if standby is not None:
+        standby_signature = transit_signature(kind)
+        for key in SIZE_MASKING_EXIT_TRANSIT_KEYS:
+            if isinstance(standby.get(key), dict):
+                standby[key] = awg_profile_with_signature(standby[key], standby_signature)
+        entry_vars["entry_standby_exit_obfuscation"] = awg_profile_with_signature(
+            entry_vars["entry_standby_exit_obfuscation"], standby_signature
+        )
+
+    yaml_write(hosts_path, hosts_document)
+    yaml_write(exit_path, exit_vars)
+    yaml_write(entry_path, entry_vars)
+    print(f"Production inventory обновлён: I1 межсерверного канала - {title}.")
     return True
 
 
@@ -6549,6 +6735,19 @@ def main() -> None:
         help="при --resume выключить маскировку размеров пакетов AmneziaWG 3.1",
     )
     parser.add_argument(
+        "--enable-dns-signature",
+        action="store_true",
+        help=(
+            "при --resume заменить первый пакет I1 на канале ENTRY-EXIT коротким пакетом "
+            "в форме ответа DNS; клиенты не затрагиваются"
+        ),
+    )
+    parser.add_argument(
+        "--disable-dns-signature",
+        action="store_true",
+        help="при --resume вернуть на канал ENTRY-EXIT QUIC-подобный I1",
+    )
+    parser.add_argument(
         "--enable-front-site",
         action="store_true",
         help=(
@@ -6835,6 +7034,8 @@ def main() -> None:
             ("--disable-front-site", args.disable_front_site),
             ("--enable-size-masking", args.enable_size_masking),
             ("--disable-size-masking", args.disable_size_masking),
+            ("--enable-dns-signature", args.enable_dns_signature),
+            ("--disable-dns-signature", args.disable_dns_signature),
         )
         if value
     ]
@@ -6974,6 +7175,10 @@ def main() -> None:
             set_size_masking(production, True)
         if args.disable_size_masking:
             set_size_masking(production, False)
+        if args.enable_dns_signature:
+            set_transit_signature(production, True)
+        if args.disable_dns_signature:
+            set_transit_signature(production, False)
         if args.replace_front:
             prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)
@@ -7321,6 +7526,17 @@ def main() -> None:
                 "Маскировка размеров пакетов выключена, каскад проверен. Клиентов mobile/AWG3+ "
                 "создайте заново (vpn-user delete ИМЯ --yes, затем vpn-user ИМЯ mobile): "
                 "прежние конфиги не подключатся."
+            )
+        elif args.enable_dns_signature:
+            print(
+                "I1 межсерверного канала заменён пакетом в форме ответа DNS, каскад "
+                "проверен. Клиентские конфиги прежние. Состояние путей и потери: "
+                "exit-path status. Описание: docs/awg3.md."
+            )
+        elif args.disable_dns_signature:
+            print(
+                "На межсерверный канал возвращён QUIC-подобный I1, каскад проверен. "
+                "Клиентские конфиги прежние."
             )
         elif (
             args.enable_ru_proxy

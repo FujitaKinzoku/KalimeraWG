@@ -2440,10 +2440,10 @@ class InteractiveDeployTests(unittest.TestCase):
             i5_sizes.append(MODULE.awg_cps_signature_size(profile["i5"]))
         for seen in (jc_seen, jmin_seen, jmax_seen):
             self.assertGreater(len(seen), 1, "Jc/Jmin/Jmax должны меняться между вызовами")
-        # I1 больше не переопределяется отдельно для transit - наследуется
-        # от awg_server_obfuscation(), у которой размер I1 теперь тоже
-        # диапазон (1200-1252), а не фиксированное значение.
-        self.assertTrue(all(1200 <= size <= 1252 for size in i1_sizes))
+        # I1 канала - короткий пакет в форме ответа DNS, а не QUIC-подобный
+        # пакет общего профиля: канал пересекает границу (подробно -
+        # tests/test_transit_signature.py).
+        self.assertTrue(all(39 <= size <= MODULE.AWG_DNS_SIGNATURE_MAX_SIZE for size in i1_sizes))
         self.assertGreater(len(i1_sizes), 1, "I1 должен меняться между вызовами")
         for sizes, bounds in (
             (i2_sizes, (80, 430)),
@@ -2452,9 +2452,9 @@ class InteractiveDeployTests(unittest.TestCase):
             (i5_sizes, (25, 220)),
         ):
             self.assertTrue(all(bounds[0] <= size <= bounds[1] for size in sizes))
-        # Общий профиль (KeeneticOS/mobile) наследует тот же диапазон I1
-        # (1200-1252), что и transit, но НЕ получает расширенные границы
-        # I2-I5 - те остаются transit-специфичными.
+        # Общий профиль (KeeneticOS/mobile) сохраняет QUIC-подобный I1
+        # (1200-1252) и НЕ получает расширенные границы I2-I5 - те остаются
+        # transit-специфичными.
         self.assertTrue(
             1200 <= MODULE.awg_cps_signature_size(MODULE.awg_server_obfuscation()["i1"]) <= 1252
         )
