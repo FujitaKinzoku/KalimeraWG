@@ -9,6 +9,22 @@ upstream front_xhttp_backend {
     keepalive 64;
 }
 
+{% if front_site_active | default(false) | bool %}
+# Срок кэша страниц и файлов сайта по типу ответа: страницы обновляются
+# быстро, файлы с хешем в имени и рисунки хранятся долго. Через переменную,
+# а не отдельными location с регулярными выражениями: такие location nginx
+# проверяет раньше обычных, и путь XHTTP не должен от них зависеть.
+map $sent_http_content_type $front_site_expires {
+    default                  off;
+    ~^text/html              10m;
+    ~^text/xml               1h;
+    ~^text/plain             1h;
+    ~^text/css               30d;
+    ~^application/javascript 30d;
+    ~^image/                 30d;
+}
+
+{% endif %}
 {% endif %}
 server {
     listen 80;
@@ -84,8 +100,34 @@ server {
         # молча выбрасывает.
     }
 
+{% if front_site_active | default(false) | bool %}
+    # Сайт в корне: всё, что не путь XHTTP, получает страницы из каталога,
+    # собранного kalimera-front-site. Домен отвечает как обычный сайт: главная,
+    # вложенные страницы, файлы, своя страница 404, сжатие и заголовки кэша.
+    root {{ front_site_root }};
+    index index.html;
+    error_page 404 /404.html;
+
+    location = /404.html {
+        internal;
+        charset utf-8;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+        charset utf-8;
+        expires $front_site_expires;
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 512;
+        gzip_types text/css text/xml text/plain application/javascript image/svg+xml;
+        add_header X-Content-Type-Options nosniff always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+    }
+{% else %}
     location / {
         return 404;
     }
+{% endif %}
 }
 {% endif %}

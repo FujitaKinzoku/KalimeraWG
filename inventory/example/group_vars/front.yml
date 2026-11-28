@@ -23,6 +23,16 @@ front_xhttp_disguise_enabled: true
 front_subscription_enabled: false
 awg3_transit_enabled: false
 
+# Сайт в корне домена вместо ответа 404 на всё, кроме пути XHTTP
+# (docs/front-relay.md, раздел "Сайт в корне домена"). Значения записывает
+# установщик: kalimera-deploy --resume --enable-front-site. Зерно у каждой
+# установки своё: из него выводится всё содержимое сайта.
+# front_site_enabled: true
+# front_site_seed: "<32 шестнадцатеричных символа>"
+# front_site_created: "2026-01-15"
+# front_site_language: ru
+# front_site_title: ""
+
 runtime_secrets_share_index: 3
 runtime_secrets_peer_inventory_hosts: >-
   {{ (groups['entry'] | default([])) + (groups['exit'] | default([])) }}

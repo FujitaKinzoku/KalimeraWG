@@ -1243,6 +1243,28 @@ front_tls_endpoint_ready() {
             -verify_return_error >/dev/null 2>&1
 }
 
+{% if front_site_enabled | default(false) | bool %}
+# Сайт в корне FRONT. Обе проверки локальные и не зависят от DNS, CDN и сети:
+# каталог сверяется с описью, которую сборщик записал при сборке, а главная
+# страница запрашивается у Nginx этого же сервера по имени origin-домена.
+# Сертификат здесь не проверяется: за его срок отвечает отдельная строка.
+front_site_is_intact() {
+    {{ front_site_command_path | default('/usr/local/libexec/kalimera-front-site') | quote }} verify \
+        --config {{ front_site_config_path | default('/etc/kalimera-front-site/config.json') | quote }} \
+        --root {{ front_site_root | default('/var/www/kalimera-site') | quote }} \
+        --state {{ front_site_state_dir | default('/var/lib/kalimera-front-site') | quote }}
+}
+
+front_site_is_served() {
+    local answer
+    answer="$(curl --silent --insecure --ipv4 --max-time 10 --output /dev/null \
+        --resolve {{ (front_origin_domain ~ ':443:127.0.0.1') | quote }} \
+        --write-out '%{http_code} %{content_type}' \
+        {{ ('https://' ~ front_origin_domain ~ '/') | quote }})" || return 1
+    [[ "$answer" == '200 text/html'* ]]
+}
+{% endif %}
+
 # Живая проверка того, из-за чего CDN-доступ пропал целиком: Yandex Cloud
 # CDN отвечает 413 на любой GET с телом (а POST у него выключен), и пакеты
 # аплинка не доходили даже до nginx, хотя TLS endpoint CDN был жив. Запрос
@@ -1465,6 +1487,10 @@ check_minor 'Xray не может изменять каталог конфигу
 check_minor 'Nginx не сохраняет журналы активности' nginx_no_logs_policy_is_active
 check_minor 'TLS-сертификат FRONT origin-домена не близок к истечению' \
     openssl x509 -checkend 604800 -noout -in {{ front_origin_cert_path }}
+{% if front_site_enabled | default(false) | bool %}
+check_minor 'сайт FRONT собран и не изменён' front_site_is_intact
+check 'Nginx отдаёт главную страницу сайта FRONT' front_site_is_served
+{% endif %}
 {% if 'direct' in front_access_modes %}
 check 'прямой TLS endpoint FRONT доступен' front_tls_endpoint_ready {{ front_direct_domain | quote }}
 {% endif %}

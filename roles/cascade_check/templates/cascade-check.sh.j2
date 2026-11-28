@@ -21,6 +21,7 @@ readonly front_host={{ cascade_check_front_host | quote }}
 readonly front_port={{ cascade_check_front_port | int }}
 readonly cdn_enabled={{ 'true' if (cascade_check_cdn_enabled | bool) else 'false' }}
 readonly cdn_domain={{ cascade_check_cdn_domain | quote }}
+readonly front_site_enabled={{ 'true' if (cascade_check_front_site_enabled | default(false) | bool) else 'false' }}
 
 {% raw %}
 usage() { echo 'Использование: cascade-check [--tsv]'; }
@@ -419,6 +420,16 @@ cdn_rows() {
                 ;;
             *)
                 emit_row CDN OK 'CDN: TLS и HTTPS' "TCP $tcp_ms мс, TLS $tls_ms мс, ответ $http_ms мс, HTTP $code" '' "$total_ms"
+                # При включённом сайте в корне FRONT тот же запрос обязан вернуть
+                # главную страницу. Сам сайт проверяет FRONT (awg-health); здесь
+                # видно, что его отдаёт и CDN, а не прежний ответ из своего кэша.
+                if [[ "$front_site_enabled" == true ]]; then
+                    if [[ "$code" == 200 ]]; then
+                        emit_row CDN OK 'сайт FRONT через CDN' 'главная страница отдаётся'
+                    else
+                        emit_row CDN WARN 'сайт FRONT через CDN' "вместо главной страницы HTTP $code" 'CDN мог сохранить прежний ответ: очистите кэш ресурса в панели CDN или подождите; на FRONT: awg-health --strict'
+                    fi
+                fi
                 ;;
         esac
     else

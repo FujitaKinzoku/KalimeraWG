@@ -1049,6 +1049,118 @@ def set_loss_switch(production: Path, enabled: bool) -> bool:
     return True
 
 
+FRONT_SITE_KEYS = (
+    "front_site_enabled",
+    "front_site_seed",
+    "front_site_created",
+    "front_site_language",
+    "front_site_title",
+)
+FRONT_SITE_LANGUAGES = ("ru", "en")
+
+
+def front_site_title_problem(title: str) -> str:
+    """Почему название сайта нельзя принять; пустая строка - можно."""
+    if len(title) > 60:
+        return "Название сайта не должно быть длиннее 60 символов"
+    if re.search(r"[\x00-\x1f\x7f]", title):
+        return "В названии сайта не должно быть управляющих символов"
+    return ""
+
+
+def new_front_site(language: str = "ru", title: str = "") -> dict[str, object]:
+    """Настройки сайта в корне FRONT для одной установки.
+
+    Зерно случайное и нигде больше не используется: сборщик на FRONT выводит из
+    него листы, палитры, адреса страниц и оформление, поэтому у каждой установки
+    сайт свой. День включения записывается один раз: от него отсчитываются даты
+    листов, и при следующих обновлениях каскада они не сдвигаются.
+    """
+    if language not in FRONT_SITE_LANGUAGES:
+        fail("Язык сайта FRONT: ru или en")
+    problem = front_site_title_problem(title)
+    if problem:
+        fail(problem)
+    return {
+        "front_site_enabled": True,
+        "front_site_seed": secrets.token_hex(16),
+        "front_site_created": time.strftime("%Y-%m-%d", time.gmtime()),
+        "front_site_language": language,
+        "front_site_title": title,
+    }
+
+
+def ask_front_site() -> dict[str, object]:
+    """Спросить язык и название сайта; остальное выбирается случайно."""
+    language = prompt("Язык сайта: ru или en", "ru").lower()
+    if language not in FRONT_SITE_LANGUAGES:
+        fail("Язык сайта FRONT: ru или en")
+    title = prompt("Название сайта (Enter - выбрать автоматически)")
+    return new_front_site(language, title)
+
+
+def enable_front_site(production: Path) -> bool:
+    """Включить сайт в корне FRONT вместо ответа 404.
+
+    Меняются только переменные FRONT в inventory. Каталог сайта собирает и
+    подключает к Nginx обычный deploy; путь XHTTP, ключи и клиентские профили
+    не затрагиваются.
+    """
+    front_path = production / "group_vars" / "front.yml"
+    if not front_path.is_file():
+        fail(
+            "Сайт размещается на FRONT, а FRONT в каскаде нет. "
+            "Сначала подключите его: ./deploy --resume --enable-front"
+        )
+    front_vars = load_yaml(front_path)
+    if not front_vars.get("front_enabled"):
+        fail("FRONT в inventory выключен: сайт размещать негде")
+    if front_vars.get("front_site_enabled"):
+        print("Сайт в корне FRONT уже включён.")
+        return False
+    ui_panel(
+        "САЙТ В КОРНЕ FRONT",
+        [
+            "Сейчас FRONT отвечает 404 на всё, кроме пути VLESS: домен с настоящим",
+            "сертификатом выглядит заглушкой. С сайтом тот же Nginx отдаёт небольшой",
+            "альбом генеративной графики: главную, страницы листов, ленту, значок.",
+            "Содержимое у каждой установки своё. VLESS и клиентские профили не меняются.",
+        ],
+        "cyan",
+    )
+    if front_vars.get("front_site_seed") and prompt_bool(
+        "Вернуть прежний сайт (нет - собрать новый, с другим содержимым)", True
+    ):
+        front_vars["front_site_enabled"] = True
+    else:
+        front_vars.update(ask_front_site())
+    yaml_write(front_path, front_vars)
+    print("Production inventory обновлён: сайт в корне FRONT будет собран текущим deploy.")
+    return True
+
+
+def disable_front_site(production: Path) -> bool:
+    """Выключить сайт в корне FRONT: Nginx снова отвечает 404.
+
+    Зерно и остальные настройки остаются в inventory: повторное включение может
+    вернуть тот же сайт.
+    """
+    front_path = production / "group_vars" / "front.yml"
+    if not front_path.is_file():
+        fail("FRONT в каскаде нет: выключать нечего")
+    front_vars = load_yaml(front_path)
+    if not front_vars.get("front_site_enabled"):
+        print("Сайт в корне FRONT уже выключен.")
+        return False
+    del front_vars["front_site_enabled"]
+    yaml_write(front_path, front_vars)
+    print(
+        "Production inventory обновлён: FRONT снова будет отвечать 404 на всё, кроме пути "
+        "VLESS; каталог сайта будет удалён текущим deploy."
+    )
+    return True
+
+
 _DOMAIN_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
 )
@@ -1141,6 +1253,13 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
             fail("Публичный домен CDN должен быть корректным DNS-именем")
         front_cdn_state = "ready"
 
+    # Сайт в корне домена: без него FRONT отвечает 404 на всё, кроме пути VLESS.
+    front_site = (
+        ask_front_site()
+        if prompt_bool("Разместить в корне домена сайт вместо ответа 404", True)
+        else {}
+    )
+
     entry_vars = load_yaml(entry_path)
     entry_changed = False
     for key, value in {
@@ -1183,6 +1302,7 @@ def enable_front_profile(production: Path, vault_password: Path) -> bool:
         **new_front_disguise(),
         "front_origin_domain": front_origin_domain,
         "front_certbot_email": front_certbot_email,
+        **front_site,
     }
     yaml_write(front_path, front_vars)
 
@@ -6244,6 +6364,19 @@ def main() -> None:
         help="при --resume менять путь до EXIT, только когда он перестал отвечать",
     )
     parser.add_argument(
+        "--enable-front-site",
+        action="store_true",
+        help=(
+            "при --resume разместить в корне FRONT сайт вместо ответа 404: домен отвечает "
+            "как обычный сайт, VLESS и клиентские профили не меняются"
+        ),
+    )
+    parser.add_argument(
+        "--disable-front-site",
+        action="store_true",
+        help="при --resume убрать сайт из корня FRONT: на всё, кроме пути VLESS, ответ 404",
+    )
+    parser.add_argument(
         "--replace-front",
         action="store_true",
         help="при --resume подготовить новый FRONT без отключения прежнего",
@@ -6513,6 +6646,8 @@ def main() -> None:
             ("--replace-exit", args.replace_exit),
             ("--enable-fallback-transport", args.enable_fallback_transport),
             ("--disable-fallback-transport", args.disable_fallback_transport),
+            ("--enable-front-site", args.enable_front_site),
+            ("--disable-front-site", args.disable_front_site),
         )
         if value
     ]
@@ -6644,6 +6779,10 @@ def main() -> None:
             enable_fallback_transport(production, vault_password)
         if args.disable_fallback_transport:
             disable_fallback_transport(production, vault_password)
+        if args.enable_front_site:
+            enable_front_site(production)
+        if args.disable_front_site:
+            disable_front_site(production)
         if args.replace_front:
             prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)
@@ -6964,6 +7103,19 @@ def main() -> None:
                 "Запасной транспорт туннеля выключен, каскад проверен. На EXIT остался "
                 "один прямой транспорт."
             )
+        elif args.enable_front_site:
+            print(
+                "Сайт в корне FRONT включён, каскад проверен. Откройте в браузере "
+                "origin-домен FRONT и домен CDN: оба должны показать главную страницу. "
+                "Если CDN ещё отвечает 404, он отдаёт прежний ответ из своего кэша: "
+                "очистите кэш ресурса в панели CDN. Проверка: cascade-check. Описание: "
+                "docs/front-relay.md."
+            )
+        elif args.disable_front_site:
+            print(
+                "Сайт в корне FRONT выключен, каскад проверен. На всё, кроме пути VLESS, "
+                "FRONT снова отвечает 404."
+            )
         elif (
             args.enable_ru_proxy
             or args.disable_ru_proxy
@@ -7213,6 +7365,7 @@ def main() -> None:
     front_cdn_state = "not_configured"
     front_direct_domain = ""
     front_cdn_domain = ""
+    front_site: dict[str, object] = {}
     if front_enabled:
         ui_panel(
             "FRONT И СЛУЖЕБНЫЙ REALITY BACKEND",
@@ -7262,6 +7415,10 @@ def main() -> None:
             if not _DOMAIN_RE.match(front_cdn_domain or ""):
                 fail("Публичный домен CDN должен быть корректным")
             front_cdn_state = "ready"
+
+        # Сайт в корне домена: без него FRONT отвечает 404 на всё, кроме пути VLESS.
+        if prompt_bool("Разместить в корне домена сайт вместо ответа 404", True):
+            front_site = ask_front_site()
 
         print("Проверка кандидатов маскировочного dest-сайта (TLS 1.3, три пробы)...")
         results = {host: probe_reality_dest(host) for host in reality_candidates}
@@ -7781,6 +7938,7 @@ def main() -> None:
                 "front_certbot_email": front_certbot_email,
                 "front_xhttp_path": "/" + secrets.token_urlsafe(9),
                 **new_front_disguise(),
+                **front_site,
                 "front_subscription_enabled": False,
                 "front_vless_encryption_enabled": True,
                 "front_xhttp_disguise_enabled": True,
