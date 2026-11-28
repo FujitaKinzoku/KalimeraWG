@@ -81,6 +81,23 @@ class Config:
         self.speed_url = str(
             document.get("speed_url", "https://speed.cloudflare.com/__down?bytes={bytes}")
         )
+        # Уход с пути, который отвечает, но теряет пакеты (см. раздел "Потери"
+        # ниже). 0 - выключено: путь меняется, только когда перестал отвечать.
+        self.loss_switch_percent = float(document.get("loss_switch_percent", 0))
+        self.loss_switch_minutes = int(document.get("loss_switch_minutes", 10))
+        self.loss_clean_percent = float(document.get("loss_clean_percent", 1))
+        self.loss_return_minutes = int(document.get("loss_return_minutes", 30))
+        if self.loss_switch_percent < 0 or self.loss_clean_percent < 0:
+            raise ValueError("пороги потерь не могут быть отрицательными")
+        if self.loss_switch_percent > 0 and not (
+            self.loss_clean_percent < self.loss_switch_percent
+            and 2 <= self.loss_switch_minutes <= QUALITY_MINUTES
+            and 2 <= self.loss_return_minutes <= QUALITY_MINUTES
+        ):
+            raise ValueError(
+                "уход с теряющего пути: порог чистого пути должен быть ниже порога ухода, "
+                "а окна - от 2 до 60 минут"
+            )
         self.table = int(document["table"])
         self.state_dir = Path(document["state_dir"])
         self.mode_file = Path(document["mode_file"])
@@ -328,6 +345,96 @@ def record_probe(
 def path_is_healthy(state: dict, name: str) -> bool:
     entry = state["paths"][name]
     return entry["healthy_since"] is not None and int(entry["fail"]) == 0
+
+
+# --- Потери ---
+#
+# Путь может отвечать и при этом терять пакеты: проверки проходят со второй
+# попытки, а скорость через него падает в разы. По умолчанию на выбор пути это не
+# влияет. Если задан loss_switch_percent, действует ещё одно правило:
+#
+#   * трафик уходит с пути, когда за loss_switch_minutes доля проверок с потерей
+#     на нём не ниже порога, а другой путь всё это время отвечал и чист
+#     (не выше loss_clean_percent);
+#   * обратно на основной - только когда он чист в течение loss_return_minutes:
+#     иначе трафик вернулся бы сразу, ведь теряющий путь «устойчиво отвечает».
+#
+# Каждый переход меняет внешний адрес клиентов и обрывает их соединения, поэтому
+# окна длинные, а возврат строже ухода. Найдено на рабочем каскаде: основной путь
+# несколько часов терял до 7,6% проверок при чистом резервном, и переключатель
+# ничего не делал.
+
+
+def window_counts(entry: dict, now: int, minutes: int) -> tuple[int, int, int, int]:
+    """Проверки пути за последние minutes минут.
+
+    Возвращает число минут с данными, проверки при отвечающем пути, из них с
+    потерей, и проверки, когда путь не отвечал совсем.
+    """
+    minute = now // 60
+    items = [item for item in quality_items(entry.get("quality"), now) if item[0] > minute - minutes]
+    return (
+        len(items),
+        sum(item[1] for item in items),
+        sum(item[2] for item in items),
+        sum(item[3] for item in items),
+    )
+
+
+def loss_share(entry: dict, now: int, minutes: int) -> float | None:
+    """Доля проверок с потерей за окно в процентах; None, пока окно не заполнено.
+
+    Проверка, на которую путь не ответил совсем, считается потерянной целиком:
+    путь, который то и дело замолкает на одну проверку, хуже теряющего пакеты.
+    """
+    covered, total, lost, down = window_counts(entry, now, minutes)
+    # Данные должны быть за каждую минуту окна: после перезагрузки ENTRY или
+    # простоя переключателя по обрывку истории о потерях не судят.
+    if covered < minutes or total + down < QUALITY_MIN_PROBES:
+        return None
+    return (lost + down) * 100 / (total + down)
+
+
+def path_is_clean(cfg: Config, state: dict, name: str, now: int, minutes: int) -> bool:
+    """Путь всё окно отвечал, и доля потерь на нём не выше порога чистого пути."""
+    if not path_is_healthy(state, name):
+        return False
+    covered, total, lost, down = window_counts(state["paths"][name], now, minutes)
+    if covered < minutes or total < QUALITY_MIN_PROBES or down:
+        return False
+    return lost * 100 <= cfg.loss_clean_percent * total
+
+
+def loss_move_reason(cfg: Config, state: dict, active: str, other: str, now: int) -> str:
+    """Причина увести трафик с пути active из-за потерь; пусто, если причины нет."""
+    if cfg.loss_switch_percent <= 0:
+        return ""
+    share = loss_share(state["paths"][active], now, cfg.loss_switch_minutes)
+    if share is None or share < cfg.loss_switch_percent:
+        return ""
+    # Уходить есть смысл только на путь, который заведомо лучше: чистый и не на
+    # запасном транспорте, если этот идёт прямым.
+    if transport_rank(cfg, state, other) > transport_rank(cfg, state, active):
+        return ""
+    if not path_is_clean(cfg, state, other, now, cfg.loss_switch_minutes):
+        return ""
+    subject = "основной путь" if active == PRIMARY else "резервный путь"
+    return (
+        f"{subject} теряет пакеты: за {cfg.loss_switch_minutes} мин "
+        f"{format_number(share)}% проверок прошли со второй попытки или без ответа"
+    )
+
+
+def primary_may_return(cfg: Config, state: dict, now: int) -> bool:
+    """Можно ли вернуть трафик на основной путь с точки зрения потерь.
+
+    Считаются только проверки, на которые путь отвечал: после отказа сервера
+    минуты отказа возврат не задерживают, как и раньше.
+    """
+    if cfg.loss_switch_percent <= 0:
+        return True
+    _covered, total, lost, _down = window_counts(state["paths"][PRIMARY], now, cfg.loss_return_minutes)
+    return total >= QUALITY_MIN_PROBES and lost * 100 <= cfg.loss_clean_percent * total
 
 
 # --- Транспорт туннеля ---
@@ -593,6 +700,10 @@ def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
             and now - int(standby["healthy_since"]) >= cfg.failback_seconds
         ):
             return STANDBY, "основной путь работает через запасной транспорт"
+        # Основной путь отвечает, но устойчиво теряет пакеты, а резервный чист.
+        reason = loss_move_reason(cfg, state, PRIMARY, STANDBY, now)
+        if reason:
+            return STANDBY, reason
         return PRIMARY, ""
     if int(standby["fail"]) >= cfg.fail_threshold and path_is_healthy(state, PRIMARY):
         return PRIMARY, "резервный путь не отвечает"
@@ -601,8 +712,16 @@ def decide(state: dict, mode: str, cfg: Config, now: int) -> tuple[str, str]:
         healthy_since is not None
         and now - int(healthy_since) >= cfg.failback_seconds
         and primary_rank <= standby_rank
+        # Основной путь, с которого трафик ушёл из-за потерь, «устойчиво отвечал»
+        # всё это время: без этой проверки трафик вернулся бы на него сразу.
+        and primary_may_return(cfg, state, now)
     ):
         return PRIMARY, REASON_FAILBACK
+    # Теперь пакеты теряет резервный путь, а основной чист: ждать полного срока
+    # возврата незачем.
+    reason = loss_move_reason(cfg, state, STANDBY, PRIMARY, now)
+    if reason:
+        return PRIMARY, reason
     return STANDBY, ""
 
 
@@ -877,6 +996,25 @@ def status_lines(cfg: Config, state: dict, mode: str, now: int) -> list[str]:
         lines.append(f"  с этого пути не уходили: {format_age(now - int(state['since']))}")
     if mode == "auto":
         lines.append("Режим: автоматический")
+        if cfg.loss_switch_percent > 0:
+            lines.append(
+                f"  уход с теряющего пути: при {format_number(cfg.loss_switch_percent)}% "
+                f"проверок с потерей за {cfg.loss_switch_minutes} мин, если другой путь чист"
+            )
+            # Основной путь отвечает давно, но трафик на него не возвращается: без
+            # этой строки статус не объяснял бы, чего ждёт переключатель.
+            primary = state["paths"][PRIMARY]
+            if (
+                active == STANDBY
+                and not int(state.get("drill_until") or 0) > now
+                and path_is_healthy(state, PRIMARY)
+                and now - int(primary["healthy_since"]) >= cfg.failback_seconds
+                and not primary_may_return(cfg, state, now)
+            ):
+                lines.append(
+                    f"  возврат на основной EXIT: когда за {cfg.loss_return_minutes} мин потерь "
+                    f"на нём будет не больше {format_number(cfg.loss_clean_percent)}%"
+                )
     else:
         lines.append(f"Режим: закреплён {cfg.label(mode)}; вернуть автоматику: exit-path auto")
     if int(state.get("drill_until") or 0) > now:

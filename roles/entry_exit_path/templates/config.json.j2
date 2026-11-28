@@ -24,6 +24,13 @@
 ]} if tls else {} %}
 {% set retest_extra = {'transport_retest_hour_utc': retest_hour | int}
    if (tls and retest_hour is not none and retest_hour | string | length > 0) else {} %}
+{# Уход с теряющего пути: ключи появляются, только когда правило включено. #}
+{% set loss_extra = {
+  'loss_switch_percent': entry_exit_path_loss_switch_percent | default(5) | float,
+  'loss_switch_minutes': entry_exit_path_loss_switch_minutes | default(10) | int,
+  'loss_clean_percent': entry_exit_path_loss_clean_percent | default(1) | float,
+  'loss_return_minutes': entry_exit_path_loss_return_minutes | default(30) | int
+} if (entry_exit_path_loss_switch_enabled | default(false) | bool) else {} %}
 {# Цепочка, которой ENTRY закрывает у себя прямой транспорт пути на запасном. #}
 {% set transport_extra = dict({'transport_chain': transit_tls_entry_chain | default('KALIMERA-TRANSIT')},
                               **retest_extra) if tls else {} %}
@@ -60,4 +67,4 @@
   'dns_via_exit': entry_dns_default_via_exit | default(false) | bool,
   'notify_command': ([awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor'), '--notify']
                      if (awg_telegram_monitor_enabled | default(false) | bool) else [])
-}, **transport_extra) | to_nice_json(ensure_ascii=False) }}
+}, **dict(transport_extra, **loss_extra)) | to_nice_json(ensure_ascii=False) }}
