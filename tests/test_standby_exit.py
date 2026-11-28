@@ -106,6 +106,8 @@ class SelectorCase(unittest.TestCase):
             "current_route_interface": lambda _cfg: self.route,
             "flush_connections": lambda _cfg, previous: self.flushed.append(previous),
             "sync_dns": lambda _cfg, name: self.dns.append(name),
+            # Настоящая функция вызвала бы unbound-control, если он есть на машине.
+            "flush_dns_infra": lambda _cfg: None,
             "log": self.messages.append,
         }.items():
             patcher = mock.patch.object(selector, name, replacement)
