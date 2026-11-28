@@ -174,6 +174,9 @@ def empty_state() -> dict:
                 "retest_at": 0,
                 "retest_now": False,
                 "transport_drill_until": 0,
+                # Адрес прямого транспорта, с которым путь работал: по его смене
+                # видно, что сервер заменён.
+                "direct_endpoint": None,
             }
             for name in PATH_NAMES
         },
@@ -634,6 +637,29 @@ def manage_transports(cfg: Config, state: dict, now: int) -> None:
         entry = state["paths"][name]
         if entry.get("transport") not in names:
             entry.update({"transport": names[0], "transport_since": now, "transport_ok": True})
+        # Адрес прямого транспорта сменился: сервер заменён. Сторож на только что
+        # установленном EXIT держит открытым прямой транспорт и первые минуты
+        # запасной не откроет, поэтому путь начинает с прямого - и во время deploy,
+        # который транспорт в остальном не меняет. Иначе путь, застрявший на
+        # запасном транспорте прежнего сервера, до нового не достучался бы.
+        direct = str(cfg.transport(name, names[0])["endpoint"])
+        if entry.get("direct_endpoint") not in (None, direct):
+            if entry["transport"] != names[0]:
+                log(
+                    f"{cfg.label(name)}: адрес сервера сменился, туннель возвращён на "
+                    f"транспорт «{cfg.transport_label(name, names[0])}»"
+                )
+            entry.update(
+                {
+                    "transport": names[0],
+                    "transport_since": now,
+                    "transport_ok": False,
+                    "retest_now": False,
+                    "healthy_since": None,
+                    "transport_drill_until": 0,
+                }
+            )
+        entry["direct_endpoint"] = direct
         # Учебный переход закончился: путь сразу проверяет прямой транспорт.
         drill_ended = 0 < int(entry.get("transport_drill_until") or 0) <= now
         if drill_ended:

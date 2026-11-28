@@ -680,6 +680,25 @@ def update_production_vault(
     return True
 
 
+def read_production_vault(production: Path, vault_password: Path) -> dict:
+    """Прочитать production Vault. Значения на экран не выводятся."""
+    vault_path = production / "group_vars" / "all" / "vault.yml"
+    if not vault_path.is_file() or not vault_password.is_file():
+        fail("Не найден production Vault или внешний пароль Ansible Vault")
+    vault_secret = vault_password.read_bytes().rstrip(b"\r\n")
+    if not vault_secret:
+        fail("Файл пароля Ansible Vault пуст")
+    try:
+        document = yaml.safe_load(
+            VaultLib([("default", VaultSecret(vault_secret))]).decrypt(vault_path.read_bytes())
+        )
+    except Exception as error:
+        fail(f"Не удалось расшифровать production Vault: {type(error).__name__}")
+    if not isinstance(document, dict):
+        fail("Production Vault должен содержать словарь переменных")
+    return document
+
+
 PROXY_SCOPES = ("all", "selected")
 _PROXY_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
@@ -1356,12 +1375,13 @@ def probe_tcp_route(
     }
 
 
-def confirm_standby_route(host: str, port: int) -> None:
+def confirm_standby_route(host: str, port: int, role: str = "резервный EXIT") -> None:
     """Проверить маршрут от ENTRY до нового сервера, пока ничего не изменено.
 
     Найдено на рабочем каскаде: сервер был исправен и доступен, а маршрут между
     хостингами терял 3-5% пакетов - скорость через готовый туннель оказалась в
-    сорок раз ниже, чем через основной EXIT.
+    сорок раз ниже, чем через основной EXIT. role - кем станет сервер: так он
+    назван в сообщениях.
     """
     print(
         f"Проверка маршрута до {host}: {STANDBY_ROUTE_PROBES} TCP-подключений к порту "
@@ -1391,7 +1411,7 @@ def confirm_standby_route(host: str, port: int) -> None:
         [
             f"Из {count} подключений к {host}:{port} с первой попытки прошли "
             f"{result['clean']}, со второй - {result['slow']}, без ответа - {result['failed']}.",
-            "При таких потерях скорость через резервный EXIT будет в десятки раз ниже",
+            f"При таких потерях скорость через {role} будет в десятки раз ниже",
             "обычной. Причина в маршруте между хостингами: настройками каскада она не",
             "устраняется. Надёжнее взять сервер у другого хостера или повторить",
             "проверку в другое время суток.",
@@ -1399,7 +1419,7 @@ def confirm_standby_route(host: str, port: int) -> None:
         "yellow",
     )
     if not prompt_bool("Всё равно подключить этот сервер", False):
-        print("Резервный EXIT не подключён: inventory и сервер не изменены.")
+        print(f"{role[0].upper()}{role[1:]} не подключён: inventory и сервер не изменены.")
         raise SystemExit(0)
 
 
@@ -1913,6 +1933,288 @@ def disable_fallback_transport(production: Path, vault_password: Path) -> bool:
     print(
         "Production inventory обновлён: запасной транспорт выключен; службы и сторожа "
         "транспорта на серверах снимет текущий deploy."
+    )
+    return True
+
+
+PRIMARY_EXIT_HOST = "exit-managed"
+
+
+def controller_runs_on_entry(hosts_document: dict) -> bool:
+    """Запущен ли установщик на самом ENTRY (обычная схема)."""
+    entry_hosts = (
+        hosts_document.get("all", {}).get("children", {}).get("entry", {}).get("hosts", {})
+    )
+    return isinstance(entry_hosts, dict) and any(
+        isinstance(values, dict) and values.get("ansible_connection") == "local"
+        for values in entry_hosts.values()
+    )
+
+
+def replace_exit(production: Path, vault_password: Path) -> bool:
+    """Заменить основной EXIT новым сервером (docs/standby-exit.md).
+
+    Новый сервер занимает в inventory место прежнего: получает новые ключи туннеля,
+    новый профиль обфускации и, если включён запасной транспорт, новый сертификат.
+    Прежний сервер не затрагивается: к этому моменту он обычно недоступен. Сам
+    сервер ставит обычный deploy, который идёт следом; при подключённом резервном
+    EXIT зарубежный трафик всё это время идёт через него.
+    """
+    hosts_path = production / "hosts.yml"
+    all_path = production / "group_vars" / "all" / "main.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    if not all(path.is_file() for path in (hosts_path, all_path, entry_path, exit_path)):
+        fail("Для замены основного EXIT нужен установленный production inventory")
+    if not vault_password.is_file():
+        fail("Для замены основного EXIT нужен пароль Ansible Vault")
+
+    hosts_document = load_yaml(hosts_path)
+    exit_hosts = hosts_document.get("all", {}).get("children", {}).get("exit", {}).get("hosts", {})
+    if not isinstance(exit_hosts, dict) or not isinstance(exit_hosts.get(PRIMARY_EXIT_HOST), dict):
+        fail("В production inventory нет основного EXIT (exit-managed)")
+    current = exit_hosts[PRIMARY_EXIT_HOST]
+    entry_vars = load_yaml(entry_path)
+    exit_vars = load_yaml(exit_path)
+    all_vars = load_yaml(all_path)
+    if entry_vars.get("awg3_transit_enabled", False) or exit_vars.get("awg3_transit_enabled", False):
+        fail(
+            "Замена основного EXIT работает только с kernel-модулем AmneziaWG. Межсерверный "
+            "канал этого каскада на userspace-движке: переключите его "
+            "scripts/toggle-transit-engine.py."
+        )
+    if not entry_vars.get("entry_manage_awg_configs", False):
+        fail("Замена основного EXIT требует, чтобы конфигурации AWG на ENTRY вёл установщик")
+    entry_tunnel_address = str(entry_vars.get("entry_exit_tunnel_address") or "")
+    if not entry_tunnel_address:
+        fail("В настройках ENTRY нет адреса туннеля до основного EXIT (entry_exit_tunnel_address)")
+
+    has_standby = standby_exit_configured(hosts_document)
+    on_entry = controller_runs_on_entry(hosts_document)
+    old_address = str(current.get("ansible_host") or "")
+    old_ipv4 = str(entry_vars.get("security_interserver_peer_ipv4") or old_address)
+    # Deploy удерживает путь от переключения: трафик, оставшийся на основном EXIT,
+    # не шёл бы никуда до конца установки нового сервера.
+    if has_standby and on_entry and not standby_exit_carries_traffic(entry_vars):
+        fail(
+            "Зарубежный трафик сейчас идёт через основной EXIT: замена оборвала бы его до "
+            "конца установки. Сначала переведите трафик на резервный сервер: exit-path use "
+            "standby; после замены верните автоматику: exit-path auto"
+        )
+
+    lines = [
+        "Новый сервер занимает место основного EXIT и получает новые ключи туннеля и",
+        "новый профиль маскировки. Клиентские конфиги не меняются.",
+    ]
+    if has_standby:
+        lines += [
+            "Зарубежный трафик всё это время идёт через резервный EXIT; на новый",
+            "основной он вернётся сам через 15 минут после установки.",
+        ]
+    else:
+        lines += [
+            "Резервного EXIT нет: зарубежный трафик не будет работать, пока новый",
+            "сервер не установится, обычно 10-20 минут.",
+        ]
+    lines += [
+        f"Прежний сервер ({old_address}) не изменяется и может быть уже недоступен.",
+        "На нём остаются прежние ключи туннеля, его доля ключа хранилища и",
+        "зашифрованная копия состояния контроллера: после замены удалите его у",
+        "хостера. Новому серверу нужна чистая Ubuntu 24.04 и другая сеть, если",
+        "прежний адрес заблокирован. Учётные записи на нём будут те же, что на",
+        "прежнем EXIT: вход kalimera по тому же SSH-ключу и с тем же паролем sudo.",
+    ]
+    ui_panel("ЗАМЕНА ОСНОВНОГО EXIT", lines, "cyan")
+    if has_standby and not on_entry:
+        print(
+            "Установщик запущен не на ENTRY: через какой EXIT сейчас идёт трафик, отсюда "
+            "не видно. Если через основной, он прервётся до конца установки."
+        )
+    if not prompt_bool("Заменить основной EXIT новым сервером", False):
+        print("Основной EXIT не заменён: inventory и серверы не изменены.")
+        raise SystemExit(0)
+
+    new_host = prompt("IP-адрес или DNS-имя нового основного EXIT")
+    if not new_host:
+        fail("Необходимо указать адрес нового основного EXIT")
+    require_public_endpoint(new_host, "Адрес нового основного EXIT")
+    new_ipv4 = resolve_single_public_ipv4(new_host, "Адрес нового основного EXIT")
+    taken_addresses = {
+        str(exit_vars.get("security_interserver_peer_ipv4", "")),
+        str(entry_vars.get("front_public_ipv4", "")),
+        str(entry_vars.get("entry_standby_exit_public_ipv4", "")),
+    }
+    if new_ipv4 in taken_addresses:
+        fail("Этот адрес уже занят другим сервером каскада: основному EXIT нужен отдельный сервер")
+    same_address = new_ipv4 == old_ipv4
+    if same_address and not prompt_bool(
+        "Адрес совпадает с нынешним основным EXIT. Сервер переустановлен начисто", False
+    ):
+        print("Основной EXIT не заменён: inventory и серверы не изменены.")
+        raise SystemExit(0)
+    new_user = prompt("Пользователь SSH нового EXIT", "root")
+    new_port = prompt_port("Текущий SSH-порт нового EXIT", 22)
+    managed_port = prompt_port(
+        "Новый управляемый SSH-порт нового EXIT", int(current.get("ssh_listen_port", 56777))
+    )
+    if managed_port < 1024:
+        fail("Управляемый SSH-порт нового EXIT должен находиться в диапазоне 1024–65535")
+    new_password = getpass.getpass("Пароль SSH нового EXIT (ввод скрыт): ")
+    if not new_password:
+        fail("Начальный пароль SSH нового EXIT не может быть пустым")
+
+    # Имя запасного транспорта должно указывать на новый адрес: его сверяет и
+    # наблюдатель. Проверяется до любых изменений, чтобы запись можно было исправить.
+    tls_enabled = bool(all_vars.get("transit_tls_enabled"))
+    tls_name = ""
+    if tls_enabled:
+        tls_name = prompt(
+            f"Имя запасного транспорта для нового EXIT ({new_ipv4})",
+            str(current.get("transit_tls_server_name") or "") or None,
+        ).strip().lower().rstrip(".")
+        if not _TRANSIT_TLS_NAME_RE.match(tls_name):
+            fail("Имя запасного транспорта должно быть доменным именем вида st-4k7m2x.example.com")
+        standby_values = exit_hosts.get(STANDBY_EXIT_HOST)
+        if isinstance(standby_values, dict) and standby_values.get("transit_tls_server_name") == tls_name:
+            fail("Каждому EXIT нужно своё имя запасного транспорта: адреса у серверов разные")
+        resolved = resolve_single_public_ipv4(tls_name, "Имя запасного транспорта")
+        if resolved != new_ipv4:
+            fail(
+                f"Имя {tls_name} указывает на {resolved}, а адрес нового EXIT - {new_ipv4}. "
+                "Исправьте A-запись (без проксирования) и повторите команду."
+            )
+
+    ssh_private = Path.home() / ".ssh" / "awg-iac-production"
+    ssh_public = Path(str(ssh_private) + ".pub")
+    if not ssh_private.is_file() or not ssh_public.is_file():
+        fail("Не найден управляющий SSH-ключ awg-iac-production")
+    if on_entry:
+        confirm_standby_route(new_ipv4, new_port, "новый основной EXIT")
+    else:
+        print("Маршрут от ENTRY до нового сервера не проверен: установщик запущен не на ENTRY.")
+    old_ports = {
+        int(current.get(key) or 22)
+        for key in ("ansible_port", "ssh_listen_port", "security_previous_ssh_port")
+    }
+    if same_address:
+        # Переустановленный сервер предъявит новый ключ узла: прежняя запись о нём
+        # не дала бы подключиться.
+        forget_ssh_host(new_ipv4, old_ports | {new_port, managed_port})
+    new_password = bootstrap_key(
+        new_host, new_user, new_port, new_password, ssh_public, "новый основной EXIT"
+    )
+    automation_source_ipv4 = remote_observed_ssh_source_ipv4(
+        new_host, new_user, new_port, ssh_private
+    )
+    if not automation_source_ipv4:
+        fail("Новый EXIT не подтвердил исходный IPv4 управляющего SSH-сеанса")
+
+    # До этой строки inventory и Vault не менялись: отказ на любом шаге выше
+    # оставляет каскад как был.
+    vault = read_production_vault(production, vault_password)
+    transit_private = awg_private_key()
+    exit_private = awg_private_key()
+    transit_psk = awg_psk()
+    vault_updates: dict[str, object] = {
+        "vault_awg_entry_exit_private_key": transit_private,
+        "vault_awg_entry_exit_peer_public_key": awg_public_key(exit_private),
+        "vault_awg_entry_exit_entry_public_key": awg_public_key(transit_private),
+        "vault_awg_entry_exit_psk": transit_psk,
+        "vault_awg_exit_private_key": exit_private,
+        "vault_awg3_header_protection_key": awg_private_key(),
+        "vault_exit_peers": [
+            {
+                "name": "entry",
+                "public_key": awg_public_key(transit_private),
+                "allowed_ips": [entry_tunnel_address],
+                "preshared_key": transit_psk,
+            }
+        ],
+    }
+    # Ключи обмена долями хранилища у нового сервера свои: их создаёт следующий
+    # шаг deploy для хоста, у которого их нет.
+    for key in ("vault_runtime_exchange_private_keys", "vault_runtime_exchange_public_keys"):
+        if isinstance(vault.get(key), dict) and PRIMARY_EXIT_HOST in vault[key]:
+            vault_updates[key] = {
+                host: value for host, value in vault[key].items() if host != PRIMARY_EXIT_HOST
+            }
+    if tls_enabled:
+        material = dict(vault.get(TRANSIT_TLS_VAULT_KEY) or {})
+        private_key, certificate = transit_tls_certificate(tls_name)
+        material[PRIMARY_EXIT_HOST] = {
+            "uuid": str(uuid.uuid4()),
+            "certificate": certificate,
+            "private_key": private_key,
+        }
+        vault_updates[TRANSIT_TLS_VAULT_KEY] = material
+    if new_user != "root":
+        vault_updates["vault_exit_become_password"] = new_password
+    update_production_vault(
+        production,
+        vault_password,
+        vault_updates,
+        remove=() if new_user != "root" else ("vault_exit_become_password",),
+    )
+
+    # Профиль новый, но S4 прежний: S4 добавляется к каждому пакету данных и входит
+    # в расчёт MTU, а MTU каскада один на оба пути и записан в клиентских конфигах.
+    profile = standby_transit_profile(entry_vars.get("entry_awg1_obfuscation"))
+    endpoint_port = str(entry_vars.get("entry_exit_endpoint") or "").rpartition(":")[2]
+    if not endpoint_port.isdigit():
+        endpoint_port = str(int(exit_vars.get("exit_awg_listen_port", 443)))
+    entry_vars.update(
+        {
+            "security_interserver_peer_ipv4": new_ipv4,
+            "entry_exit_endpoint": f"{new_ipv4}:{endpoint_port}",
+            "awg3_peer_endpoint_host": new_ipv4,
+            "entry_awg1_obfuscation": profile,
+            "awg3_transit_obfuscation": profile,
+        }
+    )
+    yaml_write(entry_path, entry_vars)
+    exit_vars.update(
+        {
+            "exit_awg_obfuscation": profile,
+            "awg3_transit_obfuscation": profile,
+            "runtime_secrets_advertise_ipv4": new_ipv4,
+        }
+    )
+    yaml_write(exit_path, exit_vars)
+
+    current.update(
+        {
+            # Адрес, а не имя: по нему остальные серверы ограничивают выдачу своей
+            # доли ключа (from= в authorized_keys).
+            "ansible_host": new_ipv4,
+            "ansible_user": new_user,
+            "ansible_port": new_port,
+            "ansible_become": True,
+            "ansible_ssh_private_key_file": str(ssh_private),
+            "ssh_listen_port": managed_port,
+            "security_allow_ssh_port_change": new_port != managed_port,
+            "security_automation_source_ipv4": automation_source_ipv4,
+        }
+    )
+    for stale in ("ansible_become_method", "ansible_become_password", "security_previous_ssh_port"):
+        current.pop(stale, None)
+    if new_user != "root":
+        current["ansible_become_password"] = "{{ vault_exit_become_password }}"
+    if "runtime_secrets_advertise_ipv4" in current:
+        current["runtime_secrets_advertise_ipv4"] = new_ipv4
+    if tls_enabled:
+        current["transit_tls_server_name"] = tls_name
+    yaml_write(hosts_path, hosts_document)
+
+    # Новый сервер проходит тот же двухшаговый переход SSH, что и при установке.
+    if all_vars.get("security_finalize_admin_access") is not False:
+        all_vars["security_finalize_admin_access"] = False
+        yaml_write(all_path, all_vars)
+
+    if not same_address:
+        forget_ssh_host(old_address, old_ports)
+    print(
+        f"Production inventory обновлён: основной EXIT заменён ({old_address} → {new_ipv4}); "
+        "новый сервер будет установлен текущим deploy."
     )
     return True
 
@@ -5871,6 +6173,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--replace-exit",
+        action="store_true",
+        help=(
+            "при --resume заменить основной EXIT новым сервером, например когда адрес "
+            "прежнего заблокирован: новые ключи туннеля, клиентские конфиги не меняются; "
+            "при подключённом резервном EXIT трафик всё это время идёт через него"
+        ),
+    )
+    parser.add_argument(
         "--enable-fallback-transport",
         action="store_true",
         help=(
@@ -6199,6 +6510,7 @@ def main() -> None:
         for name, value in (
             ("--enable-standby-exit", args.enable_standby_exit),
             ("--disable-standby-exit", args.disable_standby_exit),
+            ("--replace-exit", args.replace_exit),
             ("--enable-fallback-transport", args.enable_fallback_transport),
             ("--disable-fallback-transport", args.disable_fallback_transport),
         )
@@ -6326,6 +6638,8 @@ def main() -> None:
             enable_standby_exit(production, vault_password)
         if args.disable_standby_exit:
             disable_standby_exit(production, vault_password)
+        if args.replace_exit:
+            replace_exit(production, vault_password)
         if args.enable_fallback_transport:
             enable_fallback_transport(production, vault_password)
         if args.disable_fallback_transport:
@@ -6628,6 +6942,15 @@ def main() -> None:
                 "Резервный EXIT отключён, каскад проверен. Зарубежный трафик идёт только "
                 "через основной EXIT. Отключённый сервер удалите у хостера или "
                 "переустановите на нём систему."
+            )
+        elif args.replace_exit:
+            print(
+                "Основной EXIT заменён, каскад проверен. Туннель до нового сервера работает "
+                "с новыми ключами; клиентские конфиги не изменились. Если трафик шёл через "
+                "резервный EXIT, он вернётся на основной сам через 15 минут; если путь был "
+                "закреплён командой exit-path use, верните автоматику: exit-path auto. "
+                "Прежний сервер удалите у хостера: на нём остались прежние ключи туннеля, его "
+                "доля ключа хранилища и копия состояния контроллера."
             )
         elif args.enable_fallback_transport:
             print(
