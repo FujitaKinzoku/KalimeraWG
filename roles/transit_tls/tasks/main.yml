@@ -1,0 +1,506 @@
+---
+# Запасной транспорт туннеля ENTRY - EXIT. Роль выполняется в play ENTRY и в play
+# EXIT; что именно ставить, определяет awg_node_role.
+#
+# Порядок plays (сначала ENTRY, потом EXIT) перерывов не создаёт. При включении
+# ENTRY получает клиентскую часть раньше, чем EXIT - сторожа, но туннель в это
+# время идёт прямым транспортом, а без сторожа на EXIT открыт только он.
+
+- name: Проверка параметров запасного транспорта на EXIT
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - transit_tls_port | int >= 1
+      - transit_tls_port | int <= 65535
+      - transit_tls_server_name is match('^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,}$')
+      - vault_transit_tls is mapping
+      - vault_transit_tls[inventory_hostname] is mapping
+      - vault_transit_tls[inventory_hostname].uuid | length == 36
+      - vault_transit_tls[inventory_hostname].certificate is search('BEGIN CERTIFICATE')
+      - vault_transit_tls[inventory_hostname].private_key is search('PRIVATE KEY')
+      - security_interserver_peer_ipv4 | ansible.utils.ipv4
+    fail_msg: >-
+      Запасной транспорт включён, но его параметры для этого EXIT неполны.
+      Подключите его командой kalimera-deploy --resume --enable-fallback-transport.
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Проверка параметров запасного транспорта на ENTRY
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - entry_standby_exit_enabled | default(false) | bool
+      - entry_standby_exit_host | default('') in groups['exit']
+      - vault_transit_tls is mapping
+      - transit_tls_local_ports.primary | int != transit_tls_local_ports.standby | int
+      - transit_tls_retest_hour_utc is none or (transit_tls_retest_hour_utc | int >= 0 and transit_tls_retest_hour_utc | int <= 23)
+    fail_msg: >-
+      Запасной транспорт требует резервный EXIT (транспортом управляет переключатель
+      путей) и параметры обоих серверов. Команда:
+      kalimera-deploy --resume --enable-fallback-transport.
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+# --- sing-box: тот же закреплённый пакет, что роль sing_box ставит на ENTRY ---
+
+- name: Закреплённый пакет sing-box для запасного транспорта
+  ansible.builtin.set_fact:
+    transit_tls_package: "{{ hostvars[groups['entry'][0]].entry_sing_box_packages[ansible_architecture] }}"
+  when: transit_tls_enabled | bool
+
+- name: Проверка закреплённого пакета sing-box
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - transit_tls_package.url is match('^https://github.com/SagerNet/sing-box/releases/download/')
+      - transit_tls_package.checksum is match('^sha256:[0-9a-f]{64}$')
+    fail_msg: Для запасного транспорта нужен закреплённый пакет sing-box (entry_sing_box_packages)
+  when: transit_tls_enabled | bool
+
+- name: Каталог пакета sing-box
+  ansible.builtin.file:
+    path: "{{ transit_tls_package_cache | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: transit_tls_enabled | bool
+
+- name: Загрузка закреплённого пакета sing-box
+  ansible.builtin.get_url:
+    url: "{{ transit_tls_package.url }}"
+    dest: "{{ transit_tls_package_cache }}"
+    checksum: "{{ transit_tls_package.checksum }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: transit_tls_enabled | bool
+
+- name: Установка sing-box
+  ansible.builtin.apt:
+    deb: "{{ transit_tls_package_cache }}"
+    state: present
+    lock_timeout: 600
+  when: transit_tls_enabled | bool
+
+# Пакет приносит собственную службу и config.json с правами 0644. На EXIT проект
+# ими не пользуется никогда; на ENTRY - когда нет ни RU-прокси, ни VLESS: иначе
+# их ведёт роль sing_box, и условие здесь то же, что в ней. Оставлять их нельзя:
+# server-audit требует для config.json права 0600, а включённая служба после
+# перезагрузки не стартует - её конфигурации нет в защищённом хранилище.
+- name: Нужны ли серверу служба и конфигурация sing-box из пакета
+  ansible.builtin.set_fact:
+    transit_tls_package_service_unused: >-
+      {{ awg_node_role == 'exit'
+         or not (entry_ru_proxy_enabled | bool
+                 or reality_fallback_enabled | default(false) | bool) }}
+  when: transit_tls_enabled | bool
+
+- name: Отключение службы sing-box из пакета
+  ansible.builtin.systemd_service:
+    name: sing-box.service
+    enabled: false
+    state: stopped
+  when:
+    - transit_tls_enabled | bool
+    - transit_tls_package_service_unused | bool
+
+# Если пакет успел запустить службу, она упала: её конфигурации нет в хранилище.
+# Без этого шага отметка о сбое оставалась бы в server-audit до перезагрузки.
+- name: Снятие отметки о сбое службы sing-box из пакета
+  ansible.builtin.command:
+    argv: [/usr/bin/systemctl, reset-failed, sing-box.service]
+  changed_when: false
+  failed_when: false
+  when:
+    - transit_tls_enabled | bool
+    - transit_tls_package_service_unused | bool
+
+- name: Удаление конфигурации sing-box из пакета
+  ansible.builtin.file:
+    path: "{{ transit_tls_config_dir }}/config.json"
+    state: absent
+  when:
+    - transit_tls_enabled | bool
+    - transit_tls_package_service_unused | bool
+
+- name: Каталоги запасного транспорта
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "0700"
+  loop:
+    - {path: "{{ transit_tls_config_dir }}", owner: root}
+    - {path: "{{ transit_tls_state_dir }}", owner: sing-box}
+  loop_control:
+    label: "{{ item.path }}"
+  # Каталог конфигурации на ENTRY уже ведут роли sing_box и front_backend.
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit' or item.path != transit_tls_config_dir
+
+# --- EXIT: служба транспорта и сторож ---
+
+- name: Формирование конфигурации запасного транспорта EXIT
+  ansible.builtin.template:
+    src: server.json.j2
+    dest: /run/ansible-transit-tls-server.json
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    transit_tls_material: "{{ vault_transit_tls[inventory_hostname] }}"
+  changed_when: false
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Проверка конфигурации запасного транспорта EXIT
+  ansible.builtin.command:
+    argv: [/usr/bin/sing-box, check, --config, /run/ansible-transit-tls-server.json]
+  changed_when: false
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Установка конфигурации запасного транспорта EXIT
+  ansible.builtin.copy:
+    src: /run/ansible-transit-tls-server.json
+    dest: "{{ transit_tls_server_config_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Перезапустить работающий запасной транспорт EXIT
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Удаление проверенного кандидата конфигурации EXIT
+  ansible.builtin.file:
+    path: /run/ansible-transit-tls-server.json
+    state: absent
+  changed_when: false
+  when: awg_node_role == 'exit'
+
+- name: Служба запасного транспорта EXIT
+  ansible.builtin.template:
+    src: kalimera-transit-tls.service.j2
+    dest: "/etc/systemd/system/{{ transit_tls_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Перечитать модули systemd запасного транспорта
+    - Перезапустить работающий запасной транспорт EXIT
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Каталоги сторожа транспорта
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ transport_guard_config_dir }}"
+    - "{{ transport_guard_active_file | dirname }}"
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Установка сторожа транспорта
+  ansible.builtin.copy:
+    src: kalimera-transport-guard.py
+    dest: "{{ transport_guard_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Установка команды transport-guard
+  ansible.builtin.file:
+    src: "{{ transport_guard_script_path }}"
+    dest: "{{ transport_guard_command_path }}"
+    state: link
+    force: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Настройки сторожа транспорта
+  ansible.builtin.template:
+    src: guard-config.json.j2
+    dest: "{{ transport_guard_config_dir }}/config.json"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+- name: Модули systemd сторожа транспорта
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "/etc/systemd/system/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {src: kalimera-transport-guard.service.j2, dest: "{{ transport_guard_service_name }}"}
+    - {src: kalimera-transport-guard.timer.j2, dest: "{{ transport_guard_timer_name }}"}
+  notify: Перечитать модули systemd запасного транспорта
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+# --- ENTRY: клиентская часть по одной на путь ---
+
+- name: Сброс списка путей запасного транспорта
+  ansible.builtin.set_fact:
+    transit_tls_paths: []
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Пути запасного транспорта на ENTRY
+  ansible.builtin.set_fact:
+    transit_tls_paths: "{{ transit_tls_paths + [transit_tls_path_item] }}"
+  vars:
+    transit_tls_path_item:
+      name: "{{ item.name }}"
+      address: "{{ hostvars[item.host].ansible_host }}"
+      server_name: "{{ hostvars[item.host].transit_tls_server_name }}"
+      awg_port: "{{ hostvars[item.host].exit_awg_listen_port | default(443) }}"
+      local_port: "{{ transit_tls_local_ports[item.name] }}"
+      uuid: "{{ vault_transit_tls[item.host].uuid }}"
+      certificate: "{{ vault_transit_tls[item.host].certificate }}"
+  loop:
+    - {name: primary, host: "{{ groups['exit'][0] }}"}
+    - {name: standby, host: "{{ entry_standby_exit_host | default('') }}"}
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Формирование конфигурации запасного транспорта ENTRY
+  ansible.builtin.template:
+    src: client.json.j2
+    dest: "/run/ansible-transit-tls-{{ transit_tls_path.name }}.json"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ transit_tls_paths | default([]) }}"
+  loop_control:
+    loop_var: transit_tls_path
+    label: "{{ transit_tls_path.name }}"
+  changed_when: false
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Проверка конфигурации запасного транспорта ENTRY
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/sing-box
+      - check
+      - --config
+      - "/run/ansible-transit-tls-{{ transit_tls_path.name }}.json"
+  loop: "{{ transit_tls_paths | default([]) }}"
+  loop_control:
+    loop_var: transit_tls_path
+    label: "{{ transit_tls_path.name }}"
+  changed_when: false
+  no_log: true
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Установка конфигурации запасного транспорта ENTRY
+  ansible.builtin.copy:
+    src: "/run/ansible-transit-tls-{{ transit_tls_path.name }}.json"
+    dest: "{{ transit_tls_config_dir }}/transit-{{ transit_tls_path.name }}.json"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ transit_tls_paths | default([]) }}"
+  loop_control:
+    loop_var: transit_tls_path
+    label: "{{ transit_tls_path.name }}"
+  no_log: true
+  notify: Перезапустить работающий запасной транспорт ENTRY
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Удаление проверенных кандидатов конфигурации ENTRY
+  ansible.builtin.file:
+    path: "/run/ansible-transit-tls-{{ item }}.json"
+    state: absent
+  loop: [primary, standby]
+  changed_when: false
+  when: awg_node_role == 'entry'
+
+- name: Служба запасного транспорта ENTRY
+  ansible.builtin.template:
+    src: "kalimera-transit-tls@.service.j2"
+    dest: "/etc/systemd/system/{{ transit_tls_client_unit }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Перечитать модули systemd запасного транспорта
+    - Перезапустить работающий запасной транспорт ENTRY
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'entry'
+
+- name: Применение модулей systemd запасного транспорта
+  ansible.builtin.meta: flush_handlers
+
+- name: Включение таймера сторожа транспорта
+  ansible.builtin.systemd_service:
+    name: "{{ transport_guard_timer_name }}"
+    enabled: true
+    state: started
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+# Первая проверка выполняется сразу: цепочка межсетевого экрана появляется до
+# строгой проверки сервера, а не через несколько секунд после неё.
+- name: Первая проверка сторожа транспорта
+  ansible.builtin.command:
+    argv: ["{{ transport_guard_script_path }}", tick]
+  changed_when: false
+  when:
+    - transit_tls_enabled | bool
+    - awg_node_role == 'exit'
+
+# --- Запасной транспорт отключён: снять всё, что от него осталось ---
+
+- name: Поиск таймера отключённого сторожа транспорта
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ transport_guard_timer_name }}"
+  register: transit_tls_stale_guard
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'exit'
+
+- name: Остановка отключённого сторожа транспорта и его службы
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop:
+    - "{{ transport_guard_timer_name }}"
+    - "{{ transit_tls_service_name }}"
+  failed_when: false
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'exit'
+    - transit_tls_stale_guard.stat.exists
+
+# Без цепочки сторожа действует правило UFW: открыт прямой транспорт для ENTRY.
+- name: Удаление цепочки сторожа транспорта
+  ansible.builtin.shell: |
+    set -u
+    chain={{ transport_guard_chain | quote }}
+    while iptables -w 10 -D INPUT -j "$chain" 2>/dev/null; do :; done
+    iptables -w 10 -F "$chain" 2>/dev/null || true
+    iptables -w 10 -X "$chain" 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'exit'
+    - transit_tls_stale_guard.stat.exists
+
+- name: Удаление файлов отключённого запасного транспорта EXIT
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ transport_guard_timer_name }}"
+    - "/etc/systemd/system/{{ transport_guard_service_name }}"
+    - "/etc/systemd/system/{{ transit_tls_service_name }}"
+    - "{{ transport_guard_command_path }}"
+    - "{{ transport_guard_script_path }}"
+    - "{{ transport_guard_config_dir }}"
+    - "{{ transport_guard_state_dir }}"
+    - "{{ transport_guard_active_file | dirname }}"
+    - "{{ transit_tls_server_config_path }}"
+  notify: Перечитать модули systemd запасного транспорта
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'exit'
+
+- name: Поиск службы отключённого запасного транспорта ENTRY
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ transit_tls_client_unit }}"
+  register: transit_tls_stale_client
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'entry'
+
+- name: Остановка отключённого запасного транспорта ENTRY
+  ansible.builtin.systemd_service:
+    name: "{{ transit_tls_client_unit | replace('@.service', '@' ~ item ~ '.service') }}"
+    state: stopped
+  loop: [primary, standby]
+  failed_when: false
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'entry'
+    - transit_tls_stale_client.stat.exists
+
+# Переключатель путей снимает цепочку сам, когда путь возвращается на прямой
+# транспорт, а выключение отказывает, пока туннель идёт запасным. Здесь - на
+# случай, если она всё же осталась: с ней прямой транспорт был бы закрыт.
+- name: Удаление цепочки, закрывавшей прямой транспорт на ENTRY
+  ansible.builtin.shell: |
+    set -u
+    chain={{ transit_tls_entry_chain | quote }}
+    for hook in INPUT OUTPUT; do
+      while iptables -w 10 -D "$hook" -j "$chain" 2>/dev/null; do :; done
+    done
+    iptables -w 10 -F "$chain" 2>/dev/null || true
+    iptables -w 10 -X "$chain" 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: true
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'entry'
+    - transit_tls_stale_client.stat.exists
+
+- name: Удаление файлов отключённого запасного транспорта ENTRY
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "/etc/systemd/system/{{ transit_tls_client_unit }}"
+    - "{{ transit_tls_config_dir }}/transit-primary.json"
+    - "{{ transit_tls_config_dir }}/transit-standby.json"
+  notify: Перечитать модули systemd запасного транспорта
+  when:
+    - not (transit_tls_enabled | bool)
+    - awg_node_role == 'entry'

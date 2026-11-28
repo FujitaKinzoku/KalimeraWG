@@ -473,6 +473,10 @@
       when: awg_adoption_mode == 'apply'
     - role: entry_routing
       when: awg_adoption_mode == 'apply'
+    # До entry_exit_path: настройки переключателя путей ссылаются на службы и
+    # порты запасного транспорта.
+    - role: transit_tls
+      when: awg_adoption_mode == 'apply'
     - role: entry_exit_path
       when: awg_adoption_mode == 'apply'
     - role: entry_dns
@@ -537,6 +541,8 @@
     - role: awg3_transit
       when: awg_adoption_mode == 'apply'
     - role: exit_dns
+      when: awg_adoption_mode == 'apply'
+    - role: transit_tls
       when: awg_adoption_mode == 'apply'
     - role: operations
       when: awg_adoption_mode == 'apply'

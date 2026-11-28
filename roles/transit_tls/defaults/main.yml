@@ -1,0 +1,59 @@
+---
+# Запасной транспорт туннеля ENTRY - EXIT (docs/fallback-transport.md): тот же
+# туннель AmneziaWG внутри TLS 1.3 по TCP. Включается командой
+# kalimera-deploy --resume --enable-fallback-transport.
+transit_tls_enabled: false
+# TCP-порт запасного транспорта на EXIT. Открыт только адресу ENTRY и только
+# пока транспорт действует.
+transit_tls_port: 443
+# Имя в TLS-соединении. Задаётся отдельно каждому EXIT и должно указывать на его
+# адрес: наблюдатель может сверить имя с адресом.
+transit_tls_server_name: ""
+# Отпечаток TLS-клиента на ENTRY. В закреплённом sing-box 1.13.19 (uTLS 1.8.4)
+# chrome - это Chrome 133: его ТСПУ ограничивает с осени 2026 года
+# (XTLS/Xray-core#7131), Chrome 155 в этой сборке нет. firefox там же - Firefox
+# 120: по тем же сообщениям он проходит, и им же пользуются клиентские профили
+# VLESS каскада. С sing-box 1.14.5 и новее firefox станет Firefox 148.
+transit_tls_fingerprint: firefox
+transit_tls_config_dir: /etc/sing-box
+transit_tls_server_config_path: "{{ transit_tls_config_dir }}/transit-server.json"
+transit_tls_state_dir: /var/lib/sing-box-transit
+transit_tls_package_cache: /var/cache/ansible/sing-box.deb
+# Служба на EXIT. При загрузке не включается: её запускает сторож транспорта,
+# когда ENTRY просит этот транспорт.
+transit_tls_service_name: kalimera-transit-tls.service
+# Служба на ENTRY, по экземпляру на путь: kalimera-transit-tls@primary.service.
+transit_tls_client_unit: "kalimera-transit-tls@.service"
+# Локальные UDP-порты на ENTRY, в которые направляется туннель пути.
+transit_tls_local_ports:
+  primary: 20443
+  standby: 20444
+# Цепочка межсетевого экрана на ENTRY. Пока путь идёт запасным транспортом,
+# переключатель путей закрывает ею прямой транспорт этого сервера: иначе пакеты
+# EXIT возвращали бы туннель на прямой. Когда все пути на прямом, цепочки нет.
+transit_tls_entry_chain: KALIMERA-TRANSIT
+
+# Сторож транспорта на EXIT: держит открытым один транспорт.
+transport_guard_script_path: /usr/local/sbin/kalimera-transport-guard
+transport_guard_command_path: /usr/local/sbin/transport-guard
+transport_guard_config_dir: /etc/kalimera-transport
+transport_guard_state_dir: /run/kalimera-transport
+transport_guard_active_file: /var/lib/kalimera-transport/active
+transport_guard_service_name: kalimera-transport-guard.service
+transport_guard_timer_name: kalimera-transport-guard.timer
+transport_guard_chain: KALIMERA-TRANSPORT
+transport_guard_interval: 10s
+# Сколько секунд открытый транспорт должен молчать, прежде чем его можно закрыть.
+# Больше интервала keepalive туннеля (до 30 с): исправный туннель не молчит.
+transport_guard_idle_seconds: 75
+transport_guard_knock_packets: 2
+transport_guard_knock_fresh_seconds: 30
+# Сколько секунд после загрузки EXIT транспорт не меняется. ENTRY не отличает
+# перезагрузку EXIT от блокировки и пробует оба транспорта по очереди, каждый до
+# 150 с: за пять минут он успевает попробовать прямой.
+transport_guard_boot_grace_seconds: 300
+
+# На ENTRY: когда путь, который несёт трафик на запасном транспорте, проверяет
+# прямой. Проверка прерывает связь до трёх минут, поэтому идёт раз в сутки в этот
+# час по UTC. Пустое значение - только по команде exit-path retest.
+transit_tls_retest_hour_utc: 1

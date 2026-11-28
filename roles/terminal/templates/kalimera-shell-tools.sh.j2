@@ -51,6 +51,9 @@ if [[ $EUID -ne 0 && -x /usr/local/libexec/kalimera-admin-command ]]; then
     function maintenance-time { _kalimera_admin maintenance-time "$@"; }
     function exit-path { _kalimera_admin exit-path "$@"; }
 {% endif %}
+{% if awg_node_role | default('') == 'exit' %}
+    function transport-guard { _kalimera_admin transport-guard "$@"; }
+{% endif %}
     function controller-backup { _kalimera_admin controller-backup "$@"; }
     function server-audit { _kalimera_admin server-audit "$@"; }
     function self-heal { _kalimera_admin self-heal "$@"; }

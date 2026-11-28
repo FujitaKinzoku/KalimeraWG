@@ -320,6 +320,11 @@ sensitive_modes_ok() {
 /etc/awg-telegram-monitor.env
 /etc/sing-box/config.json
 /etc/sing-box/front-backend.json
+{% if transit_tls_enabled | default(false) | bool %}
+{{ transit_tls_server_config_path | default('/etc/sing-box/transit-server.json') }}
+{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-primary.json
+{{ transit_tls_config_dir | default('/etc/sing-box') }}/transit-standby.json
+{% endif %}
 {% if awg_node_role == 'front' %}
 {{ front_vless_users_path | default('/usr/local/etc/xray/users.json') }}
 {{ front_vless_client_settings_path | default('/usr/local/etc/xray/client-settings.json') }}
@@ -474,8 +479,22 @@ unexpected_public_listeners() {
     local known_udp=''
 {% else %}
     local known_udp='{{ awg3_transit_listen_port | default(exit_awg_listen_port | default(443)) | int }}'
+{% if transit_tls_enabled | default(false) | bool %}
+    # Запасной транспорт туннеля: порт слушается, только пока сторож транспорта
+    # держит его открытым по запросу ENTRY.
+    known_tcp="$known_tcp {{ transit_tls_port | default(443) | int }}"
+{% endif %}
 {% endif %}
     local process
+{% if awg_node_role == 'exit' and (transit_tls_enabled | default(false) | bool) %}
+    # Служба запасного транспорта передаёт пакеты туннеля интерфейсу AmneziaWG на
+    # этом же сервере и держит для этого UDP-сокет на временном порту. ss
+    # показывает его как слушателя; входящие на него закрыты UFW.
+    local pid outbound_pids='' port_low=32768 port_high=60999
+    pid="$(systemctl show -p MainPID --value {{ transit_tls_service_name | default('kalimera-transit-tls.service') | quote }} 2>/dev/null || true)"
+    [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || outbound_pids="$pid"
+    read -r port_low port_high </proc/sys/net/ipv4/ip_local_port_range || true
+{% endif %}
 {% if awg_node_role == 'entry' %}
     # sing-box на ENTRY сам отправляет UDP клиентов (QUIC, DNS, игры) напрямую
     # и держит для каждого потока сокет 0.0.0.0:<временный порт> минутами.
@@ -484,7 +503,7 @@ unexpected_public_listeners() {
     # управляемых служб sing-box (по MainPID) в диапазоне временных портов
     # ядра; постоянный порт или чужой процесс по-прежнему дают предупреждение.
     local unit pid outbound_pids='' port_low=32768 port_high=60999
-    for unit in {{ sing_box_service_name | default('sing-box.service') | quote }} {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}; do
+    for unit in {{ sing_box_service_name | default('sing-box.service') | quote }} {{ front_backend_service_name | default('kalimera-front-backend.service') | quote }}{% if transit_tls_enabled | default(false) | bool %} {{ (transit_tls_client_unit | default('kalimera-transit-tls@.service')) | replace('@.service', '@primary.service') | quote }} {{ (transit_tls_client_unit | default('kalimera-transit-tls@.service')) | replace('@.service', '@standby.service') | quote }}{% endif %}; do
         pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)"
         [[ ! "$pid" =~ ^[1-9][0-9]*$ ]] || outbound_pids="$outbound_pids $pid"
     done
@@ -500,7 +519,7 @@ unexpected_public_listeners() {
         case "$address" in
             127.*|::1|10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) continue ;;
         esac
-{% if awg_node_role == 'entry' %}
+{% if awg_node_role == 'entry' or (awg_node_role == 'exit' and (transit_tls_enabled | default(false) | bool)) %}
         if [[ "$proto" == udp && "$process" =~ pid=([0-9]+), ]] &&
             [[ " $outbound_pids " == *" ${BASH_REMATCH[1]} "* ]] &&
             (( port >= port_low && port <= port_high )); then

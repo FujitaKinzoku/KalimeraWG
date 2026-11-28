@@ -1,19 +1,48 @@
-{{ {
+{#
+  Транспорты пути появляются, только если включён запасной транспорт
+  (roles/transit_tls). Прямой адрес записан числом, а не именем: его сверяют с
+  тем, что показывает интерфейс. Запасной - локальный порт, куда туннель
+  направляется, когда его пакеты идут внутри TLS.
+#}
+{% set tls = transit_tls_enabled | default(false) | bool %}
+{% set local_ports = transit_tls_local_ports | default({'primary': 20443, 'standby': 20444}) %}
+{% set client_unit = transit_tls_client_unit | default('kalimera-transit-tls@.service') %}
+{% set retest_hour = transit_tls_retest_hour_utc | default(1) %}
+{% set primary_extra = {'transports': [
+  {'name': 'awg', 'label': 'прямой',
+   'endpoint': security_interserver_peer_ipv4 ~ ':' ~ (entry_exit_endpoint | string).split(':')[-1]},
+  {'name': 'tls', 'label': 'внутри TLS',
+   'endpoint': '127.0.0.1:' ~ local_ports.primary,
+   'service': client_unit | replace('@.service', '@primary.service')}
+]} if tls else {} %}
+{% set standby_extra = {'transports': [
+  {'name': 'awg', 'label': 'прямой',
+   'endpoint': entry_standby_exit_public_ipv4 ~ ':' ~ (entry_standby_exit_endpoint | string).split(':')[-1]},
+  {'name': 'tls', 'label': 'внутри TLS',
+   'endpoint': '127.0.0.1:' ~ local_ports.standby,
+   'service': client_unit | replace('@.service', '@standby.service')}
+]} if tls else {} %}
+{% set retest_extra = {'transport_retest_hour_utc': retest_hour | int}
+   if (tls and retest_hour is not none and retest_hour | string | length > 0) else {} %}
+{# Цепочка, которой ENTRY закрывает у себя прямой транспорт пути на запасном. #}
+{% set transport_extra = dict({'transport_chain': transit_tls_entry_chain | default('KALIMERA-TRANSIT')},
+                              **retest_extra) if tls else {} %}
+{{ dict({
   'paths': [
-    {
+    dict({
       'name': 'primary',
       'label': 'основной EXIT',
       'interface': entry_exit_interface,
       'tunnel_address': (entry_exit_tunnel_address | string).split('/')[0],
       'peer_tunnel_address': awg3_peer_tunnel_address
-    },
-    {
+    }, **primary_extra),
+    dict({
       'name': 'standby',
       'label': 'резервный EXIT',
       'interface': entry_standby_exit_interface,
       'tunnel_address': (entry_standby_exit_tunnel_address | string).split('/')[0],
       'peer_tunnel_address': entry_standby_exit_peer_tunnel_address
-    }
+    }, **standby_extra)
   ],
   'probe_targets': entry_exit_path_probe_targets,
   'probe_quorum': entry_exit_path_probe_quorum | int,
@@ -23,6 +52,7 @@
   'drill_seconds': entry_exit_path_drill_seconds | int,
   'slow_probe_seconds': entry_exit_path_slow_probe_seconds | float,
   'loss_warn_percent': entry_exit_path_loss_warn_percent | float,
+  'speed_url': entry_exit_path_speed_url | default('https://speed.cloudflare.com/__down?bytes={bytes}'),
   'table': entry_exit_table | int,
   'state_dir': entry_exit_path_state_dir,
   'mode_file': entry_exit_path_mode_file,
@@ -30,4 +60,4 @@
   'dns_via_exit': entry_dns_default_via_exit | default(false) | bool,
   'notify_command': ([awg_telegram_monitor_path | default('/usr/local/sbin/awg-telegram-monitor'), '--notify']
                      if (awg_telegram_monitor_enabled | default(false) | bool) else [])
-} | to_nice_json(ensure_ascii=False) }}
+}, **transport_extra) | to_nice_json(ensure_ascii=False) }}

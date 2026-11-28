@@ -1,0 +1,10 @@
+[Unit]
+Description=KalimeraWG: проверка транспорта туннеля ENTRY - EXIT
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec={{ transport_guard_interval }}
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

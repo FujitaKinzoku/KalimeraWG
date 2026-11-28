@@ -33,3 +33,8 @@ entry_exit_path_slow_probe_seconds: 0.9
 # При какой доле потерь за последний час exit-path status и cascade-check
 # сообщают, что путь теряет пакеты, в процентах.
 entry_exit_path_loss_warn_percent: 2
+# Откуда exit-path speed загружает файл через туннель пути; {bytes} - размер в
+# байтах. Проверка показывает скорость и то, не замирает ли соединение после
+# первых килобайт: проверки пути - это подключения без передачи данных, и
+# заморозку по объёму они не видят.
+entry_exit_path_speed_url: "https://speed.cloudflare.com/__down?bytes={bytes}"

@@ -1,0 +1,40 @@
+[Unit]
+Description=KalimeraWG: запасной транспорт туннеля до EXIT (%i), TLS по TCP
+After=network-online.target
+Wants=network-online.target
+{% if runtime_secrets_enabled | default(false) | bool %}
+Requires={{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') }}
+After={{ runtime_secrets_service_name | default('kalimera-secrets-unlock.service') }}
+{% endif %}
+ConditionPathExists={{ transit_tls_config_dir }}/transit-%i.json
+
+# Экземпляр запускает переключатель путей, когда путь переходит на запасной
+# транспорт, и останавливает при возврате на прямой. При загрузке не включается.
+# Конфигурация передаётся через systemd credentials: служба работает от
+# непривилегированного пользователя и самого файла не читает.
+[Service]
+Type=simple
+User=sing-box
+Group=sing-box
+{% if runtime_secrets_enabled | default(false) | bool %}
+{# Как у остальных защищённых служб: файл читается из открытого хранилища в tmpfs. #}
+LoadCredential=transit.json:{{ runtime_secrets_runtime_root | default('/run/kalimera-secrets') }}/sing-box/transit-%i.json
+{% else %}
+LoadCredential=transit.json:{{ transit_tls_config_dir }}/transit-%i.json
+{% endif %}
+ExecStart=/usr/bin/sing-box -D {{ transit_tls_state_dir }} -c %d/transit.json run
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+ReadWritePaths={{ transit_tls_state_dir }}
+CapabilityBoundingSet=

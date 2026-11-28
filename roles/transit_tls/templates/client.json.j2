@@ -1,0 +1,34 @@
+{#
+  Запасной транспорт на ENTRY для одного пути. Туннель AmneziaWG направляется в
+  локальный UDP-порт; отсюда его пакеты уходят на EXIT внутри TLS 1.3. Доверие
+  только закрытому сертификату этого EXIT. Журнал выключен.
+#}
+{{ {
+  'log': {'disabled': true},
+  'inbounds': [{
+    'type': 'direct',
+    'tag': 'awg-in',
+    'listen': '127.0.0.1',
+    'listen_port': transit_tls_path.local_port | int,
+    'network': 'udp',
+    'override_address': '127.0.0.1',
+    'override_port': transit_tls_path.awg_port | int
+  }],
+  'outbounds': [{
+    'type': 'vless',
+    'tag': 'exit',
+    'server': transit_tls_path.address,
+    'server_port': transit_tls_port | int,
+    'uuid': transit_tls_path.uuid,
+    'packet_encoding': 'xudp',
+    'tls': {
+      'enabled': true,
+      'server_name': transit_tls_path.server_name,
+      'min_version': '1.3',
+      'alpn': ['h2', 'http/1.1'],
+      'certificate': transit_tls_path.certificate.strip().splitlines(),
+      'utls': {'enabled': true, 'fingerprint': transit_tls_fingerprint}
+    }
+  }],
+  'route': {'final': 'exit'}
+} | to_nice_json(ensure_ascii=False) }}
