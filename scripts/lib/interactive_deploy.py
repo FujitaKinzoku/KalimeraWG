@@ -3720,6 +3720,36 @@ def awg_legacy_server_obfuscation() -> dict[str, object]:
     return result
 
 
+AWG_HEADER_KEYS = ("h1", "h2", "h3", "h4")
+
+
+def awg_single_headers() -> dict[str, int]:
+    """Четыре разных одиночных значения H1-H4 для профиля с HeaderProtectionKey.
+
+    Диапазоны здесь вредны. При RandomTrailers приёмник (и модуль ядра, и
+    amneziawg-go) принимает за сообщение рукопожатия любой пакет не короче
+    ожидаемого и сверяет четыре байта по смещению S1, S2, S3 с диапазонами H1,
+    H2, H3. У пакета данных эти байты случайны, поэтому он отбрасывается с
+    вероятностью (|H1| + |H2| + |H3|) / 2^32: при диапазонах шириной в десятки
+    миллионов это около 3% пакетов в каждую сторону (измерено на amneziawg-go).
+    С одиночными значениями вероятность - три из 2^32.
+
+    Маскировку диапазон при этом не усиливает: с HeaderProtectionKey весь
+    заголовок шифруется потоком с отдельной затравкой в каждом пакете, и поле
+    типа на проводе случайно при любой ширине диапазона. Значения 1-4 не
+    выдаются: это номера сообщений обычного WireGuard.
+    """
+    values = secrets.SystemRandom().sample(range(5, 2_147_483_648), 4)
+    return dict(zip(AWG_HEADER_KEYS, values))
+
+
+def awg_headers_are_single(profile: object) -> bool:
+    """Все H1-H4 профиля - одиночные значения, а не диапазоны."""
+    return isinstance(profile, dict) and all(
+        re.fullmatch(r"[0-9]+", str(profile.get(key, ""))) for key in AWG_HEADER_KEYS
+    )
+
+
 def awg_mobile_awg3_obfuscation() -> dict[str, object]:
     """Создать полный профиль маскировки mobile/AWG3+ для AWG 3.1."""
     result = awg_server_obfuscation()
@@ -3727,6 +3757,7 @@ def awg_mobile_awg3_obfuscation() -> dict[str, object]:
         "jc": random_between((3, 7)),
         "jmin": random_between((6, 14)),
         "jmax": random_between((35, 70)),
+        **awg_single_headers(),
     })
     validate_awg_obfuscation(result)
     if any(int(result[key]) < 12 for key in ("s1", "s2", "s3", "s4")):
@@ -3787,9 +3818,149 @@ def awg3_transit_obfuscation() -> dict[str, object]:
         "i5": awg_quic_short_signature(
             (random_between((25, 40)), random_between((160, 220)))
         ),
+        # Канал всегда идёт с HeaderProtectionKey: диапазоны H ему не нужны.
+        **awg_single_headers(),
     })
     validate_awg_obfuscation(result)
     return result
+
+
+# Маскировка размеров пакетов: значения, с которыми её выпускает официальное
+# приложение AmneziaVPN. Дополнение задаётся вместе с хвостами намеренно: при
+# ненулевом дополнении пакеты данных получают только его (10-100 байт), а хвосты
+# достаются сообщениям рукопожатия. Хвосты без дополнения растягивают каждый
+# пакет данных до случайного размера и увеличивают трафик малых пакетов в 2-4 раза.
+SIZE_MASKING_PADDING = "10-100"
+SIZE_MASKING_TRANSIT_VALUES = {
+    "awg3_content_padding_addition": SIZE_MASKING_PADDING,
+    "awg3_random_trailers": True,
+    "awg3_disable_cookies": True,
+}
+SIZE_MASKING_MOBILE_VALUES = {
+    "awg3_mobile_content_padding_addition": SIZE_MASKING_PADDING,
+    "awg3_mobile_random_trailers": True,
+    "awg3_mobile_disable_cookies": True,
+}
+SIZE_MASKING_ENTRY_TRANSIT_KEYS = ("entry_awg1_obfuscation", "awg3_transit_obfuscation")
+SIZE_MASKING_EXIT_TRANSIT_KEYS = ("exit_awg_obfuscation", "awg3_transit_obfuscation")
+
+
+def awg_profile_with_single_headers(profile: dict, headers: dict[str, int]) -> dict:
+    """Тот же профиль с одиночными H1-H4; остальные поля не меняются."""
+    result = {**profile, **headers}
+    validate_awg_obfuscation(result)
+    return result
+
+
+def size_masking_state(production: Path) -> dict[str, bool]:
+    """Что из маскировки размеров включено в inventory: канал до EXIT и mobile."""
+    all_vars = load_yaml(production / "group_vars" / "all" / "main.yml")
+    entry_vars = load_yaml(production / "group_vars" / "entry.yml")
+    return {
+        "transit": bool(all_vars.get("awg3_random_trailers", False)),
+        "mobile": bool(entry_vars.get("awg3_mobile_random_trailers", False)),
+    }
+
+
+def set_size_masking(production: Path, enabled: bool) -> bool:
+    """Включить или выключить маскировку размеров пакетов AmneziaWG 3.1.
+
+    Касается только профилей с HeaderProtectionKey: канала ENTRY-EXIT (оба EXIT)
+    и клиентского mobile/AWG3+. При включении их H1-H4 заменяются одиночными
+    значениями: с прежними диапазонами хвосты давали около 3% потерь (см.
+    awg_single_headers). Остальные поля профилей, ключи и клиенты обычного
+    AmneziaWG и KeeneticOS не меняются. Хвосты обязаны совпадать на обеих
+    сторонах, поэтому клиентов mobile/AWG3+ после команды выпускают заново.
+    """
+    all_path = production / "group_vars" / "all" / "main.yml"
+    entry_path = production / "group_vars" / "entry.yml"
+    exit_path = production / "group_vars" / "exit.yml"
+    hosts_path = production / "hosts.yml"
+    if not all(path.is_file() for path in (all_path, entry_path, exit_path, hosts_path)):
+        fail("Для настройки маскировки размеров нужен production inventory")
+    all_vars, entry_vars, exit_vars = load_yaml(all_path), load_yaml(entry_path), load_yaml(exit_path)
+    hosts_document = load_yaml(hosts_path)
+    has_mobile = isinstance(entry_vars.get("entry_mobile_awg_obfuscation"), dict)
+    mobile_in_use = has_mobile and bool(entry_vars.get("entry_mobile_client_enabled", False))
+    state = size_masking_state(production)
+    active = state["transit"] and (state["mobile"] or not has_mobile)
+    if enabled and active:
+        print("Маскировка размеров пакетов уже включена.")
+        return False
+    if not enabled and not state["transit"] and not state["mobile"]:
+        print("Маскировка размеров пакетов уже выключена.")
+        return False
+
+    lines = (
+        [
+            "Канал ENTRY-EXIT и профиль mobile/AWG3+ получат дополнение размера",
+            f"пакетов ({SIZE_MASKING_PADDING} байт), случайные хвосты служебных сообщений и",
+            "молчание в ответ на повторённые рукопожатия. H1-H4 этих профилей станут",
+            "одиночными значениями: с диапазонами хвосты давали около 3% потерь.",
+        ]
+        if enabled
+        else [
+            "Канал ENTRY-EXIT и профиль mobile/AWG3+ вернутся к пакетам без",
+            "дополнения размера и хвостов. H1-H4 остаются как есть.",
+        ]
+    )
+    lines.append("Во время обновления зарубежный трафик прервётся на несколько минут.")
+    if mobile_in_use:
+        lines.append("Клиентов mobile/AWG3+ после обновления нужно выпустить заново.")
+    lines.append("Клиенты обычного AmneziaWG, KeeneticOS и VLESS не затрагиваются.")
+    ui_panel("МАСКИРОВКА РАЗМЕРОВ ПАКЕТОВ AMNEZIAWG", lines, "cyan")
+    if not prompt_bool("Продолжить", False):
+        fail("Маскировка размеров пакетов не изменена")
+
+    if not enabled:
+        for key, value in SIZE_MASKING_TRANSIT_VALUES.items():
+            all_vars[key] = "0" if isinstance(value, str) else False
+        if has_mobile:
+            for key, value in SIZE_MASKING_MOBILE_VALUES.items():
+                entry_vars[key] = "0" if isinstance(value, str) else False
+        yaml_write(all_path, all_vars)
+        yaml_write(entry_path, entry_vars)
+        print("Production inventory обновлён: маскировка размеров пакетов выключена.")
+        return True
+
+    # Канал до основного EXIT: одни и те же H на обеих сторонах.
+    entry_keys = [key for key in SIZE_MASKING_ENTRY_TRANSIT_KEYS if isinstance(entry_vars.get(key), dict)]
+    exit_keys = [key for key in SIZE_MASKING_EXIT_TRANSIT_KEYS if isinstance(exit_vars.get(key), dict)]
+    if not entry_keys or not exit_keys:
+        fail("В inventory нет профиля канала ENTRY-EXIT: маскировку размеров включить нельзя")
+    headers = awg_single_headers()
+    for key in entry_keys:
+        entry_vars[key] = awg_profile_with_single_headers(entry_vars[key], headers)
+    for key in exit_keys:
+        exit_vars[key] = awg_profile_with_single_headers(exit_vars[key], headers)
+
+    # Канал до резервного EXIT: свой набор H, тоже общий для двух сторон.
+    if standby_exit_configured(hosts_document):
+        standby = hosts_document["all"]["children"]["exit"]["hosts"][STANDBY_EXIT_HOST]
+        if not isinstance(standby, dict) or not isinstance(standby.get("exit_awg_obfuscation"), dict) \
+                or not isinstance(entry_vars.get("entry_standby_exit_obfuscation"), dict):
+            fail("В inventory нет профиля канала до резервного EXIT: выполните kalimera-deploy --resume")
+        standby_headers = awg_single_headers()
+        for key in SIZE_MASKING_EXIT_TRANSIT_KEYS:
+            if isinstance(standby.get(key), dict):
+                standby[key] = awg_profile_with_single_headers(standby[key], standby_headers)
+        entry_vars["entry_standby_exit_obfuscation"] = awg_profile_with_single_headers(
+            entry_vars["entry_standby_exit_obfuscation"], standby_headers
+        )
+
+    if has_mobile:
+        entry_vars["entry_mobile_awg_obfuscation"] = awg_profile_with_single_headers(
+            entry_vars["entry_mobile_awg_obfuscation"], awg_single_headers()
+        )
+        entry_vars.update(SIZE_MASKING_MOBILE_VALUES)
+    all_vars.update(SIZE_MASKING_TRANSIT_VALUES)
+
+    yaml_write(hosts_path, hosts_document)
+    yaml_write(exit_path, exit_vars)
+    yaml_write(entry_path, entry_vars)
+    yaml_write(all_path, all_vars)
+    print("Production inventory обновлён: маскировка размеров пакетов включена.")
+    return True
 
 
 def awg_client_obfuscation(
@@ -6364,6 +6535,20 @@ def main() -> None:
         help="при --resume менять путь до EXIT, только когда он перестал отвечать",
     )
     parser.add_argument(
+        "--enable-size-masking",
+        action="store_true",
+        help=(
+            "при --resume включить маскировку размеров пакетов AmneziaWG 3.1 на канале "
+            "ENTRY-EXIT и в профиле mobile/AWG3+; клиентов mobile/AWG3+ после этого "
+            "выпускают заново"
+        ),
+    )
+    parser.add_argument(
+        "--disable-size-masking",
+        action="store_true",
+        help="при --resume выключить маскировку размеров пакетов AmneziaWG 3.1",
+    )
+    parser.add_argument(
         "--enable-front-site",
         action="store_true",
         help=(
@@ -6648,6 +6833,8 @@ def main() -> None:
             ("--disable-fallback-transport", args.disable_fallback_transport),
             ("--enable-front-site", args.enable_front_site),
             ("--disable-front-site", args.disable_front_site),
+            ("--enable-size-masking", args.enable_size_masking),
+            ("--disable-size-masking", args.disable_size_masking),
         )
         if value
     ]
@@ -6783,6 +6970,10 @@ def main() -> None:
             enable_front_site(production)
         if args.disable_front_site:
             disable_front_site(production)
+        if args.enable_size_masking:
+            set_size_masking(production, True)
+        if args.disable_size_masking:
+            set_size_masking(production, False)
         if args.replace_front:
             prepare_front_replacement(production, vault_password)
         show_front_deploy_state(production)
@@ -7115,6 +7306,21 @@ def main() -> None:
             print(
                 "Сайт в корне FRONT выключен, каскад проверен. На всё, кроме пути VLESS, "
                 "FRONT снова отвечает 404."
+            )
+        elif args.enable_size_masking:
+            print(
+                "Маскировка размеров пакетов включена, каскад проверен. Клиентские конфиги "
+                "mobile/AWG3+ теперь другие, прежние не подключатся. Создайте каждого такого "
+                "клиента заново: vpn-user delete ИМЯ --yes, затем vpn-user ИМЯ mobile, и "
+                "замените конфиг на устройстве. Клиенты обычного AmneziaWG, KeeneticOS и "
+                "VLESS работают как раньше. Потери на канале: exit-path status. Описание: "
+                "docs/awg3.md."
+            )
+        elif args.disable_size_masking:
+            print(
+                "Маскировка размеров пакетов выключена, каскад проверен. Клиентов mobile/AWG3+ "
+                "создайте заново (vpn-user delete ИМЯ --yes, затем vpn-user ИМЯ mobile): "
+                "прежние конфиги не подключатся."
             )
         elif (
             args.enable_ru_proxy
