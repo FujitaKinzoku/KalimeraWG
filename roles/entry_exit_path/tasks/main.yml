@@ -12,9 +12,17 @@
       - entry_exit_path_fail_threshold | int >= 1
       - entry_exit_path_failback_seconds | int >= 0
       - entry_exit_path_drill_seconds | int >= 60
+      - entry_exit_path_loss_switch_percent | float > 0
+      - entry_exit_path_loss_clean_percent | float >= 0
+      - entry_exit_path_loss_clean_percent | float < entry_exit_path_loss_switch_percent | float
+      - entry_exit_path_loss_switch_minutes | int >= 2
+      - entry_exit_path_loss_switch_minutes | int <= 60
+      - entry_exit_path_loss_return_minutes | int >= 2
+      - entry_exit_path_loss_return_minutes | int <= 60
     fail_msg: >-
       Параметры переключателя путей EXIT заданы неверно: интервал в секундах,
-      число ответивших адресов не больше числа адресов, порог неудач от 1.
+      число ответивших адресов не больше числа адресов, порог неудач от 1,
+      порог чистого пути ниже порога ухода, окна потерь от 2 до 60 минут.
   when: entry_standby_exit_enabled | default(false) | bool
 
 # conntrack забывает соединения прежнего туннеля при переключении. Без него

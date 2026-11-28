@@ -989,6 +989,47 @@ def set_dns_via_exit(production: Path, enabled: bool) -> bool:
     return True
 
 
+LOSS_SWITCH_KEY = "entry_exit_path_loss_switch_enabled"
+
+
+def set_loss_switch(production: Path, enabled: bool) -> bool:
+    """Включить или выключить уход с пути до EXIT, который теряет пакеты.
+
+    Меняется одна переменная ENTRY; правило применяет переключатель путей после
+    обычного deploy. Без резервного EXIT уходить некуда, поэтому включение без
+    него отклоняется.
+    """
+    entry_path = production / "group_vars" / "entry.yml"
+    if not entry_path.is_file():
+        fail("Для настройки переключателя путей нужен production inventory")
+    entry_vars = load_yaml(entry_path)
+    if enabled and not entry_vars.get("entry_standby_exit_enabled"):
+        fail(
+            "Уход с теряющего пути работает только с резервным EXIT: без него уходить "
+            "некуда. Сначала подключите его: kalimera-deploy --resume --enable-standby-exit"
+        )
+    if bool(entry_vars.get(LOSS_SWITCH_KEY, False)) == enabled:
+        print(
+            "Уход с теряющего пути уже включён."
+            if enabled
+            else "Уход с теряющего пути уже выключен."
+        )
+        return False
+    if enabled:
+        entry_vars[LOSS_SWITCH_KEY] = True
+    else:
+        del entry_vars[LOSS_SWITCH_KEY]
+    yaml_write(entry_path, entry_vars)
+    print(
+        "Production inventory обновлён: трафик будет уходить с пути до EXIT, который "
+        "устойчиво теряет пакеты, если другой путь чист."
+        if enabled
+        else "Production inventory обновлён: путь до EXIT меняется, только когда перестал "
+        "отвечать."
+    )
+    return True
+
+
 _DOMAIN_RE = re.compile(
     r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
 )
@@ -1639,7 +1680,11 @@ def disable_standby_exit(production: Path, vault_password: Path) -> bool:
     hosts_document = load_yaml(hosts_path)
     entry_vars = load_yaml(entry_path)
     host_present = standby_exit_configured(hosts_document)
-    entry_keys = [key for key in entry_vars if key.startswith("entry_standby_exit_")]
+    # Вместе с резервным EXIT уходит и правило, которому без него некуда уводить трафик.
+    entry_keys = [
+        key for key in entry_vars
+        if key.startswith("entry_standby_exit_") or key == LOSS_SWITCH_KEY
+    ]
     # Прерванное отключение могло успеть убрать только хост: настройки ENTRY тогда
     # убираются этим же запуском.
     if not host_present and not entry_keys:
@@ -5875,6 +5920,19 @@ def main() -> None:
         help="при --resume вернуть зарубежные имена на серверы DoT, запросы идут с ENTRY",
     )
     parser.add_argument(
+        "--enable-loss-switch",
+        action="store_true",
+        help=(
+            "при --resume уводить трафик с пути до EXIT, который отвечает, но устойчиво "
+            "теряет пакеты, если другой путь чист; нужен резервный EXIT"
+        ),
+    )
+    parser.add_argument(
+        "--disable-loss-switch",
+        action="store_true",
+        help="при --resume менять путь до EXIT, только когда он перестал отвечать",
+    )
+    parser.add_argument(
         "--replace-front",
         action="store_true",
         help="при --resume подготовить новый FRONT без отключения прежнего",
@@ -6015,6 +6073,8 @@ def main() -> None:
             ("--disable-telegram", args.disable_telegram),
             ("--enable-dns-via-exit", args.enable_dns_via_exit),
             ("--disable-dns-via-exit", args.disable_dns_via_exit),
+            ("--enable-loss-switch", args.enable_loss_switch),
+            ("--disable-loss-switch", args.disable_loss_switch),
         )
         if value
     ]
@@ -6022,6 +6082,8 @@ def main() -> None:
         parser.error(f"{feature_flags[0]} используется только вместе с --resume")
     if args.enable_dns_via_exit and args.disable_dns_via_exit:
         parser.error("--enable-dns-via-exit и --disable-dns-via-exit нельзя указывать вместе")
+    if args.enable_loss_switch and args.disable_loss_switch:
+        parser.error("--enable-loss-switch и --disable-loss-switch нельзя указывать вместе")
     if args.enable_ru_proxy and args.disable_ru_proxy:
         parser.error("--enable-ru-proxy и --disable-ru-proxy нельзя указывать вместе")
     if args.enable_telegram and args.disable_telegram:
@@ -6297,6 +6359,10 @@ def main() -> None:
             set_dns_via_exit(production, True)
         if args.disable_dns_via_exit:
             set_dns_via_exit(production, False)
+        if args.enable_loss_switch:
+            set_loss_switch(production, True)
+        if args.disable_loss_switch:
+            set_loss_switch(production, False)
         update_saved_client_configs_cps(state_root / "clients")
         # Обновление пакетов AmneziaWG: полный набор компонентов или только сами
         # пакеты. В обоих случаях нужна транзакция пакетов с откатом.
@@ -6582,9 +6648,22 @@ def main() -> None:
             or args.disable_telegram
             or args.enable_dns_via_exit
             or args.disable_dns_via_exit
+            or args.enable_loss_switch
+            or args.disable_loss_switch
         ):
             # Итог называет то, что изменилось: общее "повторно применена" не говорило,
             # включилась ли функция.
+            if args.enable_loss_switch:
+                print(
+                    "Уход с теряющего пути включён, каскад проверен. Трафик уйдёт на другой "
+                    "EXIT, когда действующий путь устойчиво теряет пакеты, а второй чист; "
+                    "внешний адрес клиентов при этом сменится. Состояние: exit-path status."
+                )
+            if args.disable_loss_switch:
+                print(
+                    "Уход с теряющего пути выключен, каскад проверен. Путь до EXIT меняется, "
+                    "только когда перестал отвечать."
+                )
             if args.enable_dns_via_exit:
                 print(
                     "Зарубежные имена разрешает резолвер EXIT внутри туннеля, каскад проверен. "

@@ -33,6 +33,21 @@ entry_exit_path_slow_probe_seconds: 0.9
 # При какой доле потерь за последний час exit-path status и cascade-check
 # сообщают, что путь теряет пакеты, в процентах.
 entry_exit_path_loss_warn_percent: 2
+# Уход с пути, который отвечает, но теряет пакеты (docs/standby-exit.md).
+# Включается командой kalimera-deploy --resume --enable-loss-switch. Выключено -
+# путь меняется, только когда перестал отвечать. Каждый переход меняет внешний
+# адрес клиентов и обрывает их соединения, поэтому окна длинные, а возврат строже.
+entry_exit_path_loss_switch_enabled: false
+# Доля проверок с потерей за entry_exit_path_loss_switch_minutes, при которой
+# трафик уходит на другой путь. Доля проверок примерно вдвое больше доли
+# потерянных пакетов: 5% проверок - около 2,5% пакетов.
+entry_exit_path_loss_switch_percent: 5
+entry_exit_path_loss_switch_minutes: 10
+# Другой путь считается чистым, пока доля потерь на нём не выше этой и он всё
+# окно отвечал. Тот же порог - для возврата на основной путь, но за более
+# длинное окно entry_exit_path_loss_return_minutes.
+entry_exit_path_loss_clean_percent: 1
+entry_exit_path_loss_return_minutes: 30
 # Откуда exit-path speed загружает файл через туннель пути; {bytes} - размер в
 # байтах. Проверка показывает скорость и то, не замирает ли соединение после
 # первых килобайт: проверки пути - это подключения без передачи данных, и
