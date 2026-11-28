@@ -252,3 +252,36 @@ front_client_domain: "{{ front_origin_domain }}"
 # отдельными защищёнными JSON-файлами в следующем пакете управления
 # пользователями.
 front_subscription_enabled: false
+
+# Сайт в корне FRONT. Без него Nginx отвечает 404 на всё, кроме пути XHTTP:
+# домен с настоящим сертификатом, на котором нет ни одной страницы, выглядит
+# заглушкой для любого, кто его откроет или проверит автоматически. С сайтом
+# тот же Nginx отдаёт небольшой альбом генеративной графики: главную, страницы
+# листов, серии, список, ленту, карту сайта, значок и свою страницу 404.
+#
+# Содержимое выводится из front_site_seed, поэтому у каждой установки сайт
+# свой, а после замены FRONT остаётся прежним. Значения записывает установщик:
+# kalimera-deploy --resume --enable-front-site (существующий FRONT) либо мастер
+# подключения FRONT. Путь XHTTP сайту недоступен: сборщик отказывается
+# создавать адреса, которые с него начинаются.
+front_site_enabled: false
+front_site_seed: ""
+# День включения сайта: даты листов отсчитываются от него назад и при
+# следующих обновлениях каскада не сдвигаются.
+front_site_created: ""
+front_site_language: ru
+# Пустое название - сборщик выбирает его сам по зерну.
+front_site_title: ""
+# Имя для полных адресов в ленте, карте сайта и ссылке canonical: то же, по
+# которому подключаются клиенты (при CDN - домен CDN). Origin-домен сюда не
+# подставляется намеренно: страницы, отданные через CDN, не должны называть
+# адрес, который CDN скрывает. При замене FRONT это имя не меняется, поэтому
+# сайт на новом сервере получается тем же.
+front_site_domain: "{{ front_client_domain }}"
+front_site_root: /var/www/kalimera-site
+front_site_state_dir: /var/lib/kalimera-front-site
+front_site_config_path: /etc/kalimera-front-site/config.json
+front_site_command_path: /usr/local/libexec/kalimera-front-site
+# Сайт отдаётся только вместе с самим FRONT.
+front_site_active: >-
+  {{ (front_relay_enabled | default(false) | bool) and (front_site_enabled | default(false) | bool) }}

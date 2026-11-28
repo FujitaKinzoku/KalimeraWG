@@ -526,6 +526,93 @@
     state: started
   when: front_relay_enabled | default(false) | bool
 
+# Сайт в корне FRONT собирается до того, как Nginx получит конфигурацию со
+# ссылкой на его каталог: сервер ни на миг не указывает на пустое место.
+#
+# Каталоги сайта при отключении удаляются целиком, поэтому их пути проверяются
+# всегда, а не только при включённом сайте: ошибочное значение в inventory не
+# должно превратить отключение сайта в удаление чужого каталога.
+- name: "Проверка: каталоги сайта FRONT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_site_root is match('^/var/www/[A-Za-z0-9_-]+$')
+      - front_site_root != '/var/www/html'
+      - front_site_state_dir is match('^/var/lib/kalimera-[A-Za-z0-9_-]+$')
+      - front_site_config_path is match('^/etc/kalimera-[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$')
+      - front_site_command_path is match('^/usr/local/libexec/[A-Za-z0-9_-]+$')
+    fail_msg: >-
+      Каталоги сайта FRONT заданы неверно: корень сайта должен лежать прямо в
+      /var/www (и не быть /var/www/html, там файлы Certbot), состояние - в
+      /var/lib/kalimera-..., настройки - в /etc/kalimera-.../.
+
+- name: "Проверка: настройки сайта FRONT"
+  ansible.builtin.assert:
+    quiet: true
+    that:
+      - front_site_seed is match('^[0-9a-f]{32,64}$')
+      - front_site_created | string is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+      - front_site_language in ['ru', 'en']
+      - front_site_title | string | length <= 60
+      - front_site_domain | length > 0
+    fail_msg: >-
+      Сайт FRONT включён, но его настройки неполны. Их записывает установщик:
+      kalimera-deploy --resume --enable-front-site.
+  when: front_site_active | bool
+
+- name: "Установка: сборщик сайта FRONT"
+  ansible.builtin.copy:
+    src: kalimera-front-site.py
+    dest: "{{ front_site_command_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: front_site_active | bool
+
+- name: "Создание: каталог настроек сайта FRONT"
+  ansible.builtin.file:
+    path: "{{ front_site_config_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: front_site_active | bool
+
+- name: "Установка: настройки сайта FRONT"
+  ansible.builtin.copy:
+    dest: "{{ front_site_config_path }}"
+    content: "{{ front_site_settings | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  vars:
+    front_site_settings:
+      seed: "{{ front_site_seed }}"
+      created: "{{ front_site_created | string }}"
+      language: "{{ front_site_language }}"
+      title: "{{ front_site_title | string }}"
+      domain: "{{ front_site_domain }}"
+      reserved:
+        - "{{ front_xhttp_path }}"
+  when: front_site_active | bool
+
+# Сборщик сам решает, нужна ли работа: при прежних настройках и нетронутом
+# каталоге он ничего не меняет, и даты страниц остаются прежними.
+- name: "Сборка: сайт FRONT"
+  ansible.builtin.command:
+    argv:
+      - "{{ front_site_command_path }}"
+      - build
+      - --config
+      - "{{ front_site_config_path }}"
+      - --root
+      - "{{ front_site_root }}"
+      - --state
+      - "{{ front_site_state_dir }}"
+  register: front_site_build
+  changed_when: "'changed' in front_site_build.stdout_lines"
+  when: front_site_active | bool
+
 - name: "Установка: полная конфигурация Nginx (с TLS-блоком)"
   ansible.builtin.template:
     src: nginx-front.conf.j2
@@ -560,6 +647,21 @@
 
 - name: "Применение: конфигурация FRONT-релея"
   ansible.builtin.meta: flush_handlers
+
+# Выше Nginx уже перечитал конфигурацию без ссылки на каталог сайта, поэтому
+# удаление не оставляет сервер с несуществующим корнем.
+- name: "Удаление: сайт FRONT при отключении"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ front_site_root }}"
+    - "{{ front_site_root }}.new"
+    - "{{ front_site_root }}.old"
+    - "{{ front_site_state_dir }}"
+    - "{{ front_site_config_path | dirname }}"
+    - "{{ front_site_command_path }}"
+  when: not (front_site_active | bool)
 
 # Симметричный disable-branch (тот же идиом, что в roles/entry_watchdog) -
 # на случай ретрофита, когда FRONT уже был развёрнут, а затем отключён.

@@ -41,3 +41,8 @@ cascade_check_cdn_enabled: "{{ (groups['front'] | default([]) | length > 0) and 
 cascade_check_cdn_domain: >-
   {{ hostvars[groups['front'][0]].front_cdn_domain | default('')
      if (groups['front'] | default([]) | length > 0) else '' }}
+# Сайт в корне FRONT (front_site_enabled в inventory FRONT): при включённом
+# сайте CDN обязан отдавать главную страницу, а не прежний ответ 404.
+cascade_check_front_site_enabled: >-
+  {{ (groups['front'] | default([]) | length > 0)
+     and (hostvars[groups['front'][0]].front_site_enabled | default(false) | bool) }}

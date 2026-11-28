@@ -153,8 +153,10 @@ classify() {
             plan_action=front_backend ;;
         'служба Xray-core FRONT-релея'|'аплинк packet-up без тела доходит до Xray нового FRONT (напрямую, до commit замены)'|'аплинк packet-up через CDN доходит до Xray (GET без тела)')
             plan_action=xray ;;
-        'служба Nginx FRONT-релея'|'прямой TLS endpoint FRONT доступен')
+        'служба Nginx FRONT-релея'|'прямой TLS endpoint FRONT доступен'|'Nginx отдаёт главную страницу сайта FRONT')
             plan_action=nginx ;;
+        'сайт FRONT собран и не изменён')
+            plan_action=front_site ;;
         'реестр VLESS-пользователей согласован с Xray')
             plan_action=vless_sync ;;
         'TLS-сертификат FRONT origin-домена не близок к истечению')
@@ -232,7 +234,7 @@ readonly -a action_order=(
     awg_client awg_legacy awg_mobile transit transit_standby local_peers ru_zone sing_box routing
     mobile_firewall_apply mobile_firewall_remove unbound unbound_infra ru_dns_sync
     domain_sync dnsmasq
-    front_backend xray vless_sync nginx certbot
+    front_backend xray vless_sync front_site nginx certbot
     timer_audit timer_telegram timer_self timer_proxy_watch timer_exit_path
     timer_transport_guard transport_guard_run unit_maintenance
 )
@@ -268,6 +270,7 @@ action_title() {
         xray) echo 'перезапуск Xray-core' ;;
         vless_sync) echo 'синхронизация пользователей VLESS с Xray' ;;
         nginx) echo 'перезапуск Nginx' ;;
+        front_site) echo 'пересборка сайта FRONT' ;;
         certbot) echo 'продление TLS-сертификата' ;;
         timer_audit|timer_telegram|timer_self|timer_proxy_watch|timer_exit_path|timer_transport_guard) echo 'включение таймера' ;;
         transport_guard_run) echo 'запуск сторожа транспорта' ;;
@@ -405,6 +408,14 @@ run_action() {
 {% if awg_node_role | default('') == 'front' %}
         xray) restart_unit {{ front_xray_service_name | default('xray.service') | quote }} ;;
         nginx) restart_unit nginx.service ;;
+        front_site)
+            # Сборщик восстанавливает каталог по сохранённым настройкам; если
+            # каталог цел, он ничего не меняет.
+            {{ front_site_command_path | default('/usr/local/libexec/kalimera-front-site') | quote }} build \
+                --config {{ front_site_config_path | default('/etc/kalimera-front-site/config.json') | quote }} \
+                --root {{ front_site_root | default('/var/www/kalimera-site') | quote }} \
+                --state {{ front_site_state_dir | default('/var/lib/kalimera-front-site') | quote }} >/dev/null
+            ;;
         vless_sync) {{ front_vless_user_command_path | default('/usr/local/sbin/vless-user') | quote }} sync >/dev/null ;;
         certbot) systemctl start certbot.service ;;
 {% endif %}

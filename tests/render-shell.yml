@@ -762,6 +762,36 @@
             dest: "{{ rendered_shell_root }}/awg-health-front"
             mode: "0700"
 
+        # Проверки сайта в корне FRONT появляются только при включённом сайте:
+        # без отдельного варианта ShellCheck их не увидел бы. Значение задаётся
+        # через set_fact: defaults роли загружены include_vars, а он сильнее
+        # vars: на уровне задачи.
+        - name: Включение сайта в корне FRONT для отдельного варианта
+          ansible.builtin.set_fact:
+            front_site_enabled: true
+
+        - name: Формирование health-программы FRONT с сайтом в корне
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../roles/health/templates/awg-health.sh.j2"
+            dest: "{{ rendered_shell_root }}/awg-health-front-site"
+            mode: "0700"
+
+        - name: Выключение сайта в корне FRONT после отдельного варианта
+          ansible.builtin.set_fact:
+            front_site_enabled: false
+
+        - name: Проверка строк сайта в health-программе FRONT
+          ansible.builtin.shell: |
+            set -Eeuo pipefail
+            grep -Fq "check_minor 'сайт FRONT собран и не изменён' front_site_is_intact" \
+              {{ rendered_shell_root }}/awg-health-front-site
+            grep -Fq -- '--resolve front.example.invalid:443:127.0.0.1' \
+              {{ rendered_shell_root }}/awg-health-front-site
+            ! grep -Fq 'front_site_is_served' {{ rendered_shell_root }}/awg-health-front
+          args:
+            executable: /bin/bash
+          changed_when: false
+
         - name: Формирование программы самовосстановления FRONT
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../roles/health/templates/awg-self-heal.sh.j2"
@@ -862,6 +892,7 @@
               - "{{ rendered_shell_root }}/awg-health-entry-selected"
               - "{{ rendered_shell_root }}/awg-health-exit"
               - "{{ rendered_shell_root }}/awg-health-front"
+              - "{{ rendered_shell_root }}/awg-health-front-site"
               - "{{ rendered_shell_root }}/awg-health-front-standalone"
               - "{{ rendered_shell_root }}/self-heal-entry"
               - "{{ rendered_shell_root }}/self-heal-exit"

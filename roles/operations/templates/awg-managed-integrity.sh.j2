@@ -94,6 +94,8 @@ managed_files() {
 {{ front_vless_user_command_path | default('/usr/local/sbin/vless-user') }}
 {{ front_nginx_site_path | default('/etc/nginx/sites-available/front-relay.conf') }}
 /etc/letsencrypt/renewal-hooks/deploy/90-kalimerawg-front
+{{ front_site_command_path | default('/usr/local/libexec/kalimera-front-site') }}
+{{ front_site_config_path | default('/etc/kalimera-front-site/config.json') }}
 {% endif %}
 {% if awg3_transit_enabled | default(false) | bool %}
 {{ awg3_transit_setup_path }}
