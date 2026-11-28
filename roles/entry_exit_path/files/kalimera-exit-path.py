@@ -103,6 +103,9 @@ class Config:
         self.mode_file = Path(document["mode_file"])
         self.hold_file = Path(document["hold_file"]) if document.get("hold_file") else None
         self.dns_via_exit = bool(document.get("dns_via_exit", False))
+        # Пересылать зарубежные имена резолверам обоих EXIT, а не одному -
+        # действующего пути (см. sync_dns).
+        self.dns_both_exits = bool(document.get("dns_both_exits", False))
         self.notify_command = [str(part) for part in document.get("notify_command", [])]
         # Транспорты туннеля (см. раздел "Транспорт" ниже). Работавший транспорт
         # меняется после стольких секунд без ответа; только что выбранному даётся
@@ -837,9 +840,15 @@ def flush_connections(cfg: Config, previous: str) -> None:
 
 
 def sync_dns(cfg: Config, name: str) -> None:
-    """Направить зарубежные запросы DNS в резолвер действующего EXIT.
+    """Держать пересылку зарубежных запросов DNS на резолверах EXIT.
 
-    Переводятся только зоны, которые уже смотрят в резолвер одного из EXIT: корневая
+    Обычно Unbound пересылает их резолверам обоих EXIT и сам обходит тот, что не
+    отвечает: тогда здесь остаётся только вернуть оба адреса, если пересылка
+    сузилась до одного (состояние прежней версии, ручная команда). При
+    dns_both_exits: false резолвер один - сервера, через который идёт трафик, - и
+    при смене пути пересылка переводится на него.
+
+    Трогаются только зоны, которые уже смотрят в резолвер одного из EXIT: корневая
     и исключения se-domain внутри российских зон. Пока Unbound работает через серверы
     DoT - режим выключен либо идёт первое включение и резолвер на EXIT ещё не
     установлен, - пересылка не трогается: иначе зарубежные имена перестали бы
@@ -851,7 +860,14 @@ def sync_dns(cfg: Config, name: str) -> None:
     peer = str(cfg.paths[name].get("peer_tunnel_address", ""))
     if not control or not peer:
         return
-    peers = {str(path.get("peer_tunnel_address", "")) for path in cfg.paths.values()} - {""}
+    ordered = [peer] + [
+        str(cfg.paths[other].get("peer_tunnel_address", ""))
+        for other in PATH_NAMES
+        if other != name and cfg.paths[other].get("peer_tunnel_address")
+    ]
+    peers = set(ordered)
+    wanted = ordered if cfg.dns_both_exits else [peer]
+    targets = [f"{address}@53" for address in wanted]
     try:
         listing = subprocess.run(
             [control, "list_forwards"], capture_output=True, text=True, timeout=10, check=False
@@ -865,15 +881,32 @@ def sync_dns(cfg: Config, name: str) -> None:
         if len(words) < 4 or words[1:3] != ["IN", "forward"]:
             continue
         addresses = {word.split("@")[0].split("#")[0] for word in words[3:]}
-        if not addresses & peers or addresses == {peer}:
+        if not addresses & peers or addresses == set(wanted):
             continue
         if words[0] == ".":
-            run_quiet([control, "forward", f"{peer}@53"])
+            run_quiet([control, "forward", *targets])
         else:
             run_quiet([control, "forward_remove", words[0]])
-            run_quiet([control, "forward_add", words[0], f"{peer}@53"])
+            run_quiet([control, "forward_add", words[0], *targets])
         changed = True
     if changed:
+        run_quiet([control, "flush_infra", "all"])
+
+
+def flush_dns_infra(cfg: Config) -> None:
+    """Сбросить в Unbound сведения о недоступности резолвера EXIT.
+
+    Пока путь не отвечает, запросы к его резолверу остаются без ответа, и Unbound
+    с каждым разом ждёт дольше. Примерно через три минуты он считает резолвер
+    неработающим и перестаёт к нему обращаться. Измерено на Unbound 1.19.2: после
+    возвращения связи зарубежные имена ещё не разрешались. Сам Unbound теперь
+    проверяет такой резолвер заново за 20-30 секунд (настройки роли entry_dns);
+    сброс здесь возвращает ответы сразу, как только путь снова отвечает.
+    """
+    if not cfg.dns_via_exit:
+        return
+    control = shutil.which("unbound-control")
+    if control:
         run_quiet([control, "flush_infra", "all"])
 
 
@@ -909,6 +942,7 @@ def tick(cfg: Config, now: int | None = None) -> dict:
     now = int(time.time()) if now is None else now
     state = read_state(cfg)
     mode = read_mode(cfg)
+    was_failing = int(state["paths"][state["active"]]["fail"]) > 0
     for name in PATH_NAMES:
         record_probe(state, name, probe_path(cfg, name), cfg, now)
     manage_transports(cfg, state, now)
@@ -939,6 +973,10 @@ def tick(cfg: Config, now: int | None = None) -> dict:
     if current_route_interface(cfg) != cfg.interface(state["active"]):
         set_route(cfg, state["active"])
     sync_dns(cfg, state["active"])
+    # Путь, который несёт трафик, не отвечал и ответил снова: его резолвер опять
+    # доступен, а Unbound мог успеть счесть его неработающим.
+    if was_failing and int(state["paths"][state["active"]]["fail"]) == 0:
+        flush_dns_infra(cfg)
     return state
 
 

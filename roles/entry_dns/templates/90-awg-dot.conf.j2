@@ -14,9 +14,22 @@ server:
     # Prefetch обновляет популярные записи до истечения TTL, поэтому клиент реже
     # ждёт промах. Запросы идут только к именам, которые уже запрашивались.
     prefetch: {{ 'yes' if (entry_dns_prefetch | default(true) | bool) else 'no' }}
+{% set forward_via_exit = entry_dns_via_exit_effective | default(entry_dns_default_via_exit | default(false)) | bool %}
+{% if forward_via_exit %}
+    # Резолвер EXIT один, и стоит он за туннелем. Сведения о нём живут недолго:
+    # после сбоя связи Unbound быстрее начинает с чистого листа.
+    infra-host-ttl: {{ entry_dns_via_exit_infra_host_ttl | default(60) | int }}
+{% else %}
     # Данные о задержке до серверов DoT живут дольше, чем по умолчанию: реже
     # проверяется второй сервер, а его проверки не попадают на запросы клиентов.
     infra-host-ttl: {{ entry_dns_infra_host_ttl | default(3600) | int }}
+{% endif %}
+    # Сервер пересылки, не отвечавший около трёх минут, Unbound считает
+    # неработающим и больше к нему не обращается, пока не истечёт infra-host-ttl.
+    # Измерено на Unbound 1.19.2: после трёх минут без связи зарубежные имена не
+    # разрешались и через 150 секунд после её возвращения. С этой настройкой Unbound
+    # продолжает проверять такой сервер, и ответы возвращаются за 20-30 секунд.
+    infra-keep-probing: {{ 'yes' if (entry_dns_infra_keep_probing | default(true) | bool) else 'no' }}
     # Размеры кэша ответов и RRset: больше записей остаётся в памяти без вытеснения.
     msg-cache-size: {{ entry_dns_msg_cache_size | default('32m') }}
     rrset-cache-size: {{ entry_dns_rrset_cache_size | default('64m') }}
@@ -51,8 +64,17 @@ forward-zone:
     name: "."
 {% if entry_dns_via_exit_effective | default(entry_dns_default_via_exit | default(false)) | bool %}
     # Резолвер EXIT внутри туннеля: запросы о зарубежных узлах с ENTRY наружу не
-    # уходят. При работе через резервный EXIT адрес меняет переключатель путей.
+    # уходят.
     forward-addr: {{ awg3_peer_tunnel_address }}@53
+{% if (entry_dns_via_exit_both | default(true) | bool)
+      and (entry_standby_exit_enabled | default(false) | bool)
+      and (entry_standby_exit_peer_tunnel_address | default('') | string | length > 0) %}
+    # Резолвер резервного EXIT, в его туннеле. Unbound сам обходит резолвер,
+    # который не отвечает: измерено, что при двух резолверах пропадание одного
+    # туннеля на 200 секунд не оставило без ответа ни одного запроса. Без этой
+    # строки пересылку между серверами переводит переключатель путей.
+    forward-addr: {{ entry_standby_exit_peer_tunnel_address }}@53
+{% endif %}
 {% else %}
     forward-tls-upstream: yes
 {% for upstream in entry_dns_effective_dot_upstreams | default(entry_dns_dot_upstreams_resolved) %}
